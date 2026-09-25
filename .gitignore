@@ -1,0 +1,27 @@
+node_modules/
+dist/
+build/
+*.log
+.env
+.env.local
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+data/*.key
+.DS_Store
+
+# Local review/verify tool artifacts
+/.review-*.json
+/tmp-*.txt
+
+# Tauri
+src-tauri/target/
+src-tauri/resources/
+src-tauri/gen/
+
+# Local OpenSpec tooling
+/.codex/skills/openspec-*/
+/.opencode/commands/opsx-*.md
+/.opencode/skills/openspec-*/
+/openspec/

@@ -1,0 +1,136 @@
+import { spawn } from 'node:child_process';
+import { LlmProviderError, summarizeProcessError } from '../types.js';
+
+const CACHE_TTL_MS = 60_000;
+const STDOUT_LIMIT_BYTES = 1_000_000;
+const STDERR_LIMIT_BYTES = 8_000;
+const COMMAND_TIMEOUT_MS = 15_000;
+
+interface CacheEntry {
+  value: string;
+  expiresAt: number;
+}
+
+const cache = new Map<string, CacheEntry>();
+
+export function clearCredentialCache(): void {
+  cache.clear();
+}
+
+export async function resolveCredentialCommand(
+  command: string,
+  provider: string,
+  model: string,
+  runner: (command: string) => Promise<string> = runCredentialCommand,
+  now: () => number = Date.now,
+): Promise<string> {
+  const cached = cache.get(command);
+  if (cached && cached.expiresAt > now()) return cached.value;
+  const token = (await runner(command)).trim();
+  if (!token) {
+    throw new LlmProviderError({
+      code: 'provider_authentication',
+      message: 'The credential command produced no output.',
+      provider,
+      model,
+    });
+  }
+  cache.set(command, { value: token, expiresAt: now() + CACHE_TTL_MS });
+  return token;
+}
+
+export async function resolveProfileSecret(
+  profile: { secret?: string; credentialCommand?: string },
+  provider: string,
+  model: string,
+  runner: (command: string) => Promise<string> = runCredentialCommand,
+  now: () => number = Date.now,
+): Promise<string> {
+  const command = profile.credentialCommand?.trim();
+  if (command) return resolveCredentialCommand(command, provider, model, runner, now);
+  return (profile.secret ?? '').trim();
+}
+
+function runCredentialCommand(command: string): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const child = spawn(command, {
+      shell: true,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: COMMAND_TIMEOUT_MS,
+      env: process.env,
+    });
+    let settled = false;
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+
+    const fail = (error: LlmProviderError): void => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+
+    child.stdout?.on('data', (chunk: Buffer) => {
+      stdoutBytes += chunk.byteLength;
+      if (stdoutBytes > STDOUT_LIMIT_BYTES) {
+        child.kill();
+        // SECURITY: never include stdout in an error message - it holds the token.
+        fail(new LlmProviderError({
+          code: 'provider_authentication',
+          message: 'The credential command produced too much output.',
+          provider: 'credential-command',
+          model: '',
+        }));
+        return;
+      }
+      stdoutChunks.push(chunk);
+    });
+
+    child.stderr?.on('data', (chunk: Buffer) => {
+      if (stderrBytes >= STDERR_LIMIT_BYTES) return;
+      stderrBytes += chunk.byteLength;
+      stderrChunks.push(chunk);
+    });
+
+    child.on('error', (error) => {
+      fail(new LlmProviderError({
+        code: 'provider_authentication',
+        message: 'The credential command could not run.',
+        provider: 'credential-command',
+        model: '',
+        cause: error,
+      }));
+    });
+
+    // 'close' (not 'exit') guarantees stdout has been fully consumed before we
+    // read the token; 'exit' can fire while stdio is still flushing, truncating it.
+    child.on('close', (code) => {
+      if (settled) return;
+      if (code === 0) {
+        settled = true;
+        resolve(Buffer.concat(stdoutChunks).toString('utf8'));
+        return;
+      }
+      if (child.killed) {
+        fail(new LlmProviderError({
+          code: 'provider_authentication',
+          message: 'The credential command timed out.',
+          provider: 'credential-command',
+          model: '',
+        }));
+        return;
+      }
+      const stderr = Buffer.concat(stderrChunks).toString('utf8').slice(0, STDERR_LIMIT_BYTES);
+      // SECURITY: only stderr is surfaced here; stdout carries the token and is never included.
+      const detail = stderr.trim() ? ` ${summarizeProcessError(stderr)}` : '';
+      fail(new LlmProviderError({
+        code: 'provider_authentication',
+        message: `The credential command exited with code ${code ?? 'unknown'}.${detail}`,
+        provider: 'credential-command',
+        model: '',
+      }));
+    });
+  });
+}
