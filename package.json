@@ -1,0 +1,36 @@
+{
+  "name": "pulse-metric-studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pulse Metric Studio by ahillspace, a local desktop workbench for Tableau Pulse metrics.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "packages/shared",
+    "packages/core",
+    "packages/pulse",
+    "packages/server",
+    "packages/web"
+  ],
+  "scripts": {
+    "preinstall": "node scripts/node-runtime.mjs",
+    "dev": "node scripts/dev.mjs",
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "pretest": "npm run build -w @pulse-metric-studio/shared && npm run build -w @pulse-metric-studio/core && npm run build -w @pulse-metric-studio/pulse",
+    "test": "node scripts/run-tests.mjs scripts && npm run test --workspaces --if-present",
+    "start": "node packages/server/dist/index.js",
+    "tauri": "tauri",
+    "tauri:dev": "node scripts/dev.mjs --desktop",
+    "tauri:build": "tauri build",
+    "icons": "node scripts/render-icons.mjs && tauri icon src-tauri/icons/app-icon.png --output src-tauri/icons"
+  },
+  "devDependencies": {
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/cli": "^2.11.4",
+    "esbuild": "^0.28.2",
+    "sharp": "^0.35.4"
+  }
+}

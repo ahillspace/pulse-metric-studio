@@ -1,0 +1,233 @@
+{
+  "capture": {
+    "product": "Tableau Cloud Pulse",
+    "capturedAt": "2026-08-29",
+    "restApiVersion": "3.27",
+    "podVersion": "sanitized-tableau-cloud-pod",
+    "siteId": "site-captured-001",
+    "datasourceId": "datasource-captured-001",
+    "definitionId": "definition-captured-001",
+    "credentialsIncluded": false
+  },
+  "contracts": {
+    "definition": {
+      "source": "https://help.tableau.com/current/api/rest_api/en-us/REST/TAG/index.html#tag/Pulse",
+      "response": {
+        "definition": {
+          "metadata": {
+            "id": "definition-captured-001",
+            "name": "Captured sales definition"
+          },
+          "specification": {
+            "datasource": {
+              "id": "datasource-captured-001"
+            },
+            "basic_specification": {
+              "measure": {
+                "field": "Sales",
+                "aggregation": "AGGREGATION_SUM"
+              },
+              "time_dimension": {
+                "field": "Order Date"
+              }
+            }
+          },
+          "extension_options": {
+            "allowed_dimensions": [
+              "Region",
+              "Category"
+            ]
+          }
+        }
+      }
+    },
+    "exactMetrics": {
+      "source": "https://help.tableau.com/current/api/rest_api/en-us/REST/TAG/index.html#tag/Pulse",
+      "responses": {
+        "default": {
+          "metric": {
+            "id": "metric-default-001",
+            "definition_id": "definition-captured-001",
+            "site_id": "site-captured-001",
+            "is_default": true,
+            "specification": {
+              "filters": [],
+              "measurement_period": {
+                "granularity": "GRANULARITY_BY_MONTH",
+                "range": "RANGE_CURRENT_PARTIAL"
+              },
+              "comparison": {
+                "comparison": "TIME_COMPARISON_PREVIOUS_PERIOD"
+              }
+            }
+          }
+        },
+        "timeframe": {
+          "metric": {
+            "id": "metric-timeframe-001",
+            "definition_id": "definition-captured-001",
+            "site_id": "site-captured-001",
+            "is_default": false,
+            "specification": {
+              "filters": [],
+              "measurement_period": {
+                "granularity": "GRANULARITY_BY_DAY",
+                "range": "RANGE_BY_CONFIG",
+                "last_x_period": {
+                  "period": 30,
+                  "period_type": "GRANULARITY_BY_DAY",
+                  "include_current_period": true
+                }
+              },
+              "comparison": {
+                "comparison": "TIME_COMPARISON_PREVIOUS_PERIOD"
+              }
+            }
+          }
+        },
+        "dimensional": {
+          "metric": {
+            "id": "metric-dimensional-001",
+            "definition_id": "definition-captured-001",
+            "site_id": "site-captured-001",
+            "is_default": false,
+            "specification": {
+              "filters": [
+                {
+                  "field": "Region",
+                  "operator": "OPERATOR_EQUAL",
+                  "categorical_values": [
+                    {
+                      "string_value": "Captured West"
+                    }
+                  ],
+                  "include_null": false
+                }
+              ],
+              "measurement_period": {
+                "granularity": "GRANULARITY_BY_MONTH",
+                "range": "RANGE_CURRENT_PARTIAL"
+              },
+              "comparison": {
+                "comparison": "TIME_COMPARISON_PREVIOUS_PERIOD"
+              }
+            }
+          }
+        }
+      }
+    },
+    "getOrCreate": {
+      "source": "https://help.tableau.com/current/api/rest_api/en-us/REST/TAG/index.html#tag/Pulse/operation/MetricQueryService_GetOrCreateMetric",
+      "request": {
+        "definition_id": "definition-captured-001",
+        "specification": {
+          "filters": [],
+          "measurement_period": {
+            "granularity": "GRANULARITY_BY_DAY",
+            "range": "RANGE_BY_CONFIG",
+            "last_x_period": {
+              "period": 30,
+              "period_type": "GRANULARITY_BY_DAY",
+              "include_current_period": true
+            }
+          },
+          "comparison": {
+            "comparison": "TIME_COMPARISON_PREVIOUS_PERIOD"
+          }
+        }
+      },
+      "successResponse": {
+        "metric": {
+          "metadata": {
+            "id": "metric-timeframe-001",
+            "name": "captured_metric_timeframe_001"
+          }
+        },
+        "is_metric_created": true
+      },
+      "errorResponse": {
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "message": "The metric specification is invalid."
+        }
+      }
+    },
+    "vdsFields": {
+      "source": "https://help.tableau.com/current/api/vizql-data-service/en-us/docs/vds_get_data_source_info.html",
+      "response": {
+        "data": [
+          {
+            "name": "Order Date",
+            "caption": "Order Date",
+            "dataType": "DATE",
+            "role": "DIMENSION"
+          },
+          {
+            "name": "Created At",
+            "caption": "Created At",
+            "dataType": "DATETIME",
+            "role": "DIMENSION"
+          }
+        ]
+      }
+    },
+    "vdsDistinctValues": {
+      "source": "https://help.tableau.com/current/api/vizql-data-service/en-us/docs/vds_create_queries.html",
+      "response": {
+        "data": [
+          [
+            "Captured Central"
+          ],
+          [
+            "Captured West"
+          ],
+          [
+            null
+          ]
+        ]
+      }
+    },
+    "subscriptions": {
+      "source": "https://help.tableau.com/current/api/rest_api/en-us/REST/TAG/index.html#tag/Pulse",
+      "response": {
+        "subscriptions": {
+          "subscription": [
+            {
+              "id": "subscription-user-001",
+              "follower": {
+                "user_id": "user-captured-001",
+                "name": "Captured User"
+              }
+            },
+            {
+              "id": "subscription-group-001",
+              "subscription": {
+                "follower": {
+                  "group": {
+                    "id": "group-captured-001",
+                    "name": "Captured Group"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "followerCounts": {
+      "source": "https://help.tableau.com/current/api/rest_api/en-us/REST/TAG/index.html#tag/Pulse",
+      "response": {
+        "counts": [
+          {
+            "id": "metric-default-001",
+            "count": 2
+          },
+          {
+            "id": "metric-timeframe-001",
+            "count": 0
+          }
+        ]
+      }
+    }
+  }
+}
