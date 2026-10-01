@@ -30,4 +30,4 @@ Keep automated tests isolated from live Tableau and AI services.
 Do not introduce automated browser tests or live-provider test tooling without an explicit request.
 Do not invoke no-mistakes tooling unless explicitly requested.
 Desktop and live Tableau workflow validation is user-led.
-Keep the repository private until the owner chooses a license and authorizes publication.
+Keep the repository private until the owner authorizes publication.

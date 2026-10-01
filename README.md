@@ -3,6 +3,7 @@
 Pulse Metric Studio by ahillspace is a local desktop workbench for authoring and managing Tableau Pulse metrics.
 Connect a Tableau Cloud site, select a published datasource, configure metric definitions and filters, and publish or manage metrics with optional AI assistance.
 The application runs on your machine and connects to Tableau and the AI provider you configure.
+Pulse Metric Studio is independent and is not affiliated with Tableau or Salesforce.
 
 ## Development
 
@@ -63,4 +64,7 @@ Desktop workflows and Tableau publishing require user-led manual validation.
 
 Product distribution is planned through GitHub Releases in `ahillspace/pulse-metric-studio`.
 Documentation lives in this repository and support belongs in its Issues.
-No license has been selected yet.
+
+## License
+
+Pulse Metric Studio is licensed under [Apache 2.0](LICENSE).

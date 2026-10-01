@@ -3,6 +3,7 @@ name = "pulse-metric-studio"
 version = "0.1.0"
 description = "Desktop metric authoring for Tableau Pulse"
 authors = ["ahillspace"]
+license = "Apache-2.0"
 edition = "2021"
 
 [build-dependencies]
