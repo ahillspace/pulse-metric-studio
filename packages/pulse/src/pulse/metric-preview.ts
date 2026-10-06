@@ -71,8 +71,17 @@ export function previewCardInput(definition: PulseDefinition, metric: PulseExact
   const groups = response.result.insight_groups;
   if (!Array.isArray(groups)) return unavailable('Tableau has no insights available for this metric.');
   const insights: Record<string, unknown>[] = [];
+  const summaryCharts: Record<string, unknown>[] = [];
   for (const group of groups) {
-    if (!record(group) || group.error || !Array.isArray(group.insights)) continue;
+    if (!record(group) || group.error) continue;
+    if (group.type === 'ban' && Array.isArray(group.summaries)) {
+      for (const summary of group.summaries) {
+        if (!record(summary) || summary.error || summary.skip_details || !record(summary.result)) continue;
+        const chart = summary.result.viz;
+        if (record(chart) && Object.keys(chart).length > 0) summaryCharts.push(chart);
+      }
+    }
+    if (!Array.isArray(group.insights)) continue;
     for (const entry of group.insights) {
       if (!record(entry) || entry.error || entry.skip_details || !record(entry.result)) continue;
       const insight = entry.result;
@@ -82,9 +91,11 @@ export function previewCardInput(definition: PulseDefinition, metric: PulseExact
       insights.push(insight);
     }
   }
+  if (summaryCharts.length !== 1)
+    return unavailable('Tableau has no unambiguous summary chart available for this metric.');
   const period = insights.filter((insight) => insight.type === 'popc');
-  if (period.length !== 1 || !record(period[0]!.viz) || !Object.keys(period[0]!.viz as object).length)
-    return unavailable('Tableau has no unambiguous period comparison chart available for this metric.');
+  if (period.length !== 1)
+    return unavailable('Tableau has no unambiguous period comparison available for this metric.');
   // The preview shows the highest scored successful supporting insight. Provider order breaks ties.
   const top = insights.filter((insight) => insight.type !== 'popc')
     .sort((a, b) => Number(b.score) - Number(a.score))[0];
@@ -97,7 +108,7 @@ export function previewCardInput(definition: PulseDefinition, metric: PulseExact
         measurementPeriod: specification.measurement_period,
         filters: specification.filters,
       },
-      viz: period[0]!.viz,
+      viz: summaryCharts[0]!,
       insights: {
         popc: { markup: period[0]!.markup, facts: period[0]!.facts },
         top: { markup: top.markup, facts: top.facts },
