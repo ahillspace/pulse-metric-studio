@@ -8,7 +8,7 @@ import {
 import { useConnection } from "../connections/controller";
 import { useActivity } from "../activity/controller";
 import { PublicationResult } from "../author/PublicationResult";
-import { Modal } from "./ui";
+import { BusyLabel, Modal } from "./ui";
 
 export function PublishSection({
   onActivity,
@@ -59,7 +59,7 @@ export function PublishSection({
                     : undefined
                 }
               >
-                {entry.previewBusy ? "Preparing..." : "Publish"}
+                <BusyLabel busy={entry.previewBusy} idle="Publish" active="Preparing..." />
               </button>,
               document.getElementById("pulse-header-actions")!,
             )}
@@ -116,11 +116,9 @@ export function PublishSection({
                     : "Publish reviewed draft"
                 }
               >
-                {entry.publishBusy
-                  ? "Publishing..."
-                  : entry.publishCommandId
+                <BusyLabel busy={entry.publishBusy} idle={entry.publishCommandId
                     ? "Check publication result"
-                    : "Publish metrics"}
+                    : "Publish metrics"} active="Publishing..." />
               </button>
             </>
           }

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useConnection } from "./controller";
 import { useNotices } from "../shell/notifications";
+import { BusyLabel } from "../components/ui";
 import {
   canCompensateStagedCredential,
   deleteNativeCredential,
@@ -460,7 +461,7 @@ export function ConnectCard() {
               disabled={connecting || !canSubmitNew}
               onClick={() => void connectNew()}
             >
-              {connecting ? "Connecting..." : "Connect and save"}
+              <BusyLabel busy={connecting} idle="Connect and save" active="Connecting..." />
             </button>
           )}
 
@@ -471,7 +472,7 @@ export function ConnectCard() {
                 disabled={connecting}
                 onClick={() => void activateSaved()}
               >
-                {connecting ? "Connecting..." : "Use saved connection"}
+                <BusyLabel busy={connecting} idle="Use saved connection" active="Connecting..." />
               </button>
               <button
                 className="btn"

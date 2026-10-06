@@ -23,7 +23,7 @@ import {
 } from "../registry/views";
 import { VariantDialog } from "../registry/VariantDialog";
 import { FollowTargetModal } from "./FollowTargetModal";
-import { Modal } from "./ui";
+import { BusyLabel, Modal } from "./ui";
 import { createPreviewController } from "../registry/preview-controller";
 import { MetricPreview } from "../registry/MetricPreview";
 
@@ -551,9 +551,7 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
                 }
                 onClick={() => void registry.executeDelete()}
               >
-                {registry.busy === "delete"
-                  ? "Deleting..."
-                  : "Delete reviewed resources"}
+                <BusyLabel busy={registry.busy === "delete"} idle="Delete reviewed resources" active="Deleting..." />
               </button>
             </>
           }

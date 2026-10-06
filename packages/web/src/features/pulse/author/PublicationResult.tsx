@@ -4,8 +4,9 @@ import type { PulsePublishReceipt } from "@pulse-metric-studio/shared";
 import { contextMatches } from "./controller";
 import { useConnection } from "../connections/controller";
 import { useActivity } from "../activity/controller";
-import { Modal } from "../components/ui";
+import { BusyLabel, Modal } from "../components/ui";
 import { PublishedMetrics } from "./PublishedMetrics";
+import { ConfirmUndo } from "../activity/ConfirmUndo";
 
 export function PublicationResult({ receipt, onClose, onActivity }: {
   receipt: PulsePublishReceipt;
@@ -15,6 +16,7 @@ export function PublicationResult({ receipt, onClose, onActivity }: {
   const session = useConnection((state) => state.session);
   const activity = useActivity();
   const [confirmGroup, setConfirmGroup] = useState(false);
+  const [confirmUndo, setConfirmUndo] = useState(false);
   const [linkError, setLinkError] = useState<string | null>(null);
   const connected = Boolean(receipt.context && contextMatches(receipt.context, session));
   const busy = activity.undoBusy || activity.groupBusy || receipt.publishing;
@@ -37,9 +39,11 @@ export function PublicationResult({ receipt, onClose, onActivity }: {
     [receipt.unattemptedCount, "not sent"],
   ].filter(([count]) => Number(count) > 0) as Array<[number, string]>;
   const errors = [linkError, activity.undoReceiptId === receipt.id ? activity.undoError : null, activity.groupReceiptId === receipt.id ? activity.groupError : null];
+  if (confirmUndo) return <ConfirmUndo receipt={receipt} busy={activity.undoBusy} disabled={!canUndo || !connected || busy}
+    onCancel={() => setConfirmUndo(false)} onConfirm={() => void activity.undo(receipt.id).then(() => setConfirmUndo(false))} />;
   if (confirmGroup) return <Modal title={`Delete "${audience}" group?`} onClose={busy ? undefined : () => setConfirmGroup(false)} actions={<>
     <button className="btn" disabled={busy} onClick={() => setConfirmGroup(false)}>Cancel</button>
-    <button className="btn danger" disabled={busy || !connected} onClick={() => void activity.deleteGroup(receipt.id, group.id!).then(() => setConfirmGroup(false))}>{activity.groupBusy ? "Deleting..." : "Delete group"}</button>
+    <button className="btn danger" disabled={busy || !connected} onClick={() => void activity.deleteGroup(receipt.id, group.id!).then(() => setConfirmGroup(false))}><BusyLabel busy={activity.groupBusy} idle="Delete group" active="Deleting..." /></button>
   </>}><p>Delete this group, its memberships, and its subscriptions from Tableau. Metrics remain.</p><p>This cannot be undone.</p></Modal>;
   return <Modal title="Publication results" className="pulse-publication-result" onClose={busy ? undefined : onClose} actions={<>
     <button className="btn" disabled={!pulseUrl} onClick={() => {
@@ -47,7 +51,7 @@ export function PublicationResult({ receipt, onClose, onActivity }: {
       void openTableauUrl(pulseUrl).catch((error: unknown) => setLinkError(error instanceof Error ? error.message : "Could not open Tableau Pulse."));
     }}>View in Pulse</button>
     <button className="btn" onClick={onActivity}>View in Activity</button>
-    <button className="btn danger" disabled={!canUndo || !connected || busy} onClick={() => void activity.undo(receipt.id)}>{activity.undoBusy ? "Undoing..." : "Undo Publication"}</button>
+    <button className="btn danger" disabled={!canUndo || !connected || busy} onClick={() => setConfirmUndo(true)}><BusyLabel busy={activity.undoBusy} idle="Undo Publication" active="Undoing..." /></button>
     <button className="btn danger" disabled={!canDeleteGroup || !connected || busy} onClick={() => setConfirmGroup(true)}>{group.deletion?.status === "deleted" ? "Group deleted" : `Delete "${audience}" Group`}</button>
   </>}>
     <header className="pulse-result-summary">

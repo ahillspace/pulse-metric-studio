@@ -1,10 +1,11 @@
 import { useState } from "react";
 import { aggregationLabel } from "../metric-labels";
-import { Modal } from "../components/ui";
+import { BusyLabel, Modal } from "../components/ui";
 import type { PulsePublishReceipt } from "@pulse-metric-studio/shared";
 import { contextMatches } from "../author/controller";
 import { useConnection } from "../connections/controller";
 import { useActivity } from "./controller";
+import { ConfirmUndo } from "./ConfirmUndo";
 import "./activity.css";
 
 const followLabels = {
@@ -26,6 +27,7 @@ export function Receipt({
   onActivity?: () => void;
 }) {
   const [confirmGroup, setConfirmGroup] = useState(false);
+  const [confirmUndo, setConfirmUndo] = useState(false);
   const groupBusy = useActivity((state) => state.groupBusy);
   const groupError = useActivity((state) =>
     state.groupReceiptId === receipt.id ? state.groupError : null,
@@ -218,9 +220,9 @@ export function Receipt({
               Boolean(undoReason) || undoBusy || groupBusy || receipt.publishing
             }
             title="Delete the definitions created by this publication, including their metric variants. Digest groups remain."
-            onClick={() => void useActivity.getState().undo(receipt.id)}
+            onClick={() => setConfirmUndo(true)}
           >
-            {undoingThisReceipt ? "Undoing..." : "Undo publication"}
+            <BusyLabel busy={undoingThisReceipt} idle="Undo publication" active="Undoing..." />
           </button>
         )}
       </div>
@@ -243,9 +245,11 @@ export function Receipt({
               }
               onClick={() => setConfirmGroup(true)}
             >
-              {groupBusy
-                ? "Deleting group..."
-                : `Delete "${group.name || "Digest group"}" Group`}
+              <BusyLabel
+                busy={groupBusy}
+                idle={`Delete "${group.name || "Digest group"}" Group`}
+                active="Deleting group..."
+              />
             </button>
           )}
           {group.deletion?.status === "unknown" && (
@@ -261,42 +265,56 @@ export function Receipt({
               {groupError}
             </p>
           )}
-          {confirmGroup && (
-            <Modal
-              title={`Delete "${group.name || "Digest group"}" Group`}
-              onClose={groupBusy ? undefined : () => setConfirmGroup(false)}
-              actions={
-                <>
-                  <button
-                    className="btn"
-                    disabled={groupBusy}
-                    onClick={() => setConfirmGroup(false)}
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    className="btn danger"
-                    disabled={groupBusy || !canConnect}
-                    onClick={() => {
-                      void useActivity
-                        .getState()
-                        .deleteGroup(receipt.id, group.id!)
-                        .then(() => setConfirmGroup(false));
-                    }}
-                  >
-                    {groupBusy ? "Deleting..." : "Delete group"}
-                  </button>
-                </>
-              }
-            >
-              <p>
-                Delete this group from Tableau, including its memberships and
-                subscriptions. Metrics remain.
-              </p>
-              <p>This cannot be undone.</p>
-            </Modal>
-          )}
         </section>
+      )}
+      {confirmGroup && (
+        <Modal
+          title={`Delete "${group.name || "Digest group"}" group?`}
+          onClose={groupBusy ? undefined : () => setConfirmGroup(false)}
+          actions={
+            <>
+              <button
+                className="btn"
+                disabled={groupBusy}
+                onClick={() => setConfirmGroup(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn danger"
+                disabled={groupBusy || !canConnect}
+                onClick={() => {
+                  void useActivity
+                    .getState()
+                    .deleteGroup(receipt.id, group.id!)
+                    .then(() => setConfirmGroup(false));
+                }}
+              >
+                <BusyLabel busy={groupBusy} idle="Delete group" active="Deleting..." />
+              </button>
+            </>
+          }
+        >
+          <p>
+            Delete this group from Tableau, including its memberships and
+            subscriptions. Metrics remain.
+          </p>
+          <p>This cannot be undone.</p>
+        </Modal>
+      )}
+      {confirmUndo && (
+        <ConfirmUndo
+          receipt={receipt}
+          busy={undoingThisReceipt}
+          disabled={Boolean(undoReason) || groupBusy || receipt.publishing}
+          onCancel={() => setConfirmUndo(false)}
+          onConfirm={() =>
+            void useActivity
+              .getState()
+              .undo(receipt.id)
+              .then(() => setConfirmUndo(false))
+          }
+        />
       )}
       {showUndo && undoReason && (
         <p className="pulse-receipt-note">{undoReason}</p>

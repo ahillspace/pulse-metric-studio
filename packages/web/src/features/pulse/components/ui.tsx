@@ -111,6 +111,19 @@ export function Modal(props: {
   );
 }
 
+/**
+ * A button label that swaps to a progress label without resizing the button,
+ * so neighbouring buttons stay put while an action runs.
+ */
+export function BusyLabel(props: { busy: boolean; idle: string; active: string }) {
+  return (
+    <span className="busy-label">
+      <span aria-hidden={props.busy || undefined}>{props.idle}</span>
+      <span aria-hidden={!props.busy || undefined}>{props.active}</span>
+    </span>
+  );
+}
+
 export function ToggleSwitch(props: {
   checked: boolean;
   onChange: (value: boolean) => void;

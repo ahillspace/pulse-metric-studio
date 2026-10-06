@@ -276,9 +276,10 @@
   font: inherit;
   line-height: 1.3;
 }
-.pulse-app .btn:hover {
+.pulse-app .btn:hover:not(:disabled) {
   background: #37373e;
   border-color: #575761;
+  color: #dddde4;
 }
 .pulse-app .btn.primary {
   background: #6869ae;
@@ -286,18 +287,27 @@
   color: #fff;
   box-shadow: none;
 }
-.pulse-app .btn.primary:hover {
+.pulse-app .btn.primary:hover:not(:disabled) {
   background: #7778be;
+  border-color: #787abe;
+  color: #fff;
+  box-shadow: none;
 }
 .pulse-app .btn.danger {
   color: #e9aaa5;
   background: #3a292b;
   border-color: #604044;
 }
+.pulse-app .btn.danger:hover:not(:disabled) {
+  background: #45302f;
+  border-color: #7a5055;
+  color: #f0b8b3;
+}
 .pulse-app .btn.small {
   font-size: 12px;
 }
-.pulse-app .btn.active {
+.pulse-app .btn.active,
+.pulse-app .btn.active:hover:not(:disabled) {
   background: #3b3b48;
   border-color: #5c5c70;
 }
@@ -1082,7 +1092,7 @@
 .pulse-app .pulse-expand-button[aria-expanded="true"]::before { transform: rotate(90deg); }
 .pulse-app .def-meta { font: inherit; font-size: 11px; color: #9b9ba6; white-space: nowrap; }
 .pulse-app .def-head > .btn.danger { color: #a7a7b4; }
-.pulse-app .def-head > .btn.danger:hover { color: #e9aaa5; background: #37292c; }
+.pulse-app .def-head > .btn.danger:hover:not(:disabled) { color: #e9aaa5; background: #37292c; }
 .pulse-app .variant-row { min-height: 36px; gap: 10px; padding: 5px 18px 5px 43px; flex-wrap: nowrap; border-top: 1px solid #28282d; background: #1d1d21; }
 .pulse-app .pulse-metric-name { flex: 1; min-width: 80px; overflow-wrap: anywhere; color: #c5c5d0; }
 .pulse-app .pulse-follow-label { min-width: 78px; }
