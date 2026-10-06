@@ -264,3 +264,29 @@ test('assistant prompt reserves timeframe and data mode to the app', async () =>
   assert.match(systemPrompt(), /minimum time granularity DAY by default/);
   assert.doesNotMatch(systemPrompt(), /LATEST only for snapshot/);
 });
+
+test('Pulse explains an assistant timeout and skips a repair that cannot fit the deadline', async () => {
+  let calls = 0;
+  const slow: LlmProvider = {
+    id: 'gateway',
+    label: 'Gateway',
+    isConfigured: async () => true,
+    complete: async (opts) => {
+      calls += 1;
+      assert.ok((opts.timeoutMs ?? 0) <= 1_000);
+      throw new LlmProviderError({ code: 'provider_timeout', message: 'Gateway did not respond within 1 seconds.', provider: 'gateway', model: 'm', retryable: true });
+    },
+  };
+  const input = {
+    catalog: { datasourceName: 'Sales', datasourceLuid: 'sales', measures: [], dimensions: [], timeDimensions: [], parameters: [] } as any,
+    chat: [],
+    userMessage: 'Build metrics',
+  };
+  await assert.rejects(() => authorOps(slow, input, 1_000), (error: unknown) =>
+    error instanceof LlmProviderError && error.code === 'provider_timeout' && /did not finish within 1 seconds\. Ask for fewer metrics/.test(error.message));
+  assert.equal(calls, 1);
+
+  const { provider, calls: invalidCalls } = trackingProvider(['not json']);
+  await assert.rejects(() => authorOps(provider, input, 1_000), /no time left to repair/);
+  assert.equal(invalidCalls(), 1);
+});

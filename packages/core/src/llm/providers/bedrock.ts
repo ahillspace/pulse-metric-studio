@@ -3,7 +3,7 @@ import { fromIni } from '@aws-sdk/credential-provider-ini';
 import { config } from '../../config.js';
 import type { StoredLlmProfile } from '../profiles.js';
 import type { CompleteOptions, CompleteResult, LlmMessage, LlmProviderHealth } from '../types.js';
-import { LlmProviderError } from '../types.js';
+import { LLM_REQUEST_TIMEOUT_MS, LlmProviderError, timeoutDescription } from '../types.js';
 import { assertSafeLlmEndpoint, UnsafeLlmEndpointError } from './network-policy.js';
 import { resolveProfileSecret } from './credential.js';
 import { readProviderErrorDetail, withProviderDetail } from './error-detail.js';
@@ -89,7 +89,7 @@ export class BedrockProvider {
       if (this.profile.authMode === 'bearer') return await this.completeWithBearer(opts);
       if (this.profile.baseUrl) await this.endpointPolicy(this.profile.baseUrl, this.profile.allowPrivateNetwork ?? false);
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 180_000);
+      const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? LLM_REQUEST_TIMEOUT_MS);
       let response;
       try {
         response = await this.client().send(new ConverseCommand({
@@ -146,14 +146,14 @@ export class BedrockProvider {
           })),
           inferenceConfig: { maxTokens: opts.maxTokens ?? 4096 },
         }),
-        signal: AbortSignal.timeout(180_000),
+        signal: AbortSignal.timeout(opts.timeoutMs ?? LLM_REQUEST_TIMEOUT_MS),
         redirect: 'error',
       });
     } catch (error) {
       const timeout = error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
       throw new LlmProviderError({
         code: timeout ? 'provider_timeout' : 'provider_unavailable',
-        message: timeout ? 'Amazon Bedrock timed out.' : 'Amazon Bedrock could not be reached.',
+        message: timeout ? `Amazon Bedrock did not respond within ${timeoutDescription(opts.timeoutMs ?? LLM_REQUEST_TIMEOUT_MS)}.` : 'Amazon Bedrock could not be reached.',
         provider: this.id,
         model: this.profile.model,
         retryable: true,

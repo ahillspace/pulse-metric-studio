@@ -22,16 +22,18 @@ export const pulseDimensionalForkApi = {
   },
   count: async (sourceMetricIds: string[], fieldId: string) => {
     const query = sourceContextQuery(sourceMetricIds);
+    query.set('fieldId', fieldId);
     return DimensionMemberCountSchema.parse(
-      await pulseRequest(`/api/pulse/dimensions/${encodeURIComponent(fieldId)}/count?${query}`),
+      await pulseRequest(`/api/pulse/dimensions/count?${query}`),
     );
   },
   values: async (sourceMetricIds: string[], fieldId: string, search: string, options: { all?: boolean } = {}) => {
     const query = sourceContextQuery(sourceMetricIds);
+    query.set('fieldId', fieldId);
     if (search) query.set('search', search);
     if (options.all) query.set('all', '1');
     return DimensionValuePageSchema.parse(
-      await pulseRequest(`/api/pulse/dimensions/${encodeURIComponent(fieldId)}/values?${query}`),
+      await pulseRequest(`/api/pulse/dimensions/values?${query}`),
     );
   },
 };

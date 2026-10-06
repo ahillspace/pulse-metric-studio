@@ -149,6 +149,27 @@ test("assistant continues from current edits when local saving fails and preserv
   assert.match(received.chat[1].proposalContext, /Proposal/);
 });
 
+test("clearing the assistant chat removes the conversation and pending proposal but keeps metric edits", async (t) => {
+  let received: any;
+  const { store } = fixture({
+    propose: async (_id: string, revision: number, _message: string, document: any) => {
+      received = document;
+      return { baseRevision: revision, candidateDocument: { ...document, digestAudience: "Proposal" }, assistantMessage: "Proposed audience", changes: [] };
+    },
+  });
+  t.after(() => store.getState().dispose());
+  await store.getState().openDraft("a");
+  store.getState().updateMetric("Sales", { name: "Manual name" });
+  await store.getState().requestProposal("Suggest a refinement");
+  store.getState().clearChat();
+  const entry = activeEditor(store.getState());
+  assert.equal(entry?.document.chat.length, 0);
+  assert.equal(entry?.proposal, null);
+  assert.equal(entry?.document.metrics.Sales.name, "Manual name");
+  await store.getState().requestProposal("Start over");
+  assert.equal(received.chat.length, 0);
+});
+
 test("a lost publication response refreshes its attempted datasource without clearing uncertainty", async (t) => {
   const pending = deferred<ReturnType<typeof receipt>>();
   const invalidated: PulseDraftRecord["context"][] = [];

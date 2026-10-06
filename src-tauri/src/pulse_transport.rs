@@ -201,7 +201,8 @@ pub async fn pulse_api_request(
     let transport = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         if !transport.ready() { return Err("The desktop service is unavailable. Restart Pulse Metric Studio and inspect Activity before repeating a change.".into()); }
-        transport.send(&request.method, &request.path, request.body, Duration::from_secs(300))
+        // Longer than the server's 5-minute assistant deadline so its explanation arrives first.
+        transport.send(&request.method, &request.path, request.body, Duration::from_secs(330))
     })
         .await.map_err(|_| "Desktop request was interrupted.".to_string())?
 }

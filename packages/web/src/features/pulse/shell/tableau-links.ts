@@ -5,7 +5,8 @@ export function pulseSiteUrl(serverUrl: string, siteContentUrl: string) {
   const url = new URL(serverUrl);
   if (!["https:", "http:"].includes(url.protocol))
     throw new Error("Unsupported Tableau URL.");
-  url.pathname = `/pulse/site/${encodeURIComponent(siteContentUrl)}`;
+  // Pulse routes are lowercase regardless of the site content URL's casing.
+  url.pathname = `/pulse/site/${encodeURIComponent(siteContentUrl.toLowerCase())}`;
   url.search = "";
   url.hash = "";
   return url.href;

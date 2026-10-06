@@ -6,10 +6,20 @@ export interface LlmMessage {
   content: string;
 }
 
+/** Longest a single assistant request may run before it is abandoned. */
+export const LLM_REQUEST_TIMEOUT_MS = 300_000;
+
+export function timeoutDescription(ms: number): string {
+  const seconds = Math.round(ms / 1000);
+  return seconds % 60 === 0 ? `${seconds / 60} minute${seconds === 60 ? '' : 's'}` : `${seconds} seconds`;
+}
+
 export interface CompleteOptions {
   system?: string;
   messages: LlmMessage[];
   maxTokens?: number;
+  /** Defaults to LLM_REQUEST_TIMEOUT_MS. */
+  timeoutMs?: number;
 }
 
 export interface CompleteResult {

@@ -4,7 +4,11 @@ import {
   TIMEFRAMES,
   type PulseVariantRequestV1,
 } from "@pulse-metric-studio/shared";
-import { DimensionalFork } from "../components/DimensionalFork";
+import {
+  DimensionalFork,
+  type InheritedDimensionFilter,
+} from "../components/DimensionalFork";
+import type { PulseFilterDimensionField } from "../dimensional-filter";
 import { Modal } from "../components/ui";
 import {
   selectionState,
@@ -14,6 +18,12 @@ import {
   type StagedDimensionClause,
 } from "../fork-plan";
 import {
+  sharedSourceFilter,
+  sourceFilters,
+  stagedValues,
+} from "./source-filters";
+import {
+  variantHasChanges,
   variantPlanForSelection,
   variantPreview,
   variantRequest,
@@ -55,6 +65,7 @@ export function VariantDialog({
   const [sourceOpen, setSourceOpen] = useState(!selectedMetricIds.length);
   const [compatibility, setCompatibility] = useState("");
   const [filterState, setFilterState] = useState<string | null>(null);
+  const [fields, setFields] = useState<PulseFilterDimensionField[]>([]);
   const selected = useMemo(
     () =>
       metrics.filter((metric) =>
@@ -73,13 +84,17 @@ export function VariantDialog({
   const sourceKey = sources.map((source) => source.id).join("\u0000");
   const sourceKeyRef = useRef(sourceKey);
   sourceKeyRef.current = sourceKey;
+  // Eligible fields belong to one source selection; drop them when it changes.
+  useEffect(() => setFields([]), [sourceKey]);
   const changeClauses = useCallback(
     (clauses: StagedDimensionClause[]) =>
       setPlan((current) => ({ ...current, clauses })),
     [],
   );
-  const compatible = useCallback((key: string, fieldIds: string[]) => {
+  const compatible = useCallback((key: string, eligible: PulseFilterDimensionField[]) => {
     if (key !== sourceKeyRef.current) return;
+    const fieldIds = eligible.map((field) => field.id);
+    setFields(eligible);
     setPlan((current) => ({
       ...current,
       clauses: current.clauses.filter((clause) =>
@@ -88,6 +103,23 @@ export function VariantDialog({
     }));
     setCompatibility(key);
   }, []);
+  const inherited = useMemo<InheritedDimensionFilter[]>(
+    () =>
+      fields.flatMap((field) => {
+        const filter = sharedSourceFilter(selected, field.name);
+        return filter
+          ? [
+              {
+                fieldId: field.id,
+                fieldLabel: field.label,
+                exclude: filter.exclude,
+                values: stagedValues(filter),
+              },
+            ]
+          : [];
+      }),
+    [fields, selected],
+  );
   const visible = metrics.filter((metric) =>
     `${metric.name} ${metric.timeframeLabel}`
       .toLowerCase()
@@ -97,12 +129,12 @@ export function VariantDialog({
     filterState ||
     getForkDisabledReason({
       selectedCount: selected.length,
-      hasChanges: Boolean(plan.timeframe || plan.clauses.length),
+      hasChanges: variantHasChanges(plan, metrics, fields),
       dimensionsUnresolved:
         plan.clauses.length > 0 && compatibility !== sourceKey,
       busy,
     });
-  const preview = variantPreview(metrics, plan);
+  const preview = variantPreview(metrics, plan, fields);
   return createPortal(
     <Modal
       title="Create variants"
@@ -122,7 +154,7 @@ export function VariantDialog({
             disabled={Boolean(reason)}
             onClick={() =>
               void onCreate(
-                variantRequest(plan),
+                variantRequest(plan, metrics, fields),
                 new Map(sources.map((source) => [source.id, source.label])),
               ).then(onClose)
             }
@@ -214,7 +246,10 @@ export function VariantDialog({
                       />
                       <span>
                         {metric.name}
-                        <small>{metric.timeframeLabel}</small>
+                        <small>
+                          {metric.timeframeLabel}
+                          {sourceFilters(metric).length > 0 && " · Scoped"}
+                        </small>
                       </span>
                     </label>
                   ))}
@@ -251,6 +286,7 @@ export function VariantDialog({
             <DimensionalFork
               sources={sources}
               clauses={plan.clauses}
+              inherited={inherited}
               onChange={changeClauses}
               onCompatibilityResolved={compatible}
               onEditingState={setFilterState}
@@ -287,12 +323,7 @@ export function VariantDialog({
                     ))}
                   </ul>
                 ) : (
-                  <small>No added filters</small>
-                )}
-                {metric.retainsSourceFilters && (
-                  <small>
-                    Source filters are preserved except fields changed here.
-                  </small>
+                  <small>No filters</small>
                 )}
               </article>
             ))}
