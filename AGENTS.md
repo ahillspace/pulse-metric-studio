@@ -30,4 +30,4 @@ Keep automated tests isolated from live Tableau and AI services.
 Do not introduce automated browser tests or live-provider test tooling without an explicit request.
 Do not invoke no-mistakes tooling unless explicitly requested.
 Desktop and live Tableau workflow validation is user-led.
-Keep the repository private until the owner authorizes publication.
+The repository is shared with all employees through `sfdc-qbranch-emu/pulse-metric-studio` and is open source under Apache 2.0.
