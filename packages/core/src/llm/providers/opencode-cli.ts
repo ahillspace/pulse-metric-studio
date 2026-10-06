@@ -1,4 +1,5 @@
-import { execFile, spawn, spawnSync } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { killProcessTree, OWN_PROCESS_GROUP } from './process-tree.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
@@ -178,6 +179,7 @@ async function runOpenCode(bin: ResolveResult, args: string[], prompt: string, p
       cwd: isolatedCwd,
       shell: false,
       windowsHide: true,
+      detached: OWN_PROCESS_GROUP,
       env: requestEnv,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -191,11 +193,7 @@ async function runOpenCode(bin: ResolveResult, args: string[], prompt: string, p
       if (error) reject(error);
       else resolve(stdout);
     };
-    const stopTree = () => {
-      if (!child.pid) return;
-      if (process.platform === 'win32') spawnSync('taskkill.exe', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
-      else child.kill('SIGKILL');
-    };
+    const stopTree = () => killProcessTree(child);
     const timer = setTimeout(() => {
       stopTree();
       finish(new LlmProviderError({ code: 'provider_timeout', message: `OpenCode did not respond within ${timeoutDescription(timeoutMs)}.`, provider, model, retryable: true }));
@@ -238,6 +236,7 @@ function runOpenCodeModelList(bin: ResolveResult, args: string[], env = buildOpe
       cwd: isolatedCwd,
       shell: false,
       windowsHide: true,
+      detached: OWN_PROCESS_GROUP,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -245,11 +244,7 @@ function runOpenCodeModelList(bin: ResolveResult, args: string[], env = buildOpe
     let stdoutBytes = 0;
     let stderr = '';
     let settled = false;
-    const stopTree = () => {
-      if (!child.pid) return;
-      if (process.platform === 'win32') spawnSync('taskkill.exe', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
-      else child.kill('SIGKILL');
-    };
+    const stopTree = () => killProcessTree(child);
     const finish = (error?: LlmProviderError) => {
       if (settled) return;
       settled = true;

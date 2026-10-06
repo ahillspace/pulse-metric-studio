@@ -109,6 +109,18 @@ test('HTTP provider error explanations never echo the request credential', async
   );
 });
 
+test('HTTP provider error explanations never echo custom header credentials', async () => {
+  const configured = { ...profile('openai-chat'), headers: { 'x-gateway-key': 'Bearer header-credential-value' } };
+  const provider = new HttpLlmProvider(configured, async () => Response.json(
+    { error: { message: 'Upstream rejected header-credential-value for route.' } },
+    { status: 403 },
+  ), allowEndpoint);
+  await assert.rejects(
+    () => provider.complete({ messages: [{ role: 'user', content: 'hello' }] }),
+    (error: Error) => !error.message.includes('header-credential-value') && /\[redacted\]/.test(error.message),
+  );
+});
+
 test('HTTP providers disable redirects so credentials cannot cross origins', async () => {
   let init: RequestInit | undefined;
   const provider = new HttpLlmProvider(profile('openai-chat'), async (_input, requestInit) => {

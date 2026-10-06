@@ -5,12 +5,34 @@ import {
   CREDENTIAL_BROKER_RESOLVE_PATH,
   CredentialBrokerError,
   createCredentialBrokerClient,
+  setCredentialBrokerToken,
 } from './credential-broker.js';
 
 const brokerEnv = {
   PULSE_METRIC_STUDIO_CREDENTIAL_BROKER_URL: 'http://127.0.0.1:49152',
-  PULSE_METRIC_STUDIO_CREDENTIAL_BROKER_TOKEN: 'private-token',
 };
+setCredentialBrokerToken('private-token');
+
+test('ignores a broker token in the environment so child processes cannot inherit one', async () => {
+  setCredentialBrokerToken(null);
+  let called = false;
+  const client = createCredentialBrokerClient({
+    env: { ...brokerEnv, PULSE_METRIC_STUDIO_CREDENTIAL_BROKER_TOKEN: 'env-token' },
+    fetchImpl: async () => {
+      called = true;
+      return new Response();
+    },
+  });
+  try {
+    await assert.rejects(
+      client.resolve('credential-ref'),
+      (error: unknown) => error instanceof CredentialBrokerError && error.code === 'unavailable',
+    );
+    assert.equal(called, false);
+  } finally {
+    setCredentialBrokerToken('private-token');
+  }
+});
 
 test('resolves a credential through the authenticated loopback broker', async () => {
   const requests: Array<{ url: string; init?: RequestInit }> = [];
@@ -70,7 +92,6 @@ test('rejects a non-loopback broker URL before sending a request', async () => {
   const client = createCredentialBrokerClient({
     env: {
       PULSE_METRIC_STUDIO_CREDENTIAL_BROKER_URL: 'https://credential.example.test:443',
-      PULSE_METRIC_STUDIO_CREDENTIAL_BROKER_TOKEN: 'private-token',
     },
     fetchImpl: async () => {
       called = true;

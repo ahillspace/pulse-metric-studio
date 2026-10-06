@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { LlmProviderError, summarizeProcessError } from '../types.js';
+import { killProcessTree, OWN_PROCESS_GROUP } from './process-tree.js';
 
 const CACHE_TTL_MS = 60_000;
 const STDOUT_LIMIT_BYTES = 1_000_000;
@@ -51,16 +52,38 @@ export async function resolveProfileSecret(
   return (profile.secret ?? '').trim();
 }
 
-function runCredentialCommand(command: string): Promise<string> {
+/**
+ * Credential commands run with the user's environment minus every app-internal
+ * variable, so they cannot learn how to reach the credential broker.
+ */
+export function credentialCommandEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    Object.entries(source).filter(([name]) => !name.toUpperCase().startsWith('PULSE_METRIC_STUDIO_')),
+  );
+}
+
+export function runCredentialCommand(command: string, timeoutMs = COMMAND_TIMEOUT_MS): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     const child = spawn(command, {
       shell: true,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: COMMAND_TIMEOUT_MS,
-      env: process.env,
+      detached: OWN_PROCESS_GROUP,
+      env: credentialCommandEnv(),
     });
     let settled = false;
+    let timedOut = false;
+    // Own timer instead of spawn's timeout: that only signals the shell, not what it started.
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killProcessTree(child);
+      fail(new LlmProviderError({
+        code: 'provider_authentication',
+        message: 'The credential command timed out.',
+        provider: 'credential-command',
+        model: '',
+      }));
+    }, timeoutMs);
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
     let stdoutBytes = 0;
@@ -69,13 +92,14 @@ function runCredentialCommand(command: string): Promise<string> {
     const fail = (error: LlmProviderError): void => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
       reject(error);
     };
 
     child.stdout?.on('data', (chunk: Buffer) => {
       stdoutBytes += chunk.byteLength;
       if (stdoutBytes > STDOUT_LIMIT_BYTES) {
-        child.kill();
+        killProcessTree(child);
         // SECURITY: never include stdout in an error message - it holds the token.
         fail(new LlmProviderError({
           code: 'provider_authentication',
@@ -107,19 +131,11 @@ function runCredentialCommand(command: string): Promise<string> {
     // 'close' (not 'exit') guarantees stdout has been fully consumed before we
     // read the token; 'exit' can fire while stdio is still flushing, truncating it.
     child.on('close', (code) => {
+      clearTimeout(timer);
       if (settled) return;
-      if (code === 0) {
+      if (code === 0 && !timedOut) {
         settled = true;
         resolve(Buffer.concat(stdoutChunks).toString('utf8'));
-        return;
-      }
-      if (child.killed) {
-        fail(new LlmProviderError({
-          code: 'provider_authentication',
-          message: 'The credential command timed out.',
-          provider: 'credential-command',
-          model: '',
-        }));
         return;
       }
       const stderr = Buffer.concat(stderrChunks).toString('utf8').slice(0, STDERR_LIMIT_BYTES);

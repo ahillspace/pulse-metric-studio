@@ -2,7 +2,11 @@ import type { FastifyInstance } from "fastify";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
-import { config } from "@pulse-metric-studio/core";
+import {
+  CREDENTIAL_BROKER_TOKEN_ENV,
+  config,
+  setCredentialBrokerToken,
+} from "@pulse-metric-studio/core";
 
 export const DESKTOP_PROTOCOL = 1;
 export const DESKTOP_BODY_LIMIT = 16 * 1024 * 1024;
@@ -38,6 +42,7 @@ export async function acquireDesktopOwnership(
 export async function readDesktopStartup(): Promise<
   DesktopStartup | undefined
 > {
+  delete process.env[CREDENTIAL_BROKER_TOKEN_ENV];
   if (process.env.PULSE_METRIC_STUDIO_DESKTOP_IDENTIFIER !== "com.ahillspace.pulsemetricstudio")
     return undefined;
   if (process.env.PULSE_METRIC_STUDIO_DESKTOP_PIPE !== "1")
@@ -72,7 +77,8 @@ export async function readDesktopStartup(): Promise<
           value.brokerToken.length < 20
         )
           throw new Error();
-        process.env.PULSE_METRIC_STUDIO_CREDENTIAL_BROKER_TOKEN = value.brokerToken;
+        // Module state only: children spawned by this server must never inherit it.
+        setCredentialBrokerToken(value.brokerToken);
         finish(undefined, { token: value.token, protocol: DESKTOP_PROTOCOL });
       } catch {
         finish(new Error("Incompatible desktop startup handshake."));

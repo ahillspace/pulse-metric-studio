@@ -29,8 +29,21 @@ export interface CredentialBrokerVaultClient extends CredentialBrokerClient {
   delete(credentialRef: string): Promise<boolean>;
 }
 
+/**
+ * The broker bearer token arrives over the desktop launcher's stdin and lives
+ * only in module state. Keeping it out of process.env means child processes
+ * (credential commands, the AWS SDK credential_process, OpenCode) never inherit it.
+ */
+let configuredBrokerToken: string | null = null;
+
+export function setCredentialBrokerToken(token: string | null): void {
+  configuredBrokerToken = token?.trim() || null;
+}
+
 interface CredentialBrokerClientOptions {
   env?: NodeJS.ProcessEnv;
+  /** Overrides the token set by setCredentialBrokerToken (tests). */
+  token?: string;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
 }
@@ -47,7 +60,7 @@ export function createCredentialBrokerClient(
 
   async function request(path: string, method: 'POST' | 'PUT' | 'DELETE', body: unknown): Promise<unknown> {
     const brokerUrl = readBrokerUrl(env);
-    const brokerToken = env[CREDENTIAL_BROKER_TOKEN_ENV]?.trim();
+    const brokerToken = (options.token ?? configuredBrokerToken ?? '').trim();
     if (!brokerToken) {
       throw new CredentialBrokerError('unavailable', 'The OS credential broker token is unavailable.');
     }

@@ -60,13 +60,29 @@ export function classifyStatus(status: number, bodyText: string): TableauError['
   return 'http';
 }
 
-async function parseBody(resp: Response, maxBytes?: number, timeoutMs = 30_000): Promise<unknown> {
-  const text = maxBytes === undefined ? await resp.text().catch(() => '') : await readBoundedBody(resp, maxBytes, timeoutMs);
+/** Upper bound for any Tableau response body unless a caller sets a tighter one. */
+export const DEFAULT_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
+
+/**
+ * Removes credentials Tableau may reflect in an error body (the session token,
+ * a PAT secret) before the text reaches the UI or the log.
+ */
+export function redactCredentials(text: string, secrets: Array<string | undefined>): string {
+  let redacted = text;
+  for (const secret of secrets) {
+    const value = secret?.trim();
+    if (value && value.length >= 4) redacted = redacted.split(value).join('[redacted]');
+  }
+  return redacted;
+}
+
+async function parseBody(resp: Response, maxBytes = DEFAULT_MAX_RESPONSE_BYTES, timeoutMs = 30_000): Promise<unknown> {
+  const text = await readBoundedBody(resp, maxBytes, timeoutMs);
   if (!text) return null;
   try { return JSON.parse(text); } catch { return text; }
 }
 
-async function readBoundedBody(resp: Response, maxBytes: number, timeoutMs: number): Promise<string> {
+export async function readBoundedBody(resp: Response, maxBytes: number, timeoutMs: number): Promise<string> {
   const tooLarge = () => new TableauError('Tableau response exceeds the permitted size.', 502);
   if (Number(resp.headers.get('content-length')) > maxBytes) {
     void resp.body?.cancel().catch(() => {});
@@ -212,7 +228,7 @@ export async function getJson<T>(session: TableauSession, path: string, accept?:
   const resp = await tableauFetch(session, path, { method: 'GET', headers: { Accept: accept ?? 'application/json' }, timeoutMs });
   const body = await parseBody(resp, maxResponseBytes, timeoutMs);
   if (!resp.ok) {
-    const snippet = typeof body === 'string' ? body.slice(0, 500) : JSON.stringify(body)?.slice(0, 500) ?? '';
+    const snippet = redactCredentials(typeof body === 'string' ? body : JSON.stringify(body) ?? '', [session.token]).slice(0, 500);
     throw new TableauError(
       `GET ${path} failed (${resp.status})${validationDetail(resp)}`,
       resp.status,
@@ -240,7 +256,7 @@ export async function postJson<T>(
   });
   const respBody = await parseBody(resp, opts.maxResponseBytes, opts.timeoutMs);
   if (!resp.ok) {
-    const snippet = typeof respBody === 'string' ? respBody.slice(0, 800) : JSON.stringify(respBody)?.slice(0, 800) ?? '';
+    const snippet = redactCredentials(typeof respBody === 'string' ? respBody : JSON.stringify(respBody) ?? '', [session.token]).slice(0, 800);
     throw new TableauError(
       `${opts.method ?? 'POST'} ${path} failed (${resp.status})${validationDetail(resp)}`,
       resp.status,
@@ -254,7 +270,7 @@ export async function postJson<T>(
 export async function deleteReq(session: TableauSession, path: string): Promise<void> {
   const resp = await tableauFetch(session, path, { method: 'DELETE' });
   if (!resp.ok && resp.status !== 404) {
-    const bodyText = await resp.text().catch(() => '');
+    const bodyText = redactCredentials(await readBoundedBody(resp, 64 * 1024, 30_000).catch(() => ''), [session.token]);
     throw new TableauError(`DELETE ${path} failed (${resp.status})`, resp.status, bodyText.slice(0, 500), classifyStatus(resp.status, bodyText));
   }
 }
