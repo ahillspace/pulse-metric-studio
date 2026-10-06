@@ -24,6 +24,8 @@ test('Bedrock bearer profiles use the verified Converse HTTP contract', async ()
   assert.equal((request.init.headers as Record<string, string>).Authorization, 'Bearer bedrock-secret');
   assert.equal(request.init.redirect, 'error');
   assert.equal(JSON.parse(String(request.init.body)).messages[0].content[0].text, 'hello');
+  // Current Claude models reject sampling parameters such as temperature.
+  assert.deepEqual(JSON.parse(String(request.init.body)).inferenceConfig, { maxTokens: 4096 });
   assert.equal(result.text, 'done');
 });
 

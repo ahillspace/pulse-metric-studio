@@ -98,7 +98,7 @@ export class BedrockProvider {
             role: (message.role === 'assistant' ? 'assistant' : 'user') as 'assistant' | 'user',
             content: [{ text: message.content }],
           })),
-          inferenceConfig: { maxTokens: opts.maxTokens ?? 4096, temperature: opts.temperature ?? 0.2 },
+          inferenceConfig: { maxTokens: opts.maxTokens ?? 4096 },
         }), { abortSignal: controller.signal });
       } finally {
         clearTimeout(timer);
@@ -143,7 +143,7 @@ export class BedrockProvider {
             role: message.role === 'assistant' ? 'assistant' : 'user',
             content: [{ text: message.content }],
           })),
-          inferenceConfig: { maxTokens: opts.maxTokens ?? 4096, temperature: opts.temperature ?? 0.2 },
+          inferenceConfig: { maxTokens: opts.maxTokens ?? 4096 },
         }),
         signal: AbortSignal.timeout(180_000),
         redirect: 'error',

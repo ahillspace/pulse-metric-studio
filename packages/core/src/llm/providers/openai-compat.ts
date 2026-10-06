@@ -153,7 +153,6 @@ function requestBody(protocol: StoredLlmProfile['protocol'], model: string, opts
       model,
       system: opts.system,
       max_tokens: opts.maxTokens ?? 4096,
-      temperature: opts.temperature ?? 0.2,
       messages: opts.messages.filter((message) => message.role !== 'system').map(messageShape),
     };
   }
@@ -163,7 +162,6 @@ function requestBody(protocol: StoredLlmProfile['protocol'], model: string, opts
       instructions: opts.system,
       input: opts.messages.map(messageShape),
       max_output_tokens: opts.maxTokens ?? 4096,
-      temperature: opts.temperature ?? 0.2,
     };
   }
   return {
@@ -173,7 +171,6 @@ function requestBody(protocol: StoredLlmProfile['protocol'], model: string, opts
       ...opts.messages.map(messageShape),
     ],
     max_tokens: opts.maxTokens ?? 4096,
-    temperature: opts.temperature ?? 0.2,
   };
 }
 
