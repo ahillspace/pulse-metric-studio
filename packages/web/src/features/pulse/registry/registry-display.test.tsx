@@ -68,10 +68,12 @@ test("metric row displays a business name and preserves Copy ID without printing
       highlighted={false}
       onSelectionChange={() => {}}
       onToggleTimeframeFamily={() => {}}
+      onPreview={() => {}}
     />,
   );
   const visibleText = html.replace(/<[^>]*>/g, "");
   assert.match(visibleText, /Closed Won/);
   assert.match(visibleText, /Copy ID/);
+  assert.match(html, /aria-label="Preview Closed Won"/);
   assert.doesNotMatch(visibleText, new RegExp(metricId));
 });

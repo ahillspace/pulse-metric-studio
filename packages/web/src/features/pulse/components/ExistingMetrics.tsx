@@ -24,6 +24,8 @@ import {
 import { VariantDialog } from "../registry/VariantDialog";
 import { FollowTargetModal } from "./FollowTargetModal";
 import { Modal } from "./ui";
+import { createPreviewController } from "../registry/preview-controller";
+import { MetricPreview } from "../registry/MetricPreview";
 
 export {
   countDistinctFollowers,
@@ -66,6 +68,28 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
       void useRegistry.getState().ensureLoaded();
   }, [visible, contextKey, connected]);
   const existing = registry.inventory;
+  const [usePreview] = useState(() => createPreviewController());
+  const preview = usePreview();
+  const previewScope = useMemo(
+    () =>
+      connected &&
+      context &&
+      session &&
+      existing &&
+      !registry.loading &&
+      !registry.busy
+        ? { context, siteContentUrl: session.siteContentUrl }
+        : null,
+    [contextKey, connected, session, existing, registry.loading, registry.busy],
+  );
+  useEffect(() => {
+    usePreview.getState().setScope(previewScope);
+    return () => usePreview.getState().setScope(null);
+  }, [previewScope, usePreview]);
+  const previewVisible = Boolean(
+    previewScope && preview.scope === previewScope && preview.metric,
+  );
+
   const allMetrics = useMemo(
     () => flattenMetrics(existing?.definitions ?? []),
     [existing],
@@ -357,103 +381,126 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
             onCreate={registry.fork}
           />
         )}
-        <div className="pulse-registry-list">
-          {displayedDefinitions.map((definition) => {
-            const variants = definition.metrics;
-            const childIds = variants.map((metric) => metric.metricId);
-            return (
-              <div key={definition.definitionId} className="def-row">
-                <div className="def-head pulse-definition-head">
-                  <SelectionCheckbox
-                    label={`Select displayed metrics in ${definition.name}`}
-                    state={selectionState(plan.selectedMetricIds, childIds)}
-                    onChange={(checked) =>
-                      setPlan((current) => ({
-                        ...current,
-                        selectedMetricIds: setMetricSelection(
-                          current.selectedMetricIds,
-                          childIds,
-                          checked,
-                        ),
-                      }))
-                    }
-                  />
-                  <button
-                    className="pulse-expand-button"
-                    aria-expanded={expanded.has(definition.definitionId)}
-                    onClick={() =>
-                      setExpanded((current) => {
-                        const next = new Set(current);
-                        if (next.has(definition.definitionId))
-                          next.delete(definition.definitionId);
-                        else next.add(definition.definitionId);
-                        return next;
-                      })
-                    }
-                  >
-                    {cleanName(definition.name)}
-                  </button>
-                  <span
-                    className="def-meta"
-                    title={`${definition.aggregation}(${definition.measure})${definition.timeDimension ? ` - ${definition.timeDimension}` : ""}`}
-                  >
-                    {definition.metrics.length}{" "}
-                    {definition.metrics.length === 1 ? "metric" : "metrics"}
-                    {definition.inventoryStatus !== "complete"
-                      ? ` - ${definition.inventoryStatus}`
-                      : ""}
-                  </span>
-                  <FollowerBadges
-                    definition={
-                      definitionById.get(definition.definitionId) ?? definition
-                    }
-                    onAudit={() => setFollowersOf(definition.definitionId)}
-                  />
-                  <button
-                    className="btn small danger pulse-registry-icon"
-                    title={`Delete definition ${definition.name}`}
-                    aria-label={`Delete definition ${definition.name}`}
-                    disabled={Boolean(registry.busy)}
-                    onClick={() =>
-                      void registry.previewDelete([], [definition.definitionId])
-                    }
-                  >
-                    <svg viewBox="0 0 20 20" aria-hidden="true">
-                      <path d="M3 5h14M7 5V3h6v2M5 5l1 12h8l1-12M8 8v6M12 8v6" />
-                    </svg>
-                  </button>
-                </div>
-                {expanded.has(definition.definitionId) && (
-                  <div>
-                    {variants.map((variant) => (
-                      <MetricRow
-                        key={variant.metricId}
-                        definition={definition}
-                        variant={variant}
-                        metric={metricById.get(variant.metricId)!}
-                        selectedMetricIds={plan.selectedMetricIds}
-                        allMetrics={allMetrics}
-                        highlighted={registry.createdMetricIds.includes(
-                          variant.metricId,
-                        )}
-                        onSelectionChange={(checked) =>
-                          setPlan((current) => ({
-                            ...current,
-                            selectedMetricIds: setMetricSelection(
-                              current.selectedMetricIds,
-                              [variant.metricId],
-                              checked,
-                            ),
-                          }))
-                        }
-                        onToggleTimeframeFamily={toggleFamily}
-                      />
-                    ))}
+        <div
+          className={`pulse-registry-content ${previewVisible ? "has-preview" : ""}`}
+        >
+          <div className="pulse-registry-list">
+            {displayedDefinitions.map((definition) => {
+              const variants = definition.metrics;
+              const childIds = variants.map((metric) => metric.metricId);
+              return (
+                <div key={definition.definitionId} className="def-row">
+                  <div className="def-head pulse-definition-head">
+                    <SelectionCheckbox
+                      label={`Select displayed metrics in ${definition.name}`}
+                      state={selectionState(plan.selectedMetricIds, childIds)}
+                      onChange={(checked) =>
+                        setPlan((current) => ({
+                          ...current,
+                          selectedMetricIds: setMetricSelection(
+                            current.selectedMetricIds,
+                            childIds,
+                            checked,
+                          ),
+                        }))
+                      }
+                    />
+                    <button
+                      className="pulse-expand-button"
+                      aria-expanded={expanded.has(definition.definitionId)}
+                      onClick={() =>
+                        setExpanded((current) => {
+                          const next = new Set(current);
+                          if (next.has(definition.definitionId))
+                            next.delete(definition.definitionId);
+                          else next.add(definition.definitionId);
+                          return next;
+                        })
+                      }
+                    >
+                      {cleanName(definition.name)}
+                    </button>
+                    <span
+                      className="def-meta"
+                      title={`${definition.aggregation}(${definition.measure})${definition.timeDimension ? ` - ${definition.timeDimension}` : ""}`}
+                    >
+                      {definition.metrics.length}{" "}
+                      {definition.metrics.length === 1 ? "metric" : "metrics"}
+                      {definition.inventoryStatus !== "complete"
+                        ? ` - ${definition.inventoryStatus}`
+                        : ""}
+                    </span>
+                    <FollowerBadges
+                      definition={
+                        definitionById.get(definition.definitionId) ??
+                        definition
+                      }
+                      onAudit={() => setFollowersOf(definition.definitionId)}
+                    />
+                    <button
+                      className="btn small danger pulse-registry-icon"
+                      title={`Delete definition ${definition.name}`}
+                      aria-label={`Delete definition ${definition.name}`}
+                      disabled={Boolean(registry.busy)}
+                      onClick={() =>
+                        void registry.previewDelete(
+                          [],
+                          [definition.definitionId],
+                        )
+                      }
+                    >
+                      <svg viewBox="0 0 20 20" aria-hidden="true">
+                        <path d="M3 5h14M7 5V3h6v2M5 5l1 12h8l1-12M8 8v6M12 8v6" />
+                      </svg>
+                    </button>
                   </div>
-                )}
-              </div>
-            );
-          })}
+                  {expanded.has(definition.definitionId) && (
+                    <div>
+                      {variants.map((variant) => (
+                        <MetricRow
+                          key={variant.metricId}
+                          definition={definition}
+                          variant={variant}
+                          metric={metricById.get(variant.metricId)!}
+                          selectedMetricIds={plan.selectedMetricIds}
+                          allMetrics={allMetrics}
+                          highlighted={registry.createdMetricIds.includes(
+                            variant.metricId,
+                          )}
+                          onSelectionChange={(checked) =>
+                            setPlan((current) => ({
+                              ...current,
+                              selectedMetricIds: setMetricSelection(
+                                current.selectedMetricIds,
+                                [variant.metricId],
+                                checked,
+                              ),
+                            }))
+                          }
+                          onPreview={
+                            previewScope
+                              ? () =>
+                                  void preview.show(
+                                    metricById.get(variant.metricId)!,
+                                  )
+                              : undefined
+                          }
+                          previewed={
+                            previewVisible &&
+                            preview.metric?.metricId === variant.metricId
+                          }
+                          onToggleTimeframeFamily={toggleFamily}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          {previewVisible && (
+            <MetricPreview key={preview.metric!.metricId} state={preview} />
+          )}
         </div>
       </div>
       {registry.results && !followOpen && (

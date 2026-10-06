@@ -504,3 +504,15 @@ export const PulseReceiptPageSchema = z.object({
   limit: z.number().int().positive(),
 });
 export type PulseReceiptPage = z.infer<typeof PulseReceiptPageSchema>;
+
+
+export const PulseMetricPreviewRequestSchema = z.object({ context: PulseDraftContextSchema });
+export type PulseMetricPreviewRequest = z.infer<typeof PulseMetricPreviewRequestSchema>;
+export const PulseMetricPreviewSchema = z.object({
+  metricId: id,
+  definitionId: id,
+  name: z.string(),
+  imageDataUrl: z.string().startsWith('data:image/png;base64,').max(6 * 1024 * 1024),
+  generatedAt: z.number().int(),
+});
+export type PulseMetricPreview = z.infer<typeof PulseMetricPreviewSchema>;

@@ -123,6 +123,17 @@ A bulk selection containing defaults opens an explicit review of the affected de
 An ordinary variant selection never authorizes deleting its parent definition.
 Incomplete inventory cannot establish that a selection covers every dependent resource.
 
+Metric Manager previews use Tableau's springboard insight and metric card image APIs through the existing authenticated connection.
+The backend verifies the exact metric, definition, and datasource before rendering.
+The frontend receives a bounded PNG image; Tableau credentials remain in the backend.
+PNG decoding and CRC validation use `pngjs`; resource guards reject oversized dimensions, duplicate headers, and unsupported interlaced images before decoding.
+Preview images remain in memory and are discarded when the context or inventory changes.
+The card uses one successful period-over-period insight and the highest-scored successful supporting insight, preserving Tableau's visualization, facts, and markup.
+Provider order breaks equal scores.
+Missing required insights produce an unavailable state; unrelated partial insight failures can still yield a usable card.
+The image API requires Tableau Cloud support introduced with API 3.29.
+Provider-shaped fixtures cover mapping, permissions, context changes, size limits, and response failures; they do not establish live rendering compatibility.
+
 Keep partial and truncated results visible in the interface.
 An empty visible subset is not evidence that a datasource has no definitions.
 

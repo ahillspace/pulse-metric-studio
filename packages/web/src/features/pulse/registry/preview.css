@@ -1,0 +1,80 @@
+.pulse-registry-content {
+  display: grid;
+  min-width: 0;
+}
+.pulse-registry-content.has-preview {
+  grid-template-columns: minmax(0, 1fr) 360px;
+  align-items: start;
+}
+.pulse-registry-content .pulse-registry-list {
+  min-width: 0;
+  overflow-x: auto;
+}
+.pulse-metric-preview {
+  position: sticky;
+  top: 0;
+  min-width: 0;
+  padding: 16px;
+  border-left: 1px solid #36363e;
+  background: #222227;
+}
+.pulse-metric-preview header {
+  display: flex;
+  align-items: start;
+  gap: 8px;
+}
+.pulse-metric-preview h3 {
+  flex: 1;
+  margin: 3px 0;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.pulse-preview-timeframe {
+  margin: 5px 0 16px;
+  color: #aaaab7;
+  font-size: 12px;
+}
+.pulse-preview-content {
+  min-height: 160px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #b8b8c4;
+}
+.pulse-preview-content img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 8px;
+}
+.pulse-preview-content p {
+  padding: 16px 0;
+  overflow-wrap: anywhere;
+}
+.pulse-metric-preview footer {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}
+.pulse-app .pulse-registry-icon[aria-pressed="true"] {
+  color: #c5bffa;
+  background: #393447;
+}
+.pulse-registry-content.has-preview .def-head,
+.pulse-registry-content.has-preview .variant-row {
+  flex-wrap: wrap;
+}
+@media (max-width: 1000px) {
+  .pulse-registry-content.has-preview {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .pulse-metric-preview {
+    position: static;
+    grid-row: 1;
+    border-left: 0;
+    border-bottom: 1px solid #36363e;
+  }
+  .pulse-preview-content img {
+    max-width: 400px;
+  }
+}

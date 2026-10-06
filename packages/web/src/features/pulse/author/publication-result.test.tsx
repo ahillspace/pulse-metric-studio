@@ -3,7 +3,8 @@ import test from "node:test";
 import React from "react";
 import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
-import { PublicationResult, pulseSiteUrl } from "./PublicationResult";
+import { PublicationResult } from "./PublicationResult";
+import { pulseSiteUrl } from "../shell/tableau-links";
 import { inventoryCounts } from "../registry/InventoryCounts";
 import { inventory, receipt } from "../testing/fixtures";
 

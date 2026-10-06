@@ -60,10 +60,42 @@ export function classifyStatus(status: number, bodyText: string): TableauError['
   return 'http';
 }
 
-async function parseBody(resp: Response): Promise<unknown> {
-  const text = await resp.text().catch(() => '');
+async function parseBody(resp: Response, maxBytes?: number, timeoutMs = 30_000): Promise<unknown> {
+  const text = maxBytes === undefined ? await resp.text().catch(() => '') : await readBoundedBody(resp, maxBytes, timeoutMs);
   if (!text) return null;
   try { return JSON.parse(text); } catch { return text; }
+}
+
+async function readBoundedBody(resp: Response, maxBytes: number, timeoutMs: number): Promise<string> {
+  const tooLarge = () => new TableauError('Tableau response exceeds the permitted size.', 502);
+  if (Number(resp.headers.get('content-length')) > maxBytes) {
+    void resp.body?.cancel().catch(() => {});
+    throw tooLarge();
+  }
+  if (!resp.body) return '';
+  const reader = resp.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  let timer: ReturnType<typeof setTimeout>;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(new TableauError('Tableau response body timed out.', 0, '', 'network'));
+      void reader.cancel().catch(() => {});
+    }, timeoutMs);
+  });
+  try {
+    for (;;) {
+      const { value, done } = await Promise.race([reader.read(), deadline]);
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxBytes) {
+        void reader.cancel().catch(() => {});
+        throw tooLarge();
+      }
+      chunks.push(value);
+    }
+  } finally { clearTimeout(timer!); reader.releaseLock(); }
+  return Buffer.concat(chunks, size).toString('utf8');
 }
 
 export async function tableauFetch(
@@ -176,9 +208,9 @@ function validationDetail(resp: Response): string {
 }
 
 /** GET expecting JSON; throws typed TableauError on failure. */
-export async function getJson<T>(session: TableauSession, path: string, accept?: string, timeoutMs?: number): Promise<T> {
+export async function getJson<T>(session: TableauSession, path: string, accept?: string, timeoutMs?: number, maxResponseBytes?: number): Promise<T> {
   const resp = await tableauFetch(session, path, { method: 'GET', headers: { Accept: accept ?? 'application/json' }, timeoutMs });
-  const body = await parseBody(resp);
+  const body = await parseBody(resp, maxResponseBytes, timeoutMs);
   if (!resp.ok) {
     const snippet = typeof body === 'string' ? body.slice(0, 500) : JSON.stringify(body)?.slice(0, 500) ?? '';
     throw new TableauError(
@@ -195,7 +227,7 @@ export async function postJson<T>(
   session: TableauSession,
   path: string,
   body: unknown,
-  opts: { contentType?: string; accept?: string; method?: string; timeoutMs?: number } = {},
+  opts: { contentType?: string; accept?: string; method?: string; timeoutMs?: number; maxResponseBytes?: number } = {},
 ): Promise<T> {
   const resp = await tableauFetch(session, path, {
     method: opts.method ?? 'POST',
@@ -206,7 +238,7 @@ export async function postJson<T>(
     body: typeof body === 'string' ? body : JSON.stringify(body),
     timeoutMs: opts.timeoutMs,
   });
-  const respBody = await parseBody(resp);
+  const respBody = await parseBody(resp, opts.maxResponseBytes, opts.timeoutMs);
   if (!resp.ok) {
     const snippet = typeof respBody === 'string' ? respBody.slice(0, 800) : JSON.stringify(respBody)?.slice(0, 800) ?? '';
     throw new TableauError(
