@@ -37,6 +37,7 @@ test('Pulse does not send infrastructure failures through the JSON repair loop',
 
 function trackingProvider(
   responses: string[],
+  truncated = false,
 ): { provider: LlmProvider; commits: Array<{ kind: 'success' } | { kind: 'failure'; reason: string | null }>; calls: () => number } {
   let calls = 0;
   const commits: Array<{ kind: 'success' } | { kind: 'failure'; reason: string | null }> = [];
@@ -55,7 +56,7 @@ function trackingProvider(
       complete: async () => {
         const text = responses[Math.min(calls, responses.length - 1)];
         calls += 1;
-        return { text, provider: 'gateway', model: 'gateway-model' };
+        return { text, provider: 'gateway', model: 'gateway-model', truncated };
       },
     },
   };
@@ -200,9 +201,28 @@ test('Pulse terminates a repair failure with a failure commit, never a success',
     } as any,
     chat: [],
     userMessage: 'Build metrics',
-  }), /could not produce valid ops after repair/);
+  }), (error: unknown) => error instanceof LlmProviderError && error.code === 'invalid_model_output' && /could not produce a valid draft after one repair attempt/.test(error.message));
   assert.equal(calls(), 2);
-  assert.deepEqual(commits, [{ kind: 'failure', reason: 'Model could not produce valid ops after repair: Model response contained no parsable JSON object.' }]);
+  assert.deepEqual(commits, [{ kind: 'failure', reason: 'The assistant could not produce a valid draft after one repair attempt: Model response contained no parsable JSON object.' }]);
+});
+
+test('Pulse reports a truncated draft without a futile repair round-trip', async () => {
+  const { provider, commits, calls } = trackingProvider(['{"assistantMessage":"partial","ops":[{"op":'], true);
+  await assert.rejects(() => authorOps(provider, {
+    catalog: {
+      datasourceName: 'Sales',
+      datasourceLuid: 'sales',
+      measures: [],
+      dimensions: [],
+      timeDimensions: [],
+      parameters: [],
+    } as any,
+    chat: [],
+    userMessage: 'Build metrics',
+  }), (error: unknown) => error instanceof LlmProviderError && /output token limit/.test(error.message));
+  assert.equal(calls(), 1);
+  assert.equal(commits.length, 1);
+  assert.equal(commits[0]?.kind, 'failure');
 });
 
 test('Pulse commits a single success after a successful repair round-trip', async () => {

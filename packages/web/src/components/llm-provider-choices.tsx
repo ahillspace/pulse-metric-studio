@@ -14,6 +14,31 @@ export function providerChoice(protocol: LlmProtocol): ProviderChoice {
   return PROVIDER_CHOICES.find(choice => choice.protocol === protocol) ?? PROVIDER_CHOICES[1];
 }
 
+const AUTH_ACCESS: Record<LlmAuthMode, string> = {
+  aws: 'AWS credentials',
+  bearer: 'Bearer token',
+  'x-api-key': 'API key',
+  none: 'No authentication',
+};
+
+/** Describes how a saved profile authenticates, which can differ from its provider's default. */
+export function providerAccess(protocol: LlmProtocol, authMode: LlmAuthMode): string {
+  const choice = providerChoice(protocol);
+  return protocol === 'opencode' || authMode === choice.authMode ? choice.access : AUTH_ACCESS[authMode];
+}
+
+export function providerDescription(protocol: LlmProtocol, authMode: LlmAuthMode): string {
+  if (protocol === 'bedrock-converse' && authMode === 'bearer') {
+    return 'Use a Bedrock API key or a company gateway token with access to your selected Bedrock model.';
+  }
+  return providerChoice(protocol).description;
+}
+
+/** macOS text substitution turns typed quotes into curly quotes, which break JSON and shell commands. */
+export function straightenQuotes(text: string): string {
+  return text.replace(/[\u201C\u201D\u201E\u201F\u2033]/g, '"').replace(/[\u2018\u2019\u201A\u201B\u2032]/g, "'");
+}
+
 export function newProviderId(base: string, profiles: Pick<LlmProfilePublic, 'id'>[]): string {
   const used = new Set(profiles.map(profile => profile.id));
   if (!used.has(base)) return base;

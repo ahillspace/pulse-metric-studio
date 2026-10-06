@@ -16,6 +16,8 @@ export interface CompleteResult {
   text: string;
   provider?: string;
   model?: string | null;
+  /** The provider stopped because the response reached the output token limit. */
+  truncated?: boolean;
 }
 
 export interface LlmProviderHealth {
