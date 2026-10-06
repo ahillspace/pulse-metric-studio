@@ -20,25 +20,28 @@ It is an independent tool, not a Tableau or Salesforce product.
 
 ## Install
 
-Run one command.
+The repository is private, so installing needs the [GitHub CLI](https://cli.github.com) signed in (`gh auth login`) with an account that can open it.
+Then run one command.
 
 macOS (Terminal):
 
 ```bash
-curl -fsSL https://github.com/sfdc-qbranch-emu/pulse-metric-studio/releases/latest/download/install.sh | sh
+gh release download --repo sfdc-qbranch-emu/pulse-metric-studio --pattern install.sh -O - | sh
 ```
 
 Windows (PowerShell):
 
 ```powershell
-irm https://github.com/sfdc-qbranch-emu/pulse-metric-studio/releases/latest/download/install.ps1 | iex
+& ([scriptblock]::Create((gh release download --repo sfdc-qbranch-emu/pulse-metric-studio --pattern install.ps1 -O - | Out-String)))
 ```
 
 The installer picks the right build for your machine, verifies it against the release's `checksums.txt`, installs Pulse Metric Studio, and starts it.
 Run the same command again to update.
 
-- Install a specific version: `... | sh -s -- --version 0.1.0` on macOS, or set `$env:PULSE_METRIC_STUDIO_VERSION = '0.1.0'` first on Windows.
-- Uninstall (keeps your connections, drafts, and history): `... | sh -s -- uninstall` on macOS, or set `$env:PULSE_METRIC_STUDIO_ACTION = 'Uninstall'` first on Windows.
+- Install a specific version: `... | sh -s -- --version 0.1.0` on macOS, or append `-Version 0.1.0` on Windows.
+- Uninstall (keeps your connections, drafts, and history): `... | sh -s -- uninstall` on macOS, or append `-Action Uninstall` on Windows.
+
+If the command cannot find the release, you are probably signed in with the wrong account; run `gh auth switch`.
 
 <details>
 <summary>Installing by hand from the Releases page</summary>

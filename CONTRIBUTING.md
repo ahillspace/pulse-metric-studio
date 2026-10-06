@@ -45,7 +45,7 @@ Releases are assembled locally and published by hand.
 4. Run `sh scripts/stage-release.sh release-assets "windows-artifacts/nsis/Pulse Metric Studio_X.Y.Z_x64-setup.exe"`, which renames the installers, adds the install scripts, and writes `checksums.txt`.
    The staged install scripts default to `sfdc-qbranch-emu/pulse-metric-studio`; add `--repo OWNER/NAME` before the output directory to publish elsewhere.
 5. Upload a draft with `gh release create vX.Y.Z release-assets/* --draft --repo sfdc-qbranch-emu/pulse-metric-studio`, then publish it with `gh release edit vX.Y.Z --draft=false --repo sfdc-qbranch-emu/pulse-metric-studio`.
-   The one-line installers read `releases/latest/download`, so they only see published releases.
+   The one-line installers install the latest published release, so drafts stay invisible to them.
 
 `checksums.txt` confirms a download is intact; it does not prove who published it.
 
