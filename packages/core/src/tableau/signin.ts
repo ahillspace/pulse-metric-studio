@@ -1,4 +1,6 @@
-import { TableauError } from './rest-client.js';
+import { readBoundedBody, redactCredentials, TableauError } from './rest-client.js';
+
+const MAX_SIGNIN_RESPONSE_BYTES = 1024 * 1024;
 
 /**
  * PAT sign-in against Tableau (Cloud or on-prem). Uses JSON response parsing
@@ -72,7 +74,7 @@ export async function patSignin(input: {
   }
 
   if (!resp.ok) {
-    const text = await resp.text().catch(() => '');
+    const text = redactCredentials(await readBoundedBody(resp, MAX_SIGNIN_RESPONSE_BYTES, 20_000).catch(() => ''), [input.patSecret]);
     throw new TableauError(
       `Tableau rejected sign-in (${resp.status}). Check PAT name/secret and site.`,
       resp.status,
@@ -91,7 +93,7 @@ export async function patSignin(input: {
 }
 
 async function parseSigninBody(resp: Response): Promise<{ token?: string; siteId?: string; userId?: string }> {
-  const text = await resp.text().catch(() => '');
+  const text = await readBoundedBody(resp, MAX_SIGNIN_RESPONSE_BYTES, 20_000);
   try {
     const json = JSON.parse(text) as {
       credentials?: { token?: string; site?: { id?: string }; user?: { id?: string } };

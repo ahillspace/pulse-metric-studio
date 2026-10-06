@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
-import { getJson, postJson, TableauError, type TableauSession } from './rest-client.js';
+import { DEFAULT_MAX_RESPONSE_BYTES, getJson, postJson, TableauError, type TableauSession } from './rest-client.js';
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
 const session: TableauSession = { serverUrl: 'https://example.test', siteContentUrl: 'site', siteId: 'site', userId: 'user', token: 'test', apiVersion: '3.29' };
@@ -26,4 +26,18 @@ test('opt-in bounded JSON body has a deadline even if headers have already arriv
 test('bounded JSON reads valid response exactly at its byte limit', async () => {
   globalThis.fetch = async () => new Response('{"ok":true}');
   assert.deepEqual(await getJson(session, '/api/-/fixture', undefined, 100, 11), { ok: true });
+});
+
+test('Tableau reads without an explicit limit still stop at the default size cap', async () => {
+  globalThis.fetch = async () => new Response('{}', { headers: { 'content-length': String(DEFAULT_MAX_RESPONSE_BYTES + 1) } });
+  await assert.rejects(getJson(session, '/api/-/fixture'), /exceeds the permitted size/);
+});
+
+test('Tableau error snippets never reflect the session token', async () => {
+  const tokenSession = { ...session, token: 'session-token-value' };
+  globalThis.fetch = async () => Response.json({ error: { detail: 'Token session-token-value is not valid here.' } }, { status: 400 });
+  await assert.rejects(getJson(tokenSession, '/api/-/fixture'), (error: unknown) =>
+    error instanceof TableauError && !error.bodySnippet.includes('session-token-value') && error.bodySnippet.includes('[redacted]'));
+  await assert.rejects(postJson(tokenSession, '/api/-/fixture', {}), (error: unknown) =>
+    error instanceof TableauError && !error.bodySnippet.includes('session-token-value'));
 });

@@ -9,8 +9,10 @@ const MAX_DETAIL_LENGTH = 300;
  * model) instead of a bare status code. Gateways often nest the upstream error
  * as a JSON string inside their own envelope, so string values are re-parsed.
  * Only structured JSON error messages are used; unstructured bodies can carry
- * arbitrary server output and are dropped. The request's own credentials are
- * removed in addition to the generic credential-field redaction.
+ * arbitrary server output and are dropped. The request's own credentials
+ * (token, saved secret, and custom header values, including the credential
+ * part of a "Bearer ..." style value) are removed in addition to the generic
+ * credential-field redaction.
  */
 export async function readProviderErrorDetail(response: Response, credentials: Array<string | undefined> = []): Promise<string | undefined> {
   let body: unknown;
@@ -21,15 +23,25 @@ export async function readProviderErrorDetail(response: Response, credentials: A
   }
   let detail = errorMessageFrom(body, 0);
   if (!detail) return undefined;
-  for (const credential of credentials) {
-    if (credential && credential.length >= 4) detail = detail.split(credential).join('[redacted]');
-  }
+  for (const credential of redactionValues(credentials)) detail = detail.split(credential).join('[redacted]');
   return sanitizeProviderMessage(detail).slice(0, MAX_DETAIL_LENGTH) || undefined;
 }
 
 export function withProviderDetail(message: string, detail: string | undefined): string {
   if (!detail) return message;
   return `${message.replace(/\.$/, '')}: ${detail}`;
+}
+
+/** Every value to remove, longest first so a full value is redacted before its parts. */
+function redactionValues(credentials: Array<string | undefined>): string[] {
+  const values = new Set<string>();
+  for (const credential of credentials) {
+    const trimmed = credential?.trim();
+    if (!trimmed || trimmed.length < 4) continue;
+    values.add(trimmed);
+    for (const part of trimmed.split(/\s+/)) if (part.length >= 8) values.add(part);
+  }
+  return [...values].sort((left, right) => right.length - left.length);
 }
 
 function errorMessageFrom(value: unknown, depth: number): string | undefined {
@@ -64,9 +76,10 @@ async function readBoundedText(response: Response): Promise<string> {
   while (bytes < MAX_ERROR_BODY_BYTES) {
     const { done, value } = await reader.read();
     if (done) break;
-    chunks.push(value);
-    bytes += value.byteLength;
+    const kept = value.subarray(0, MAX_ERROR_BODY_BYTES - bytes);
+    chunks.push(kept);
+    bytes += kept.byteLength;
   }
   await reader.cancel().catch(() => undefined);
-  return Buffer.concat(chunks).toString('utf8').slice(0, MAX_ERROR_BODY_BYTES);
+  return Buffer.concat(chunks).toString('utf8');
 }

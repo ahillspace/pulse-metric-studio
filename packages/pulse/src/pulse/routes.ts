@@ -76,22 +76,17 @@ export function registerPulseRoutes(
   // paths, so the field travels as a query parameter.
   app.get("/api/pulse/dimensions/count", async (req) => {
     const session = requireSession();
-    const query = (req.query ?? {}) as Record<string, unknown>;
+    const query = dimensionQuery(app, req.query);
     return pulseDimensionalForkService.countDimensionMembers(session, {
-      sourceMetricIds: repeatedQueryValues(query.sourceMetricId),
-      fieldId: typeof query.fieldId === "string" ? query.fieldId : "",
+      sourceMetricIds: query.sourceMetricIds,
+      fieldId: query.fieldId,
     });
   });
 
   app.get("/api/pulse/dimensions/values", async (req) => {
     const session = requireSession();
-    const query = (req.query ?? {}) as Record<string, unknown>;
-    return pulseDimensionalForkService.listDimensionValues(session, {
-      sourceMetricIds: repeatedQueryValues(query.sourceMetricId),
-      fieldId: typeof query.fieldId === "string" ? query.fieldId : "",
-      search: typeof query.search === "string" ? query.search : undefined,
-      all: query.all === "1" || query.all === "true",
-    });
+    const query = dimensionQuery(app, req.query);
+    return pulseDimensionalForkService.listDimensionValues(session, query);
   });
 
   app.post("/api/pulse/metrics/fork", async (req, reply) => {
@@ -186,6 +181,26 @@ export function registerPulseRoutes(
       throw app.httpErrors.badRequest("metricIds array required");
     return { details: await getFollowersDetail(session, body.metricIds) };
   });
+}
+
+const MAX_DIMENSION_SOURCE_METRICS = 500;
+const MAX_DIMENSION_ID_LENGTH = 512;
+const MAX_DIMENSION_SEARCH_LENGTH = 256;
+
+/** Bounded dimension query parameters; oversized input is rejected before any Tableau call. */
+export function dimensionQuery(app: FastifyInstance, raw: unknown) {
+  const query = (raw ?? {}) as Record<string, unknown>;
+  const sourceMetricIds = repeatedQueryValues(query.sourceMetricId);
+  const fieldId = typeof query.fieldId === "string" ? query.fieldId : "";
+  const search = typeof query.search === "string" ? query.search : undefined;
+  if (
+    sourceMetricIds.length > MAX_DIMENSION_SOURCE_METRICS ||
+    sourceMetricIds.some((id) => id.length > MAX_DIMENSION_ID_LENGTH) ||
+    fieldId.length > MAX_DIMENSION_ID_LENGTH ||
+    (search?.length ?? 0) > MAX_DIMENSION_SEARCH_LENGTH
+  )
+    throw app.httpErrors.badRequest("The dimension request is too large.");
+  return { sourceMetricIds, fieldId, search, all: query.all === "1" || query.all === "true" };
 }
 
 export function repeatedQueryValues(value: unknown): string[] {

@@ -121,7 +121,7 @@ export class HttpLlmProvider {
         cause: error,
       });
     }
-    if (!response.ok) throw httpProviderError(response, await readProviderErrorDetail(response, [token]), this.id, this.profile.model, this.label);
+    if (!response.ok) throw httpProviderError(response, await readProviderErrorDetail(response, [token, this.profile.secret, ...Object.values(this.profile.headers ?? {})]), this.id, this.profile.model, this.label);
     const data = await readJsonResponse(response, this.id, this.profile.model);
     const text = responseText(protocol, data);
     if (!text) {

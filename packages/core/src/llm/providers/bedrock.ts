@@ -163,7 +163,7 @@ export class BedrockProvider {
     if (!response.ok) {
       const requestId = response.headers.get('x-amzn-requestid');
       const reference = requestId && /^[a-z0-9._:-]{1,160}$/i.test(requestId) ? requestId : undefined;
-      const detail = await readProviderErrorDetail(response, [token]);
+      const detail = await readProviderErrorDetail(response, [token, this.profile.secret, ...Object.values(this.profile.headers ?? {})]);
       throw new LlmProviderError({
         code: response.status === 401 || response.status === 403 ? 'provider_authentication' : response.status === 429 ? 'provider_quota' : response.status >= 500 ? 'provider_unavailable' : 'provider_execution',
         message: withProviderDetail(`Amazon Bedrock request failed with HTTP ${response.status}.`, detail),

@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { beforeEach, test } from 'node:test';
-import { clearCredentialCache, resolveCredentialCommand, resolveProfileSecret } from './credential.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { clearCredentialCache, credentialCommandEnv, resolveCredentialCommand, resolveProfileSecret, runCredentialCommand } from './credential.js';
 
 beforeEach(() => {
   clearCredentialCache();
@@ -76,4 +79,33 @@ test('resolveProfileSecret trims the static secret when no credential command is
     runner,
   );
   assert.equal(token, 'static-secret');
+});
+
+test('credential commands never inherit app-internal environment variables', async () => {
+  process.env.PULSE_METRIC_STUDIO_CREDENTIAL_BROKER_URL = 'http://127.0.0.1:1';
+  process.env.PULSE_METRIC_STUDIO_TEST_SECRET = 'internal';
+  try {
+    assert.deepEqual(Object.keys(credentialCommandEnv()).filter((name) => name.startsWith('PULSE_METRIC_STUDIO_')), []);
+    assert.equal(credentialCommandEnv().PATH, process.env.PATH);
+    const printed = await runCredentialCommand(
+      `"${process.execPath}" -e "process.stdout.write(Object.keys(process.env).filter((n) => n.startsWith('PULSE_METRIC_STUDIO_')).join(',') || 'none')"`,
+    );
+    assert.equal(printed, 'none');
+  } finally {
+    delete process.env.PULSE_METRIC_STUDIO_CREDENTIAL_BROKER_URL;
+    delete process.env.PULSE_METRIC_STUDIO_TEST_SECRET;
+  }
+});
+
+test('a timed-out credential command is stopped with everything it started', { skip: process.platform === 'win32' }, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pms-credential-'));
+  const pidFile = path.join(directory, 'pid');
+  try {
+    await assert.rejects(runCredentialCommand(`sleep 30 & echo $! > "${pidFile}"; wait`, 500), /timed out/);
+    const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.throws(() => process.kill(pid, 0), /ESRCH/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
