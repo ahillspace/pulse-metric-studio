@@ -1,11 +1,12 @@
 #!/bin/sh
 # Pulse Metric Studio installer for macOS.
 #
-# One-line install:
-#   curl -fsSL https://github.com/sfdc-qbranch-emu/pulse-metric-studio/releases/latest/download/install.sh | sh
+# One-line install (the repository is private, so this needs the GitHub CLI
+# signed in with an account that can read it):
+#   gh release download --repo sfdc-qbranch-emu/pulse-metric-studio --pattern install.sh -O - | sh
 #
 # Pass options through sh -s, for example:
-#   curl -fsSL https://github.com/sfdc-qbranch-emu/pulse-metric-studio/releases/latest/download/install.sh | sh -s -- uninstall
+#   gh release download --repo sfdc-qbranch-emu/pulse-metric-studio --pattern install.sh -O - | sh -s -- uninstall
 
 set -eu
 
@@ -121,7 +122,8 @@ main() {
         exit 0
     fi
 
-    command -v curl >/dev/null 2>&1 || fail 'curl is required.'
+    command -v gh >/dev/null 2>&1 || fail 'The GitHub CLI (gh) is required. Install it with: brew install gh'
+    gh auth status --hostname github.com >/dev/null 2>&1 || fail 'The GitHub CLI is not signed in. Run: gh auth login'
 
     case "$(uname -m)" in
         arm64) arch='aarch64' ;;
@@ -130,9 +132,10 @@ main() {
     esac
 
     if [ "$version" = 'latest' ]; then
-        release_url="https://github.com/${repository}/releases/latest/download"
+        tag=$(gh release view --repo "$repository" --json tagName --jq .tagName 2>/dev/null) \
+            || fail "Could not find the latest release of ${repository}. Check that your GitHub account can open https://github.com/${repository}."
     else
-        release_url="https://github.com/${repository}/releases/download/v${version#v}"
+        tag="v${version#v}"
     fi
 
     work_dir=$(mktemp -d "${TMPDIR:-/tmp}/pulse-metric-studio-install.XXXXXX")
@@ -145,18 +148,19 @@ main() {
     }
     trap cleanup EXIT INT TERM
 
-    curl -fsSL --retry 2 -o "${work_dir}/checksums.txt" "${release_url}/checksums.txt" \
-        || fail "Could not read the release from https://github.com/${repository}/releases (version ${version})."
-    # The manifest names every installer, so it also tells us which file to fetch.
-    dmg_name=$(awk -v arch="$arch" '{ name = $2; sub(/^\*/, "", name) } name ~ ("^Pulse-Metric-Studio_.*_" arch "\\.dmg$") { print name }' "${work_dir}/checksums.txt")
-    [ -n "$dmg_name" ] || fail "The release has no macOS ${arch} disk image."
-    [ "$(printf '%s\n' "$dmg_name" | wc -l | tr -d ' ')" -eq 1 ] || fail 'The release lists more than one matching disk image.'
-    tag="v$(printf '%s' "$dmg_name" | sed 's/^Pulse-Metric-Studio_\(.*\)_[^_]*\.dmg$/\1/')"
-
     info "Downloading Pulse Metric Studio ${tag} for ${arch}..."
-    dmg_path="${work_dir}/${dmg_name}"
-    curl -fSL --retry 2 --progress-bar -o "$dmg_path" "${release_url}/${dmg_name}" \
-        || fail "Could not download ${dmg_name}."
+    gh release download "$tag" --repo "$repository" --dir "$work_dir" \
+        --pattern "Pulse-Metric-Studio_*_${arch}.dmg" --pattern 'checksums.txt' >/dev/null 2>&1 \
+        || fail "Could not download Pulse Metric Studio ${tag} from ${repository}."
+
+    dmg_path=''
+    for candidate in "$work_dir"/Pulse-Metric-Studio_*_"${arch}".dmg; do
+        [ -f "$candidate" ] || continue
+        [ -z "$dmg_path" ] || fail 'The release contains more than one matching disk image.'
+        dmg_path=$candidate
+    done
+    [ -n "$dmg_path" ] || fail "Release ${tag} has no macOS ${arch} disk image."
+    [ -f "${work_dir}/checksums.txt" ] || fail "Release ${tag} has no checksums.txt, so the download cannot be verified."
 
     dmg_name=$(basename "$dmg_path")
     verify_checksum "$dmg_path"
@@ -193,7 +197,7 @@ main() {
         fail "Could not move Pulse Metric Studio into ${install_dir}. The previous version was put back."
     fi
     rm -rf "$old_app"
-    # curl does not quarantine downloads, but strip the flag anyway so Gatekeeper
+    # gh does not quarantine downloads, but strip the flag anyway so Gatekeeper
     # never blocks the self-signed app on first launch.
     xattr -dr com.apple.quarantine "$app_path" >/dev/null 2>&1 || true
 

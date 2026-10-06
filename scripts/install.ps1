@@ -1,22 +1,22 @@
 # Pulse Metric Studio installer for Windows.
 #
-# One-line install:
-#   irm https://github.com/sfdc-qbranch-emu/pulse-metric-studio/releases/latest/download/install.ps1 | iex
+# One-line install (the repository is private, so this needs the GitHub CLI
+# signed in with an account that can read it):
+#   & ([scriptblock]::Create((gh release download --repo sfdc-qbranch-emu/pulse-metric-studio --pattern install.ps1 -O - | Out-String)))
 #
-# Options come from environment variables when piped into iex, for example:
-#   $env:PULSE_METRIC_STUDIO_ACTION = 'Uninstall'; irm https://github.com/sfdc-qbranch-emu/pulse-metric-studio/releases/latest/download/install.ps1 | iex
+# Pass options after the script block, for example:
+#   & ([scriptblock]::Create((gh release download --repo sfdc-qbranch-emu/pulse-metric-studio --pattern install.ps1 -O - | Out-String))) -Action Uninstall
 
 [CmdletBinding()]
 param(
     [ValidateSet('Install', 'Uninstall')]
-    [string]$Action = $(if ($env:PULSE_METRIC_STUDIO_ACTION) { $env:PULSE_METRIC_STUDIO_ACTION } else { 'Install' }),
+    [string]$Action = 'Install',
     [string]$Version = $(if ($env:PULSE_METRIC_STUDIO_VERSION) { $env:PULSE_METRIC_STUDIO_VERSION } else { 'latest' }),
     [string]$Repo = $(if ($env:PULSE_METRIC_STUDIO_REPO) { $env:PULSE_METRIC_STUDIO_REPO } else { 'sfdc-qbranch-emu/pulse-metric-studio' }),
     [switch]$NoLaunch
 )
 
 $ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
 
 # Throw rather than exit: this script usually runs as a script block inside the
 # user's own PowerShell session, and exit would close their window.
@@ -48,26 +48,33 @@ if ($Action -eq 'Uninstall') {
     return
 }
 
-$releaseUrl = if ($Version -eq 'latest') { "https://github.com/$Repo/releases/latest/download" } else { "https://github.com/$Repo/releases/download/v$($Version.TrimStart('v'))" }
+if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+    Fail 'The GitHub CLI (gh) is required. Install it with: winget install --id GitHub.cli'
+}
+gh auth status --hostname github.com *> $null
+if ($LASTEXITCODE -ne 0) { Fail 'The GitHub CLI is not signed in. Run: gh auth login' }
+
+if ($Version -eq 'latest') {
+    $tag = gh release view --repo $Repo --json tagName --jq .tagName 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $tag) {
+        Fail "Could not find the latest release of $Repo. Check that your GitHub account can open https://github.com/$Repo."
+    }
+} else {
+    $tag = 'v' + $Version.TrimStart('v')
+}
 
 $workDir = Join-Path ([System.IO.Path]::GetTempPath()) ("pulse-metric-studio-install-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $workDir | Out-Null
 try {
-    $manifest = Join-Path $workDir 'checksums.txt'
-    try { Invoke-WebRequest -UseBasicParsing -Uri "$releaseUrl/checksums.txt" -OutFile $manifest }
-    catch { Fail "Could not read the release from https://github.com/$Repo/releases (version $Version)." }
-    # The manifest names every installer, so it also tells us which file to fetch.
-    $names = @(foreach ($line in Get-Content $manifest) {
-        $parts = $line -split '\s+', 2
-        if ($parts.Count -eq 2) { $name = $parts[1].TrimStart('*'); if ($name -like 'Pulse-Metric-Studio_*_x64-setup.exe') { $name } }
-    })
-    if ($names.Count -ne 1) { Fail 'The release must list exactly one Windows installer.' }
-    $tag = 'v' + ($names[0] -replace '^Pulse-Metric-Studio_(.*)_x64-setup\.exe$', '$1')
     Write-Host "Downloading Pulse Metric Studio $tag..."
-    $setupPath = Join-Path $workDir $names[0]
-    try { Invoke-WebRequest -UseBasicParsing -Uri "$releaseUrl/$($names[0])" -OutFile $setupPath }
-    catch { Fail "Could not download $($names[0])." }
-    $setup = Get-Item $setupPath
+    gh release download $tag --repo $Repo --dir $workDir --pattern 'Pulse-Metric-Studio_*_x64-setup.exe' --pattern 'checksums.txt' *> $null
+    if ($LASTEXITCODE -ne 0) { Fail "Could not download Pulse Metric Studio $tag from $Repo." }
+
+    $setup = @(Get-ChildItem -Path $workDir -Filter 'Pulse-Metric-Studio_*_x64-setup.exe')
+    if ($setup.Count -ne 1) { Fail "Release $tag must contain exactly one Windows installer." }
+    $setup = $setup[0]
+    $manifest = Join-Path $workDir 'checksums.txt'
+    if (-not (Test-Path $manifest)) { Fail "Release $tag has no checksums.txt, so the download cannot be verified." }
 
     $found = @(foreach ($line in Get-Content $manifest) {
         $parts = $line -split '\s+', 2
