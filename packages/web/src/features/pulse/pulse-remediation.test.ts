@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { DatasourceCatalog, MetricSelection } from '@pulse-metric-studio/shared';
-import type { FollowState } from '../../api/client.js';
+import type { FollowState } from './registry/view-types.js';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { applyDigestAudienceUpdate } from './digest-audience.js';
@@ -40,20 +40,17 @@ import {
   summarizeRegistryTargets,
   type RegistryActionItem,
 } from './registry-actions.js';
-import { decodeCombinedForkResponse } from './dimensional-fork-api.js';
-import { buildCreatePayloads, validateSelection } from './lib/payloads.js';
+import { decodeVariantResponse } from './api/registry.js';
+import { validatePulseDocument, emptyPulseDocument } from '@pulse-metric-studio/shared';
 import {
   consumeFollowTargetSearchEscape,
   FollowTargetModal,
 } from './components/FollowTargetModal.js';
 import {
   countDistinctFollowers,
-  deleteSelectedMetrics,
   deletionBlastRadius,
   followerDetailLines,
   forkFriendlyName,
-  isDefaultMetric,
-  planDeletion,
   previewSourceLabel,
   summarizeFollowerRelationships,
 } from './components/ExistingMetrics.js';
@@ -247,9 +244,8 @@ test('publish readiness rejects stale time field IDs and emits count-only diagno
   const message = emptyTimeDimensionDiagnostic(catalog);
   assert.match(message, /20 discovered/);
   assert.doesNotMatch(message, /order-date/);
-  const errors = validateSelection({ metrics: { sales: selection }, slicers: {}, catalog });
-  assert.match(errors[0]?.message ?? '', /no longer eligible/);
-  assert.deepEqual(buildCreatePayloads({ metrics: { sales: selection }, slicers: {}, catalog }), []);
+  const errors = validatePulseDocument({ ...emptyPulseDocument(), metrics: { sales: selection } }, catalog);
+  assert.ok(errors.some((issue) => issue.field.includes('timeDimension') || issue.message.toLowerCase().includes('time')));
 });
 
 test('follow-state batches merge without dropping metrics', () => {
@@ -285,7 +281,7 @@ test('follow-state labels preserve relationships when counts are unavailable', (
       'm-1': {
         status: 'partial',
         relationshipStatus: 'available',
-        followerCountStatus: 'unavailable',
+        followerCountStatus: 'unavailable', diagnostics: [],
       },
     },
   }, 'm-1'), 'You follow - follower count unavailable');
@@ -371,8 +367,6 @@ test('follow target search selects with Enter but never with Space, and exposes 
     metrics: [{ id: 'metric-exact', label: 'Exact metric' }],
     currentUserId: 'user-exact',
     onClose: () => undefined,
-    onResults: () => undefined,
-    onComplete: () => undefined,
   }));
   assert.match(markup, /role="combobox"/);
   assert.match(markup, /aria-haspopup="listbox"/);
@@ -438,10 +432,10 @@ test('fork friendly names lead with the source name and never a bare LUID', () =
     ),
     'Average Win Rate - Last 30 days',
   );
-  // Nothing to describe -> fall back to a short LUID suffix, never a bare LUID.
+  // No extra scope information leaves the business name alone.
   assert.equal(
     forkFriendlyName(undefined, 'Average Win Rate', '30654403-3e91-4f1f-a304-21ad1dcb652e'),
-    'Average Win Rate - 30654403',
+    'Average Win Rate',
   );
   // An unnamed metric carries its own LUID as `name` upstream; that must not
   // lead the label - fall back to the definition name plus the timeframe.
@@ -456,11 +450,11 @@ test('fork friendly names lead with the source name and never a bare LUID', () =
 });
 
 test('current user fallback row is searchable and labelled with their real name', () => {
-  const named = currentUserFollowTarget('user-1', 'Morgan Reed');
-  assert.deepEqual(named, { id: 'user-1', kind: 'USER', label: 'Morgan Reed (you)', searchText: 'Morgan Reed' });
+  const named = currentUserFollowTarget('user-1', 'Andrew Hill');
+  assert.deepEqual(named, { id: 'user-1', kind: 'USER', label: 'Andrew Hill (you)', searchText: 'Andrew Hill' });
   // Searchable by the REAL name, not only the "(you)" decoration.
-  assert.equal(followTargetMatchesQuery(named!, 'morgan'), true);
-  assert.equal(followTargetMatchesQuery(named!, 'reed'), true);
+  assert.equal(followTargetMatchesQuery(named!, 'andrew'), true);
+  assert.equal(followTargetMatchesQuery(named!, 'hill'), true);
   assert.equal(followTargetMatchesQuery(named!, 'you'), true);
   assert.equal(followTargetMatchesQuery(named!, 'nomatch'), false);
 
@@ -472,7 +466,7 @@ test('current user fallback row is searchable and labelled with their real name'
 
 test('current user stays in the fetched inventory, decorated and searchable by real username', () => {
   const inventory: FollowTargetChoice[] = [
-    { id: 'user-1', kind: 'USER', label: 'Morgan Reed' },
+    { id: 'user-1', kind: 'USER', label: 'Andrew Hill' },
     { id: 'user-2', kind: 'USER', label: 'Ada Lovelace' },
     { id: 'group-1', kind: 'GROUP', label: 'Sales' },
   ];
@@ -481,11 +475,11 @@ test('current user stays in the fetched inventory, decorated and searchable by r
   assert.deepEqual(resolved.currentUser, {
     id: 'user-1',
     kind: 'USER',
-    label: 'Morgan Reed (you)',
-    searchText: 'Morgan Reed',
+    label: 'Andrew Hill (you)',
+    searchText: 'Andrew Hill',
   });
   // Still searchable by the real username, not just "(you)".
-  assert.equal(followTargetMatchesQuery(resolved.currentUser!, 'morgan'), true);
+  assert.equal(followTargetMatchesQuery(resolved.currentUser!, 'andrew'), true);
   // The current user is removed from "others" so they are not listed twice.
   assert.deepEqual(resolved.others.map((target) => target.id), ['user-2', 'group-1']);
 
@@ -493,13 +487,13 @@ test('current user stays in the fetched inventory, decorated and searchable by r
   const absent = resolveCurrentUserFollowTarget(
     [{ id: 'user-2', kind: 'USER', label: 'Ada Lovelace' }],
     'user-1',
-    'Morgan Reed',
+    'Andrew Hill',
   );
   assert.deepEqual(absent.currentUser, {
     id: 'user-1',
     kind: 'USER',
-    label: 'Morgan Reed (you)',
-    searchText: 'Morgan Reed',
+    label: 'Andrew Hill (you)',
+    searchText: 'Andrew Hill',
   });
   assert.deepEqual(absent.others.map((target) => target.id), ['user-2']);
 });
@@ -513,7 +507,7 @@ test('row follower summary counts distinct individuals and groups from subscript
     followerCountsByMetricId: { 'm-1': userIds.length + groupIds.length },
     errors: [],
     availabilityByMetricId: {
-      'm-1': { status: 'available', relationshipStatus: 'available', followerCountStatus: 'available' },
+      'm-1': { status: 'available', relationshipStatus: 'available', followerCountStatus: 'available', diagnostics: [] },
     },
   });
   assert.deepEqual(summarizeFollowerRelationships(['m-1'], followStateWith(['u-1'], ['g-1'])), { user: '1', groups: '1' });
@@ -534,8 +528,8 @@ test('distinct follower counts dedupe across a definition and degrade gracefully
     followerCountsByMetricId: {},
     errors: [],
     availabilityByMetricId: {
-      'm-1': { status: 'available', relationshipStatus: 'available', followerCountStatus: 'available' },
-      'm-2': { status: 'available', relationshipStatus: 'available', followerCountStatus: 'available' },
+      'm-1': { status: 'available', relationshipStatus: 'available', followerCountStatus: 'available', diagnostics: [] },
+      'm-2': { status: 'available', relationshipStatus: 'available', followerCountStatus: 'available', diagnostics: [] },
     },
   };
   // u-2 and g-1 appear on both metrics but are counted once.
@@ -570,7 +564,7 @@ test('unavailable follow data never renders confirmed zero counts', () => {
       'metric-confirmed': {
         status: 'available',
         relationshipStatus: 'available',
-        followerCountStatus: 'available',
+        followerCountStatus: 'available', diagnostics: [],
       },
     },
   }, unavailable]);
@@ -587,111 +581,23 @@ test('unavailable follow data never renders confirmed zero counts', () => {
   assert.match(partialRadius.note ?? '', /true reach may be higher/);
 });
 
-test('isDefaultMetric flags the default by scoped state or explicit flag only', () => {
-  assert.equal(isDefaultMetric({ scopedState: 'default' }), true);
-  assert.equal(isDefaultMetric({ isDefault: true }), true);
-  assert.equal(isDefaultMetric({ scopedState: 'filtered', isDefault: false }), false);
-  assert.equal(isDefaultMetric({ scopedState: 'variant' }), false);
-  assert.equal(isDefaultMetric({}), false);
-});
-
-test('planDeletion deletes a selected fork individually without touching its definition', () => {
-  const inventory: PulseRegistryMetric[] = [
-    { metricId: 'default-1', definitionId: 'def-1', name: 'Deal Size', timeframeLabel: 'Month to date', measurementPeriod: null, scopedState: 'default', isDefault: true },
-    { metricId: 'fork-1', definitionId: 'def-1', name: 'Deal Size', timeframeLabel: 'Last 30 days', measurementPeriod: null, scopedState: 'variant', isDefault: false },
-  ];
-  const plan = planDeletion(
-    [inventory[1]],
-    inventory,
-    (metric) => `${metric.name} - ${metric.timeframeLabel}`,
-    (definitionId) => `Definition ${definitionId}`,
-    () => true,
-  );
-  // Selecting a fork never cascades its definition (user requirement).
-  assert.deepEqual(plan.definitionCascades, []);
-  assert.deepEqual(plan.individualMetrics, [{ metricId: 'fork-1', friendlyName: 'Deal Size - Last 30 days' }]);
-  assert.deepEqual(plan.removedMetricIds, ['fork-1']);
-});
-
-test('planDeletion cascades a definition only when its default metric is selected', () => {
-  const inventory: PulseRegistryMetric[] = [
-    { metricId: 'default-1', definitionId: 'def-1', name: 'Deal Size', timeframeLabel: 'Month to date', measurementPeriod: null, scopedState: 'default', isDefault: true },
-    { metricId: 'fork-1', definitionId: 'def-1', name: 'Deal Size', timeframeLabel: 'Last 30 days', measurementPeriod: null, scopedState: 'variant', isDefault: false },
-    { metricId: 'fork-2', definitionId: 'def-2', name: 'Win Rate', timeframeLabel: 'Last 90 days', measurementPeriod: null, scopedState: 'variant', isDefault: false },
-  ];
-  // Select the default of def-1 (with its sibling fork also checked) plus an unrelated fork.
-  const plan = planDeletion(
-    [inventory[0], inventory[1], inventory[2]],
-    inventory,
-    (metric) => `${metric.name} - ${metric.timeframeLabel}`,
-    (definitionId) => `Definition ${definitionId}`,
-    () => true,
-  );
-  assert.deepEqual(plan.definitionCascades, [{
-    definitionId: 'def-1',
-    definitionName: 'Definition def-1',
-    inventoryComplete: true,
-    metricIds: ['default-1', 'fork-1'],
-    removedMetricNames: ['Deal Size - Month to date', 'Deal Size - Last 30 days'],
-  }]);
-  // fork-1 is folded into the cascade, not deleted twice; only the unrelated fork stays individual.
-  assert.deepEqual(plan.individualMetrics, [{ metricId: 'fork-2', friendlyName: 'Win Rate - Last 90 days' }]);
-  assert.deepEqual(plan.removedMetricIds, ['default-1', 'fork-1', 'fork-2']);
-});
-
-test('delete flow runs cascades and individual deletes and reports per-entry results', async () => {
-  const requested: Array<Array<{ definitionId?: string; metricIds: string[]; name?: string }>> = [];
-  const plan = planDeletion(
-    [
-      { metricId: 'default-x', definitionId: 'def-x', name: 'Cascade metric', timeframeLabel: 'Month to date', measurementPeriod: null, scopedState: 'default', isDefault: true },
-      { metricId: 'metric-ok', definitionId: 'def-y', name: 'Deletable', timeframeLabel: 'Last 30 days', measurementPeriod: null, scopedState: 'variant', isDefault: false },
-      { metricId: 'metric-throw', definitionId: 'def-z', name: 'Exploding', timeframeLabel: 'Last 7 days', measurementPeriod: null, scopedState: 'variant', isDefault: false },
-    ],
-    [
-      { metricId: 'default-x', definitionId: 'def-x', name: 'Cascade metric', timeframeLabel: 'Month to date', measurementPeriod: null, scopedState: 'default', isDefault: true },
-      { metricId: 'metric-ok', definitionId: 'def-y', name: 'Deletable', timeframeLabel: 'Last 30 days', measurementPeriod: null, scopedState: 'variant', isDefault: false },
-      { metricId: 'metric-throw', definitionId: 'def-z', name: 'Exploding', timeframeLabel: 'Last 7 days', measurementPeriod: null, scopedState: 'variant', isDefault: false },
-    ],
-    (metric) => metric.name,
-    (definitionId) => `Definition ${definitionId}`,
-    () => true,
-  );
-  const items = await deleteSelectedMetrics(plan, async (entries) => {
-    requested.push(entries);
-    const entry = entries[0];
-    if (entry?.definitionId === 'def-x') return { definitionsDeleted: 1, metricsDeleted: 0, failures: [] };
-    const metricId = entry?.metricIds[0];
-    if (metricId === 'metric-throw') throw new Error('network down');
-    return { definitionsDeleted: 0, metricsDeleted: 1, failures: [] };
-  });
-  // The cascade deletes the definition; individual metrics delete by metric id.
-  assert.deepEqual(requested, [
-    [{ definitionId: 'def-x', metricIds: ['default-x'], name: 'Definition def-x' }],
-    [{ metricIds: ['metric-ok'], name: 'Deletable' }],
-    [{ metricIds: ['metric-throw'], name: 'Exploding' }],
-  ]);
-  assert.deepEqual(items.map((item) => [item.metricId, item.status]), [
-    ['def-x', 'removed'],
-    ['metric-ok', 'removed'],
-    ['metric-throw', 'failed'],
-  ]);
-  assert.match(items[2]?.detail ?? '', /network down/);
-});
-
-test('combined fork response decoding treats unknown results as failures', () => {
-  const summary = decodeCombinedForkResponse({ ok: true, status: 207 }, {
+test('canonical variant responses preserve outcomes and reject unknown result shapes', () => {
+  const body = {
+    attempted: 4, created: 2, existing: 1, failed: 1, pendingVisibility: 1,
     results: [
-      { sourceMetricId: 'm-1', status: 'created', createdMetricId: 'new-1' },
-      { source_metric_id: 'm-2', reconciliationStatus: 'pending_visibility', created: true, metricId: 'new-2' },
-      { sourceMetricId: 'm-3', status: 'unexpected' },
+      { sourceMetricId: 'm-1', status: 'created', creationStatus: 'created', metricId: 'new-1', requestedSpecification: {} },
+      { sourceMetricId: 'm-2', status: 'pending_visibility', reconciliationStatus: 'pending_visibility', creationStatus: 'created', metricId: 'new-2', requestedSpecification: {} },
+      { sourceMetricId: 'm-3', status: 'failed', creationStatus: 'unknown', requestedSpecification: {} },
       {
         sourceMetricId: 'm-4',
         status: 'visible',
         creationStatus: 'existing',
         reconciliationStatus: 'visible',
+        requestedSpecification: {},
       },
     ],
-  });
+  };
+  const summary = decodeVariantResponse({ ok: true, status: 207 }, body);
   assert.equal(summary.created, 2);
   assert.equal(summary.existing, 1);
   assert.equal(summary.pendingVisibility, 1);
@@ -704,6 +610,9 @@ test('combined fork response decoding treats unknown results as failures', () =>
   assert.equal(summary.results[3].status, 'visible');
   assert.equal(summary.results[3].creationStatus, 'existing');
   assert.equal(summary.results[3].reconciliationStatus, 'visible');
+  assert.throws(() => decodeVariantResponse({ ok: true, status: 200 }, {
+    ...body, results: [{ sourceMetricId: 'm-1', status: 'unexpected', requestedSpecification: {} }],
+  }), /invalid variant receipt/i);
 });
 
 test('registry action counts preserve partial outcomes', () => {
@@ -745,4 +654,15 @@ test('fork registry results preserve creation, reconciliation, and requested spe
     ownershipMismatch: 0,
     failed: 0,
   });
+});
+
+test('missing follower IDs never become confirmed zero while other metric counts load', () => {
+  const partial=unavailableFollowState([], '');
+  assert.deepEqual(summarizeFollowerRelationships(['not-loaded'],partial),{user:'unavailable',groups:'unavailable'});
+});
+test('known follower IDs remain counts when only membership context or total count is unavailable', () => {
+  const state=unavailableFollowState(['metric'], 'Group context unavailable');
+  state.userFollowerIdsByMetricId={metric:['user']};state.groupFollowerIdsByMetricId={metric:['group']};
+  state.availabilityByMetricId!.metric.followerIdsStatus='available';
+  assert.deepEqual(summarizeFollowerRelationships(['metric'],state),{user:'1',groups:'1'});
 });

@@ -30,8 +30,9 @@ npm run tauri:build
 
 Build Windows installers on Windows and macOS bundles on macOS.
 The package includes its own Node runtime and native SQLite module, so end users do not need Node.js installed.
-The desktop shell provides a window, system tray, and single-instance behavior.
-Quitting the application stops its local server.
+The desktop shell provides a single-instance window and an authenticated bridge to its bundled backend.
+Closing the window exits the app and stops its backend.
+Build artifacts appear in `native-artifacts/`.
 App data is stored under the operating system's application data directory using `com.ahillspace.pulsemetricstudio`.
 Local server development stores data in `./data`, configurable with `PULSE_METRIC_STUDIO_DATA_DIR`.
 
@@ -46,6 +47,23 @@ Configure AI assistance in the application's provider settings.
 Supported providers include OpenCode CLI, Amazon Bedrock, OpenAI-compatible endpoints, and Anthropic.
 Select an explicit model before using AI authoring.
 
+## Author and manage metrics
+
+**Author** restores your current configuration when you select a datasource.
+Edits persist automatically.
+Edit metric properties directly in the table and choose the digest audience above it.
+Review and accept assistant proposals before applying them.
+Manual edits and locked properties remain protected during proposal acceptance.
+
+**Metric Manager** supports definition search, variants, subscriptions, and bulk deletion.
+Create variants from selected metrics, with timeframe and filter changes beside a preview.
+Deleting default metrics includes a review of the affected definitions and their dependent metrics.
+**Activity** keeps publication results available while disconnected and offers undo for eligible confirmed creations.
+Publication results also provide a separate action to delete a group created by that publication.
+
+The backend owns validation, Tableau requests, and SQLite access.
+SQLite stores the latest authoring configuration and publication receipts.
+
 ## Repository
 
 | Location | Purpose |
@@ -59,8 +77,14 @@ Select an explicit model before using AI authoring.
 | `scripts` | Development, packaging, and unit-test commands |
 
 Run `npm run typecheck`, `npm test`, and `cargo test --locked --manifest-path src-tauri/Cargo.toml` for automated validation.
+Before Rust tests on a fresh checkout, run `npm run build` and `node scripts/copy-resources.mjs` to prepare native resources.
 Unit tests use local fixtures and mocked provider responses.
 Desktop workflows and Tableau publishing require user-led manual validation.
+
+Maintenance guidance and the SQLite contract are in the repository's `docs` directory.
+The Windows target is Windows 11 x64.
+macOS targets include Apple silicon and Intel, with a declared minimum of macOS 11.0.
+Each platform requires native runtime qualification before release.
 
 Product distribution is planned through GitHub Releases in `ahillspace/pulse-metric-studio`.
 Documentation lives in this repository and support belongs in its Issues.

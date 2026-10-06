@@ -4,7 +4,7 @@ import { TableauError, postJson } from './rest-client.js';
 import { normalizeVdsToCatalog, type VdsField } from './vds-fields.js';
 
 /**
- * Metadata API GraphQL fallback — a faithful port of the reference pulse-metric-studio
+ * Metadata API GraphQL fallback — a faithful port of the reference implementation
  * classifier. VDS (see vds-fields.ts) is the primary, fast path; this fires
  * only when a pod lacks VDS access, or to enrich calc captions that VDS returns
  * as the internal `Calculation_NNN` id (the published-on-published / sqlproxy

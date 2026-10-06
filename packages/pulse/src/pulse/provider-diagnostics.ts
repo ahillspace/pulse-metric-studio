@@ -1,4 +1,4 @@
-import { TableauError } from '@pulse-metric-studio/core';
+import { TableauError, sanitizeProviderMessage } from '@pulse-metric-studio/core';
 
 const MAX_MESSAGE_CHARACTERS = 300;
 const MAX_DETAIL_CHARACTERS = 800;
@@ -10,8 +10,13 @@ export interface PulseProviderDiagnostic {
   detail?: string;
 }
 
-export function boundedProviderDiagnostic(error: unknown): PulseProviderDiagnostic {
-  const message = boundText(error instanceof Error ? error.message : String(error), MAX_MESSAGE_CHARACTERS);
+export function boundedProviderDiagnostic(
+  error: unknown,
+): PulseProviderDiagnostic {
+  const message = boundText(
+    error instanceof Error ? error.message : String(error),
+    MAX_MESSAGE_CHARACTERS,
+  );
   if (!(error instanceof TableauError)) return { message };
   const detail = boundText(error.bodySnippet, MAX_DETAIL_CHARACTERS);
   return {
@@ -29,7 +34,9 @@ export function diagnosticMessage(diagnostic: PulseProviderDiagnostic): string {
 }
 
 function boundText(value: string, limit: number): string {
-  const normalized = value.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').trim();
+  const normalized = sanitizeProviderMessage(value)
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .trim();
   if (normalized.length <= limit) return normalized;
   return `${normalized.slice(0, Math.max(0, limit - 1))}\u2026`;
 }

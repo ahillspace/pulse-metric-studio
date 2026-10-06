@@ -99,11 +99,16 @@ export function isFallbackEligible(error: unknown): boolean {
   ].includes(error.code);
 }
 
+// Match complete quoted values, including escaped quotes, before bounding text.
+// This also covers provider JSON bodies and Tableau PAT/header field spellings.
+const PROVIDER_CREDENTIAL_FIELD = /(["']?(?:personal[_-]?access[_-]?token(?:[_-]?secret)?|(?:access|refresh)[_-]?token|pat(?:[_-]?secret)?|api[_-]?key|x[_-]api[_-]key|x[_-]tableau[_-]auth|authorization|token|secret|password)["']?\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|(?:bearer|basic)\s+[^\s,;]+|[^\s,;]+)/gi;
+
 export function sanitizeProviderMessage(message: string): string {
   return String(message)
-    .replace(/(authorization\s*[:=]\s*bearer\s+)[^\s,;]+/gi, '$1[redacted]')
-    .replace(/(x-api-key\s*[:=]\s*)[^\s,;]+/gi, '$1[redacted]')
-    .replace(/(api[_-]?key|token|secret|password)(\s*[:=]\s*)[^\s,;]+/gi, '$1$2[redacted]')
+    .replace(PROVIDER_CREDENTIAL_FIELD, (_match, prefix: string, value: string) => {
+      const quote = value.startsWith('"') ? '"' : value.startsWith("'") ? "'" : '';
+      return `${prefix}${quote}[redacted]${quote}`;
+    })
     .replace(/https?:\/\/[^\s/@:]+:[^\s/@]+@/gi, 'https://[redacted]@')
     .replace(/[\r\n\t]+/g, ' ')
     .slice(0, 500);

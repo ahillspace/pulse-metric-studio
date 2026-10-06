@@ -1,10 +1,26 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Local capabilities for the main window",
-  "windows": ["main"],
+  "description": "Local Pulse Metric Studio window and credential operations",
+  "windows": [
+    "main"
+  ],
+  "local": true,
   "permissions": [
-    "core:default",
-    "window-state:default"
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "credential-broker",
+    "pulse-api",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        {
+          "url": "https://*"
+        },
+        {
+          "url": "http://*"
+        }
+      ]
+    }
   ]
 }

@@ -2,6 +2,7 @@ import { execFile, spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
+import { randomUUID } from 'node:crypto';
 import type { LlmModelOption } from '@pulse-metric-studio/shared';
 import { config } from '../../config.js';
 import type { StoredLlmProfile } from '../profiles.js';
@@ -162,15 +163,22 @@ function where(command: string): Promise<string[]> {
   });
 }
 
-function runOpenCode(bin: ResolveResult, args: string[], prompt: string, provider: string, model: string): Promise<string> {
+async function runOpenCode(bin: ResolveResult, args: string[], prompt: string, provider: string, model: string): Promise<string> {
   const isolatedCwd = path.join(config.dataDir, 'llm-workspace');
   fs.mkdirSync(isolatedCwd, { recursive: true });
+  const childEnv = buildOpenCodeChildEnv(process.env);
+  // Config inspection does not start MCP servers or submit a model request.
+  const inherited = await readOpenCodeConfig(bin, childEnv);
+  const agent = `pulse-metric-studio-${randomUUID()}`;
+  const requestEnv = buildOpenCodeRequestEnv(childEnv, inherited, agent);
+  const effective = await readOpenCodeConfig(bin, requestEnv);
+  assertOpenCodeRequestConfig(effective, agent);
   return new Promise((resolve, reject) => {
-    const child = spawn(bin.file, args, {
+    const child = spawn(bin.file, [...args, '--agent', agent], {
       cwd: isolatedCwd,
       shell: false,
       windowsHide: true,
-      env: buildOpenCodeChildEnv(process.env),
+      env: requestEnv,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let stdout = '';
@@ -209,7 +217,7 @@ function runOpenCode(bin: ResolveResult, args: string[], prompt: string, provide
         const failure = classifyOpenCodeFailure(stderr);
         finish(new LlmProviderError({
           code: failure.code,
-          message: `OpenCode exited with code ${code ?? 'unknown'}${stderr ? ' and reported process diagnostics' : ''}.`,
+          message: failure.reason ?? `OpenCode exited with code ${code ?? 'unknown'}${stderr ? ' and reported process diagnostics' : ''}.`,
           provider,
           model,
           retryable: failure.retryable,
@@ -222,7 +230,7 @@ function runOpenCode(bin: ResolveResult, args: string[], prompt: string, provide
   });
 }
 
-function runOpenCodeModelList(bin: ResolveResult, args: string[]): Promise<string> {
+function runOpenCodeModelList(bin: ResolveResult, args: string[], env = buildOpenCodeChildEnv(process.env)): Promise<string> {
   const isolatedCwd = path.join(config.dataDir, 'llm-workspace');
   fs.mkdirSync(isolatedCwd, { recursive: true });
   return new Promise((resolve, reject) => {
@@ -230,7 +238,7 @@ function runOpenCodeModelList(bin: ResolveResult, args: string[]): Promise<strin
       cwd: isolatedCwd,
       shell: false,
       windowsHide: true,
-      env: buildOpenCodeChildEnv(process.env),
+      env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '';
@@ -286,7 +294,7 @@ function runOpenCodeModelList(bin: ResolveResult, args: string[]): Promise<strin
         const failure = classifyOpenCodeFailure(stderr);
         finish(new LlmProviderError({
           code: failure.code,
-          message: `OpenCode model discovery exited with code ${code ?? 'unknown'}${stderr ? ' and reported process diagnostics' : ''}.`,
+          message: failure.reason ?? `OpenCode model discovery exited with code ${code ?? 'unknown'}${stderr ? ' and reported process diagnostics' : ''}.`,
           provider: 'opencode',
           retryable: failure.retryable,
           reference: failure.reference,
@@ -369,23 +377,81 @@ const defaultRuntime: OpencodeRuntime = {
   run: runOpenCode,
 };
 
-export function buildOpenCodeChildEnv(source: NodeJS.ProcessEnv | Record<string, string | undefined>): NodeJS.ProcessEnv {
+async function readOpenCodeConfig(bin: ResolveResult, env: NodeJS.ProcessEnv): Promise<Record<string, unknown>> {
+  const output = await runOpenCodeModelList(bin, ['--pure', 'debug', 'config'], env);
+  try {
+    const parsed: unknown = JSON.parse(output);
+    if (isRecord(parsed)) return parsed;
+  } catch {}
+  throw openCodeConfigurationError();
+}
+
+function openCodeConfigurationError(): LlmProviderError {
+  return new LlmProviderError({
+    code: 'provider_execution',
+    provider: 'opencode',
+    message: 'OpenCode could not verify the app\'s tool restrictions. Update OpenCode and test the connection again.',
+    retryable: false,
+  });
+}
+
+/** Keep provider configuration while isolating the selected agent from inherited tool grants. */
+export function buildOpenCodeRequestEnv(
+  env: NodeJS.ProcessEnv,
+  inherited: Record<string, unknown>,
+  agent: string,
+): NodeJS.ProcessEnv {
+  const mcp = isRecord(inherited.mcp) ? inherited.mcp : {};
+  return {
+    ...env,
+    OPENCODE_CONFIG_CONTENT: JSON.stringify({
+      ...safeOpenCodeConfig(env.OPENCODE_CONFIG_CONTENT),
+      share: 'disabled',
+      // OpenCode run automatically rejects permission requests without --auto/--yolo.
+      // Deny removes tool schemas and prevents some supported OpenCode models from responding.
+      permission: { '*': 'ask' },
+      agent: { [agent]: { mode: 'primary', permission: { '*': 'ask' } } },
+      mcp: Object.fromEntries(Object.keys(mcp).map((name) => [name, { enabled: false }])),
+    }),
+  };
+}
+
+export function assertOpenCodeRequestConfig(config: Record<string, unknown>, agent: string): void {
+  const agents = isRecord(config.agent) ? config.agent : {};
+  const selected = isRecord(agents[agent]) ? agents[agent] : {};
+  const permissions = isRecord(selected.permission) ? selected.permission : {};
+  const mcp = isRecord(config.mcp) ? config.mcp : {};
+  if (
+    selected.mode !== 'primary'
+    || selected.disable === true
+    || selected.hidden === true
+    || Object.keys(permissions).length !== 1
+    || permissions['*'] !== 'ask'
+    || Object.values(mcp).some((server) => !isRecord(server) || server.enabled !== false)
+    || config.share !== 'disabled'
+  ) throw openCodeConfigurationError();
+}
+
+export function buildOpenCodeChildEnv(source: NodeJS.ProcessEnv | Record<string, string | undefined>, platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
+  const normalizeName = (name: string) => platform === 'win32' ? name.toUpperCase() : name;
   const exact = new Set([
     'PATH', 'PATHEXT', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'TMP', 'TEMP', 'HOME', 'USERPROFILE',
     'APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'LANG', 'LC_ALL',
     'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_EXTRA_CA_CERTS',
     'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY',
-  ]);
+  ].map(normalizeName));
   const prefixes = ['AWS_', 'AZURE_OPENAI_'];
   const child: NodeJS.ProcessEnv = {};
   for (const [name, value] of Object.entries(source)) {
-    if (value !== undefined && (exact.has(name) || prefixes.some((prefix) => name.startsWith(prefix)))) child[name] = value;
+    const normalized = normalizeName(name);
+    if (value !== undefined && (exact.has(normalized) || prefixes.some((prefix) => normalized.startsWith(prefix)))) child[name] = value;
   }
   child.OPENCODE_CONFIG_CONTENT = JSON.stringify({
     ...safeOpenCodeConfig(source.OPENCODE_CONFIG_CONTENT),
     permission: { '*': 'deny' },
     share: 'disabled',
   });
+  child.OPENCODE_DISABLE_PROJECT_CONFIG = '1';
   return child;
 }
 
@@ -410,9 +476,18 @@ export function classifyOpenCodeFailure(stderr: string): {
   code: 'provider_authentication' | 'provider_quota' | 'provider_timeout' | 'provider_unavailable' | 'provider_execution';
   retryable: boolean;
   reference?: string;
+  reason?: string;
 } {
   const text = stripAnsi(stderr).toLowerCase();
   const reference = extractSafeReference(stderr);
+  if (/free tier can only be used from within opencode/.test(text)) {
+    return {
+      code: 'provider_execution',
+      retryable: false,
+      reference,
+      reason: 'OpenCode rejected this model request because of its launch configuration. Update OpenCode and test the connection again.',
+    };
+  }
   if (/unauthori[sz]ed|authentication|invalid api key|forbidden/.test(text)) return { code: 'provider_authentication', retryable: false, reference };
   if (/rate.?limit|quota|too many requests/.test(text)) return { code: 'provider_quota', retryable: true, reference };
   if (/timeout|timed out|deadline/.test(text)) return { code: 'provider_timeout', retryable: true, reference };

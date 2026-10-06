@@ -5,32 +5,52 @@
 // option count, it returns the action the component should apply.
 
 export type DatasourceListKeyAction =
-  | { type: 'none' }
-  | { type: 'move'; index: number }
-  | { type: 'select'; index: number };
+  | { type: "none" }
+  | { type: "move"; index: number }
+  | { type: "select"; index: number };
+
+/** Search narrows the available list; browsing never requires a query. */
+export function filterDatasourceChoices<
+  T extends { name: string; projectName: string },
+>(sources: T[], query: string): T[] {
+  const search = query.trim().toLowerCase();
+  return search
+    ? sources.filter((source) =>
+        `${source.name} ${source.projectName}`.toLowerCase().includes(search),
+      )
+    : sources;
+}
+
+export function datasourcePopoverLayout(
+  viewportWidth: number,
+  anchorLeft: number,
+) {
+  const width = Math.min(490, Math.max(0, viewportWidth - 32));
+  return { width, left: Math.min(12, viewportWidth - 16 - anchorLeft - width) };
+}
 
 export function resolveDatasourceListKey(
   key: string,
   activeIndex: number,
   count: number,
 ): DatasourceListKeyAction {
-  if (count === 0) return { type: 'none' };
+  if (count === 0) return { type: "none" };
   const last = count - 1;
   const clamp = (index: number) => Math.max(0, Math.min(index, last));
   switch (key) {
-    case 'ArrowDown':
-      return { type: 'move', index: clamp(activeIndex + 1) };
-    case 'ArrowUp':
-      return { type: 'move', index: clamp(activeIndex - 1) };
-    case 'Home':
-      return { type: 'move', index: 0 };
-    case 'End':
-      return { type: 'move', index: last };
-    case 'Enter':
+    case "ArrowDown":
+      return { type: "move", index: clamp(activeIndex + 1) };
+    case "ArrowUp":
+      return { type: "move", index: clamp(activeIndex - 1) };
+    case "Home":
+      return { type: "move", index: 0 };
+    case "End":
+      return { type: "move", index: last };
+    case "Enter":
       // Enter selects the active option only when the index is in range.
-      if (activeIndex < 0 || activeIndex > last) return { type: 'none' };
-      return { type: 'select', index: activeIndex };
+      if (activeIndex < 0 || activeIndex > last) return { type: "none" };
+      return { type: "select", index: activeIndex };
     default:
-      return { type: 'none' };
+      return { type: "none" };
   }
 }

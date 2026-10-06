@@ -1,12 +1,84 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import Database from 'better-sqlite3';
+import Fastify from 'fastify';
+import sensible from '@fastify/sensible';
+import { ProviderRegistry } from './registry.js';
+import { registerLlmRoutes } from './routes.js';
 import { encryptSecret } from '../db/crypto.js';
 import { DbLlmRegistryStateStore, EncryptedLlmProfileStore, LlmProfileStoreError } from './profiles.js';
 
 function setLegacyProfiles(db: Database.Database, profiles: unknown[]): void {
   db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('llm.profiles.v1', encryptSecret(JSON.stringify(profiles)));
 }
+
+test('editing an environment-backed profile through settings preserves its credential in encrypted storage', async () => {
+  const db = new Database(':memory:');
+  db.exec('CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+  const store = new EncryptedLlmProfileStore(() => db);
+  const registry = new ProviderRegistry({ store, stateStore: new DbLlmRegistryStateStore(() => db), environment: { OPENAI_COMPAT_API_KEY: 'environment-test-secret', OPENAI_COMPAT_MODEL: 'original-model', OPENAI_COMPAT_BASE_URL: 'https://gateway.example.test/v1' } });
+  const app = Fastify();
+  await app.register(sensible);
+  registerLlmRoutes(app, { service: registry });
+  try {
+    const payload = { label: 'Renamed provider', protocol: 'openai-chat', baseUrl: 'https://gateway.example.test/v1', model: 'new-model', authMode: 'bearer' };
+    const response = await app.inject({ method: 'PUT', url: '/api/llm/profiles/openai-compat', payload });
+    assert.equal(response.statusCode, 200);
+    assert.equal(store.get('openai-compat')?.secret, 'environment-test-secret');
+    assert.equal(response.json().hasSecret, true);
+    assert.equal(response.body.includes('environment-test-secret'), false);
+    assert.equal(String(db.prepare('SELECT value FROM settings WHERE key = ?').pluck().get('llm.profiles.v1')).includes('environment-test-secret'), false);
+    const cleared = await app.inject({ method: 'PUT', url: '/api/llm/profiles/openai-compat', payload: { ...payload, clearSecret: true } });
+    assert.equal(cleared.statusCode, 200);
+    assert.equal(store.get('openai-compat')?.secret, '');
+    assert.equal(cleared.json().hasSecret, false);
+  } finally { await app.close(); db.close(); }
+});
+
+test('changing only the saved credential command invalidates previously green readiness', async () => {
+  const db = new Database(':memory:');
+  db.exec('CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+  const store = new EncryptedLlmProfileStore(() => db);
+  const stateStore = new DbLlmRegistryStateStore(() => db);
+  const profile = { id: 'gateway', label: 'Gateway', protocol: 'openai-chat' as const, baseUrl: 'https://gateway.example.test/v1', model: 'model', authMode: 'bearer' as const, credentialCommand: 'original-token-command' };
+  store.save(profile);
+  stateStore.setActive('gateway');
+  const registry = new ProviderRegistry({ store, stateStore, environment: {} });
+  const app = Fastify();
+  await app.register(sensible);
+  registerLlmRoutes(app, { service: registry });
+  try {
+    (await registry.pick()).tracking!.commitSuccess();
+    assert.equal((await registry.status()).readiness.state, 'green');
+    const response = await app.inject({ method: 'PUT', url: '/api/llm/profiles/gateway', payload: { ...profile, credentialCommand: 'replacement-token-command' } });
+    assert.equal(response.statusCode, 200);
+    assert.equal(stateStore.getReadiness('gateway'), null);
+    assert.equal((await registry.status()).readiness.state, 'yellow');
+    assert.equal(store.get('gateway')?.credentialCommand, 'replacement-token-command');
+  } finally { await app.close(); db.close(); }
+});
+
+test('settings protocol and authentication changes honor explicit secret and header clearing', async () => {
+  const db = new Database(':memory:');
+  db.exec('CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+  const store = new EncryptedLlmProfileStore(() => db);
+  const registry = new ProviderRegistry({ store, stateStore: new DbLlmRegistryStateStore(() => db), environment: {}, opencodeModelLister: async () => [{ id: 'test/model', label: 'Test model' }] });
+  const app = Fastify();
+  await app.register(sensible);
+  registerLlmRoutes(app, { service: registry });
+  try {
+    for (const [protocol, authMode] of [['openai-chat', 'none'], ['bedrock-converse', 'aws'], ['opencode', 'none']]) {
+      store.save({ id: 'gateway', label: 'Gateway', protocol: 'openai-chat', model: 'old-model', baseUrl: 'https://gateway.example.test/v1', authMode: 'bearer', secret: 'prior-test-secret', headers: { 'x-route': 'prior-test-route' }, credentialCommand: 'prior-token-command' });
+      const response = await app.inject({ method: 'PUT', url: '/api/llm/profiles/gateway', payload: { label: 'Gateway', protocol, authMode, model: 'test/model', baseUrl: protocol === 'opencode' ? '' : 'https://gateway.example.test/v1', command: 'opencode', clearSecret: true, clearHeaders: true, credentialCommand: '' } });
+      assert.equal(response.statusCode, 200, response.body);
+      assert.equal(store.get('gateway')?.secret, '');
+      assert.deepEqual(store.get('gateway')?.headers, {});
+      assert.equal(store.get('gateway')?.credentialCommand, '');
+      assert.equal(response.body.includes('prior-test-secret'), false);
+      assert.equal(response.body.includes('prior-test-route'), false);
+    }
+  } finally { await app.close(); db.close(); }
+});
 
 test('runtime profiles encrypt secrets at rest and return masked metadata', () => {
   const db = new Database(':memory:');

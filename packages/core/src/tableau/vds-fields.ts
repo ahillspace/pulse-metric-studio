@@ -120,6 +120,11 @@ const CACHE_TTL_MS = 5 * 60_000;
 const SUSPICIOUS_ZERO_TIME_CACHE_TTL_MS = 15_000;
 const cache = new Map<string, FieldsCacheEntry>();
 
+/** Authoring can use an already loaded catalog; publishing still requests fresh validation. */
+export function getLoadedFieldCatalog(session: TableauSession, luid: string): DatasourceCatalog | undefined {
+  return cache.get(fieldCatalogCacheKey(session, luid))?.catalog;
+}
+
 export function invalidateFieldsCache(luid?: string): void {
   if (luid) {
     for (const key of cache.keys()) {

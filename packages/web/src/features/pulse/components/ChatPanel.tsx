@@ -1,128 +1,135 @@
-import { useEffect, useRef, useState } from 'react';
-import { useStore } from '../../../store';
-
-const REFINEMENTS = [
-  'Add two more useful measures as metrics with business names.',
-  'Trim the metric set to the four most decision-useful metrics.',
-  'Add the most meaningful slicers for a leadership audience.',
-  'Remove noisy or identifier-like slicers.',
-];
-
-const WAITING_MESSAGES = [
-  'Reading the field catalog…',
-  'Designing the metric set…',
-  'Choosing sensible aggregations…',
-  'Almost there…',
-];
+import { useEffect, useRef } from "react";
+import { activeEditor, contextMatches, useAuthor } from "../author/controller";
+import { ProposalReview } from "../author/ProposalReview";
+import { useConnection } from "../connections/controller";
 
 export function ChatPanel({ collapsed = false }: { collapsed?: boolean }) {
-  const catalog = useStore((s) => s.catalog);
-  const chat = useStore((s) => s.chat);
-  const chatBusy = useStore((s) => s.chatBusy);
-  const hasGeneratedDraft = useStore((s) => s.hasGeneratedDraft);
-  const sendChat = useStore((s) => s.sendChat);
-
-  const [text, setText] = useState('');
-  const [waitIdx, setWaitIdx] = useState(0);
-
-  const transcriptRef = useRef<HTMLDivElement>(null);
-
+  const entry = useAuthor(activeEditor);
+  const session = useConnection((state) => state.session);
+  const transcript = useRef<HTMLDivElement>(null);
+  const available = Boolean(
+    entry && contextMatches(entry.record.context, session),
+  );
   useEffect(() => {
-    if (!chatBusy) {
-      setWaitIdx(0);
-      return;
-    }
-    const timer = setInterval(() => setWaitIdx((i) => (i + 1) % WAITING_MESSAGES.length), 2500);
-    return () => clearInterval(timer);
-  }, [chatBusy]);
-
-  useEffect(() => {
-    const transcript = transcriptRef.current;
-    if (transcript) transcript.scrollTop = transcript.scrollHeight;
-  }, [chat, chatBusy, collapsed]);
-
+    const node = transcript.current;
+    if (node) node.scrollTop = node.scrollHeight;
+  }, [entry?.proposal, entry?.document.chat, collapsed]);
   return (
     <div className="pulse-agent-panel" id="assistant-panel">
       <div className="pulse-agent-heading">
         <h2 className="panel-title">Metric assistant</h2>
-        <p>Design and refine your Pulse metrics.</p>
       </div>
       <div className="pulse-agent-body">
-        <div className="pulse-agent-draft">
-          {catalog && !hasGeneratedDraft && !chatBusy && (
-            <button
-              className="btn primary small"
-              onClick={() =>
-                void sendChat(
-                  'Design an initial Pulse metric set for this datasource for a business audience: pick focused measures, good names, sensible formats and sentiment, and a few useful slicers.',
-                  { isDraft: true },
-                )
-              }
-            >
-              ✦ Generate draft
-            </button>
-          )}
-        </div>
-        <div className="chat-transcript" ref={transcriptRef} role="log" aria-label="Metric assistant conversation" aria-live="polite">
-          {chat.length === 0 && !chatBusy && (
-            <div className="empty-note">
-              {catalog
-                ? 'Describe your audience and the questions they need answered, or select Generate draft.'
-                : 'Select a datasource to start designing Pulse metrics with your assistant.'}
+        {!entry && (
+          <p className="empty-note">
+            Choose a datasource to start a conversation.
+          </p>
+        )}
+        {entry && !available && (
+          <p className="section-hint">
+            Connect to Tableau to request suggestions.
+          </p>
+        )}
+        {entry &&
+          !entry.document.chat.some(
+            (message) => message.role === "assistant",
+          ) &&
+          !entry.proposal && (
+            <div className="pulse-agent-draft">
+              <button
+                className="btn primary small"
+                disabled={!available || entry.proposalBusy}
+                onClick={() =>
+                  void useAuthor
+                    .getState()
+                    .requestProposal(
+                      "Design Pulse metrics for a business audience. Include all metrics and slicers that provide end-user business value, with meaningful names and sensible formats and sentiment. Include distinct counts of dimensions only when they provide significant business value. Newly built metrics use month-to-date and over-time data mode, controlled by the app. Do not choose or change their timeframe or data mode. Minimum time granularity defaults to DAY; choose a coarser minimum only when explicitly requested or the measure name or description states that daily data is unavailable. Preserve existing manual settings.",
+                    )
+                }
+              >
+                Generate draft
+              </button>
             </div>
           )}
-          {chat.map((m) => (
-            <div key={m.id} className={`chat-bubble ${m.role}`}>
-              {m.content}
+        <div
+          className="chat-transcript"
+          ref={transcript}
+          role="log"
+          aria-label="Metric assistant conversation"
+          aria-live="polite"
+        >
+          {entry?.document.chat.map((message, index) => (
+            <div
+              className={`chat-bubble ${message.role}`}
+              key={`${message.ts}-${index}`}
+            >
+              {message.content}
             </div>
           ))}
-          {chatBusy && <div className="waiting-note chat-bubble assistant" role="status">{WAITING_MESSAGES[waitIdx]}</div>}
+          {entry?.proposalBusy && (
+            <div role="status" className="waiting-note">
+              Preparing proposed changes...
+            </div>
+          )}
+          {entry?.proposalError && (
+            <div role="alert" className="warning-banner">
+              {entry.proposalError}
+            </div>
+          )}
+          {entry?.proposalNotice && (
+            <p className="section-hint" role="status">
+              {entry.proposalNotice}
+            </p>
+          )}
+          {entry?.proposal && <ProposalReview entry={entry} />}
         </div>
-        {catalog && hasGeneratedDraft && (
-          <div className="chip-row">
-            {REFINEMENTS.map((r) => (
-              <button key={r} className="chip" disabled={chatBusy} onClick={() => void sendChat(r)}>
-                {shortLabel(r)}
-              </button>
-            ))}
-          </div>
-        )}
         <form
           className="chat-compose"
-          onSubmit={(e) => {
-            e.preventDefault();
-            const t = text.trim();
-            if (!t || chatBusy || !catalog) return;
-            setText('');
-            void sendChat(t);
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (entry?.composer.trim())
+              void useAuthor.getState().requestProposal(entry.composer.trim());
           }}
         >
           <textarea
             aria-label="Message metric assistant"
             rows={3}
-            placeholder="Ask for metrics or describe a change..."
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            disabled={chatBusy || !catalog}
+            placeholder="Describe a change to review..."
+            value={entry?.composer ?? ""}
+            disabled={!available}
+            onChange={(event) =>
+              useAuthor.getState().setComposer(event.target.value)
+            }
             onKeyDown={(event) => {
-              if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+              if (
+                event.key === "Enter" &&
+                !event.shiftKey &&
+                !event.nativeEvent.isComposing
+              ) {
                 event.preventDefault();
                 event.currentTarget.form?.requestSubmit();
               }
             }}
           />
-          <button className="btn primary" type="submit" disabled={chatBusy || !catalog || !text.trim()}>
+          <button
+            className="btn primary"
+            type="submit"
+            disabled={
+              !available || entry?.proposalBusy || !entry?.composer.trim()
+            }
+          >
             Send
           </button>
         </form>
+        <details className="pulse-assistant-disclosure">
+          <summary>About this assistant</summary>
+          <p>
+            Your AI provider receives field metadata, metric settings, and this
+            conversation. Row data and credentials are not included. Proposed
+            changes require your acceptance.
+          </p>
+        </details>
       </div>
     </div>
   );
-}
-
-function shortLabel(r: string): string {
-  if (r.startsWith('Add two more')) return '+ measures';
-  if (r.startsWith('Trim')) return '− trim to essentials';
-  if (r.startsWith('Add the most')) return '+ slicers';
-  return '− clean slicers';
 }

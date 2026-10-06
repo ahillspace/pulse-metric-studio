@@ -1,22 +1,20 @@
+import { TableauError,type TableauSession } from '@pulse-metric-studio/core';
+import {
+DIMENSIONAL_FORK_LIMITS,
+DIMENSION_VALUE_FETCH_CEILING,
+canonicalizeDimensionalForkRequest,
+type CatalogField,
+type DatasourceCatalog,
+} from '@pulse-metric-studio/shared';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { TableauError, type TableauSession } from '@pulse-metric-studio/core';
 import {
-  DIMENSIONAL_FORK_LIMITS,
-  DIMENSION_VALUE_FETCH_CEILING,
-  canonicalizeDimensionalForkRequest,
-  type CatalogField,
-  type DatasourceCatalog,
-} from '@pulse-metric-studio/shared';
-import {
-  PulseDimensionalForkService,
-  dimensionalForkHttpStatus,
-  fingerprintValues,
-  mergePulseStringFilter,
-  type PulseDimensionalForkDependencies,
+fingerprintValues,
+mergePulseStringFilter,
 } from './dimensional-fork-service.js';
-import type { PulseDefinition, PulseExactMetric } from './pulse-client.js';
+import type { PulseDefinition,PulseExactMetric } from './pulse-client.js';
 import { repeatedQueryValues } from './routes.js';
+import { PulseDimensionalForkService,dimensionalForkHttpStatus,type PulseDimensionalForkDependencies } from './test-support/legacy-dimensional-adapter.js';
 
 const session: TableauSession = {
   serverUrl: 'https://example.test',

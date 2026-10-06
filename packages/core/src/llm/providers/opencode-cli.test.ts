@@ -3,6 +3,8 @@ import { test } from 'node:test';
 import type { StoredLlmProfile } from '../profiles.js';
 import {
   buildOpenCodeChildEnv,
+  buildOpenCodeRequestEnv,
+  assertOpenCodeRequestConfig,
   classifyOpenCodeFailure,
   OpencodeCliProvider,
   parseOpenCodeVerboseModels,
@@ -57,11 +59,11 @@ test('OpenCode child environment excludes unrelated application secrets and enfo
     PATH: 'C:\\tools',
     APPDATA: 'C:\\appdata',
     ANTHROPIC_API_KEY: 'allowed-provider-secret',
-    UNRELATED_APP_SECRET: 'unrelated-secret',
+    SF_OAUTH_CLIENT_SECRET: 'salesforce-secret',
     PULSE_METRIC_STUDIO_MACHINE_KEY: 'pulse-metric-studio-secret',
     OPENCODE_CONFIG_CONTENT: '{"provider":{"company":{"npm":"@ai-sdk/anthropic"}},"permission":{"*":"allow"}}',
   });
-  assert.equal(env.UNRELATED_APP_SECRET, undefined);
+  assert.equal(env.SF_OAUTH_CLIENT_SECRET, undefined);
   assert.equal(env.PULSE_METRIC_STUDIO_MACHINE_KEY, undefined);
   assert.equal(env.ANTHROPIC_API_KEY, 'allowed-provider-secret');
   assert.equal(env.PATH, 'C:\\tools');
@@ -152,3 +154,56 @@ test('OpenCode model discovery uses the resolved executable and exact non-refres
 function verboseModel(header: string, model: Record<string, unknown>): string {
   return `${header}\n${JSON.stringify(model, null, 2)}`;
 }
+
+
+test('OpenCode identifies the free-tier restriction without exposing process diagnostics', () => {
+  const failure = classifyOpenCodeFailure('Error from provider (Console): OpenCode\'s free tier can only be used from within OpenCode\nAuthorization: Bearer fixture-private-value');
+  assert.equal(failure.code, 'provider_execution');
+  assert.equal(failure.retryable, false);
+  assert.match(failure.reason ?? '', /launch configuration/i);
+  assert.doesNotMatch(failure.reason ?? '', /authenticated|sign in/i);
+  assert.equal(failure.reason?.includes('fixture-private-value'), false);
+});
+
+test('OpenCode completion selects an app-owned approval agent and disables every inherited MCP server', () => {
+  const env = buildOpenCodeChildEnv({ OPENCODE_CONFIG_CONTENT: JSON.stringify({ provider: { local: { name: 'Local' } } }) });
+  const request = buildOpenCodeRequestEnv(env, {
+    permission: { '*': 'allow' },
+    agent: { build: { permission: { '*': 'allow' } } },
+    mcp: { local: { enabled: true, command: ['unsafe'] }, remote: { url: 'https://example.test' } },
+  }, 'pulse-metric-studio-test');
+  const config = JSON.parse(request.OPENCODE_CONFIG_CONTENT!);
+  assert.deepEqual(config.agent, { 'pulse-metric-studio-test': { mode: 'primary', permission: { '*': 'ask' } } });
+  assert.deepEqual(config.mcp, { local: { enabled: false }, remote: { enabled: false } });
+  assert.deepEqual(config.provider, { local: { name: 'Local' } });
+  assert.equal(request.OPENCODE_DISABLE_PROJECT_CONFIG, '1');
+  assert.doesNotThrow(() => assertOpenCodeRequestConfig(config, 'pulse-metric-studio-test'));
+});
+
+test('OpenCode refuses a completion when effective configuration overrides its restrictions', () => {
+  const valid = {
+    agent: { 'pulse-metric-studio-test': { mode: 'primary', permission: { '*': 'ask' } } },
+    mcp: { local: { enabled: false } }, share: 'disabled',
+  };
+  for (const changed of [
+    { ...valid, agent: {} },
+    { ...valid, agent: { 'pulse-metric-studio-test': { ...valid.agent['pulse-metric-studio-test'], disable: true } } },
+    { ...valid, agent: { 'pulse-metric-studio-test': { ...valid.agent['pulse-metric-studio-test'], hidden: true } } },
+    { ...valid, agent: { 'pulse-metric-studio-test': { mode: 'primary', permission: { '*': 'ask', bash: 'allow' } } } },
+    { ...valid, agent: { 'pulse-metric-studio-test': { mode: 'primary', permission: { '*': 'allow' } } } },
+    { ...valid, mcp: { injected: { command: ['unsafe'] } } },
+    { ...valid, mcp: { injected: { enabled: true } } },
+    { ...valid, share: 'auto' },
+  ]) assert.throws(() => assertOpenCodeRequestConfig(changed, 'pulse-metric-studio-test'), /tool restrictions/);
+});
+
+test('OpenCode preserves Windows environment casing for executable lookup and required system paths', () => {
+  const child = buildOpenCodeChildEnv({ Path: 'C:\\Windows;C:\\tools', SystemRoot: 'C:\\Windows', ComSpec: 'C:\\Windows\\System32\\cmd.exe', Temp: 'C:\\temp', PULSE_METRIC_STUDIO_MACHINE_KEY: 'fixture-private-value' }, 'win32');
+  assert.equal(child.Path, 'C:\\Windows;C:\\tools');
+  assert.equal(child.SystemRoot, 'C:\\Windows');
+  assert.equal(child.ComSpec, 'C:\\Windows\\System32\\cmd.exe');
+  assert.equal(child.Temp, 'C:\\temp');
+  assert.equal(child.PULSE_METRIC_STUDIO_MACHINE_KEY, undefined);
+  assert.deepEqual(JSON.parse(child.OPENCODE_CONFIG_CONTENT!).permission, { '*': 'deny' });
+  assert.equal(buildOpenCodeChildEnv({ path: '/untrusted', PATH: '/usr/bin' }, 'darwin').path, undefined);
+});

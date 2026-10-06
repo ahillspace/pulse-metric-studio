@@ -1,4 +1,4 @@
-import type { FollowState } from '../../api/client';
+import type { FollowState } from './registry/view-types';
 
 export function mergeFollowStates(states: FollowState[]): FollowState {
   return states.reduce<FollowState>((merged, state) => ({

@@ -1,7 +1,7 @@
 /**
  * Shared Tableau REST/Pulse HTTP client.
  *
- * Improvements over Pulse Metric Studio (see ledger D6/D7/A13):
+ * Improvements over Juju (see ledger D6/D7/A13):
  * - every request carries a timeout
  * - auth rejection classified centrally; unknown 403s are NOT treated as auth expiry
  * - pagination helper for page_token style APIs

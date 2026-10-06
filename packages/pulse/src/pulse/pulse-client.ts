@@ -1,11 +1,12 @@
-import type { PulseDefinitionPayload, PulseDefinitionResponse, PulseMetricSummary } from '@pulse-metric-studio/shared';
+interface PulseDefinitionResponse { definition?: { metadata?: { id?: string; name?: string } } }
+interface PulseMetricSummary { id?: string; metadata?: { id?: string; name?: string }; is_default?: boolean; specification?: unknown }
 import type { TableauSession } from '@pulse-metric-studio/core';
-import { TableauError, apiPath, deleteReq, getJson, isPastEndError, postJson } from '@pulse-metric-studio/core';
-import { boundedProviderDiagnostic, type PulseProviderDiagnostic } from './provider-diagnostics.js';
+import { TableauError,apiPath,deleteReq,getJson,isPastEndError,postJson } from '@pulse-metric-studio/core';
+import { boundedProviderDiagnostic,type PulseProviderDiagnostic } from './provider-diagnostics.js';
 
 /**
  * Pulse REST wrapper (`/api/-/pulse`). Contract recovered from the working
- * Pulse Metric Studio implementation and pinned here once (ledger C5).
+ * Juju implementation and pinned here once (ledger C5).
  */
 
 const PULSE = '/api/-/pulse';
@@ -43,7 +44,7 @@ export interface PulseExactMetric {
 
 export async function createDefinition(
   session: TableauSession,
-  payload: PulseDefinitionPayload,
+  payload: Record<string, unknown>,
 ): Promise<{ definitionId: string | null; raw: PulseDefinitionResponse }> {
   const data = await postJson<PulseDefinitionResponse>(session, `${PULSE}/definitions`, payload, CREATE_DEFINITION_HEADERS);
   return { definitionId: data?.definition?.metadata?.id ?? null, raw: data };
@@ -120,14 +121,33 @@ export async function resolveDefaultMetricId(
     if (i > 0) await sleep(1200 * i);
     try {
       const metrics = await listMetricsForDefinition(session, definitionId);
-      const first = metrics[0];
-      const id = first?.id ?? first?.metadata?.id ?? null;
-      if (id) return id;
+      const candidate = metrics.find((metric) => metric.is_default === true)
+        ?? metrics.find((metric) => isMonthToDate(metric.specification))
+        ?? (metrics.length === 1 ? metrics[0] : undefined);
+      const id = candidate?.id ?? candidate?.metadata?.id ?? null;
+      if (id) {
+        const specification = candidate?.specification
+          ?? (await getPulseMetric(session, id)).specification;
+        if (!isMonthToDate(specification)) {
+          throw new UnexpectedDefaultMetricError(
+            'Tableau created the definition, but its initial metric is not month-to-date. Open it in Pulse to review its timeframe.',
+          );
+        }
+        return id;
+      }
     } catch (e) {
-      if (e instanceof TableauError && e.kind === 'auth') throw e;
+      if (e instanceof UnexpectedDefaultMetricError || (e instanceof TableauError && e.kind === 'auth')) throw e;
     }
   }
   return null;
+}
+
+class UnexpectedDefaultMetricError extends Error {}
+
+function isMonthToDate(specification: unknown): boolean {
+  if (!isRecord(specification) || !isRecord(specification.measurement_period)) return false;
+  return specification.measurement_period.granularity === 'GRANULARITY_BY_MONTH'
+    && specification.measurement_period.range === 'RANGE_CURRENT_PARTIAL';
 }
 
 export interface ForkResult {
@@ -315,8 +335,33 @@ export function normalizeSubscriptionEnvelope(data: unknown): SubscriptionRecord
 }
 
 export async function listSubscriptionsForMetric(session: TableauSession, metricId: string): Promise<SubscriptionRecord[]> {
-  const data = await getJson<unknown>(session, `${PULSE}/subscriptions?metric_id=${encodeURIComponent(metricId)}`);
-  return normalizeSubscriptionEnvelope(data);
+  const subscriptions: SubscriptionRecord[] = [];
+  const seenTokens = new Set<string>();
+  let token = '';
+  for (let page = 0; page < 1000; page++) {
+    const query = new URLSearchParams({ metric_id: metricId });
+    if (token) query.set('page_token', token);
+    const data = await getJson<unknown>(session, `${PULSE}/subscriptions?${query}`);
+    const records = normalizeSubscriptionEnvelope(data);
+    subscriptions.push(...records);
+    const next = isRecord(data) ? data.next_page_token : undefined;
+    if (next === undefined || next === '') return subscriptions;
+    if (typeof next !== 'string' || !next.trim() || seenTokens.has(next) || !records.length)
+      throw new TableauError('Pulse follower inventory has an invalid continuation.', 502);
+    if (subscriptions.length > 100000)
+      throw new TableauError('Pulse follower inventory exceeds the local read limit.', 502);
+    seenTokens.add(next);
+    token = next;
+  }
+  throw new TableauError('Pulse follower inventory continuation exceeds the local read limit.', 502);
+}
+
+export class SubscriptionBatchInterrupted extends TableauError {
+  constructor(
+    cause: TableauError,
+    public readonly completed: Array<{ metricId: string; targetId: string; ok: boolean; alreadyExists: boolean; error?: string }>,
+    public readonly failed: { metricId: string; targetId: string },
+  ) { super(cause.message, cause.status, cause.bodySnippet, cause.kind); }
 }
 
 export async function batchCreateGroupSubscriptions(
@@ -336,6 +381,7 @@ export async function batchCreateGroupSubscriptions(
       });
       results.push({ metricId: item.metricId, targetId: item.groupId, ok: true, alreadyExists: false });
     } catch (e) {
+      if (e instanceof TableauError && (e.kind === 'auth' || e.kind === 'network' || e.status >= 500)) throw new SubscriptionBatchInterrupted(e, results, { metricId: item.metricId, targetId: item.groupId });
       if (isAlreadyFollowedError(e)) {
         results.push({ metricId: item.metricId, targetId: item.groupId, ok: true, alreadyExists: true });
       } else {
@@ -372,6 +418,7 @@ export async function batchCreateUserSubscriptions(
       });
       results.push({ metricId: item.metricId, targetId: item.userId, ok: true, alreadyExists: false });
     } catch (e) {
+      if (e instanceof TableauError && (e.kind === 'auth' || e.kind === 'network' || e.status >= 500)) throw new SubscriptionBatchInterrupted(e, results, { metricId: item.metricId, targetId: item.userId });
       if (isAlreadyFollowedError(e)) {
         results.push({ metricId: item.metricId, targetId: item.userId, ok: true, alreadyExists: true });
       } else {
@@ -435,12 +482,10 @@ export async function batchGetFollowerCounts(
   for (let index = 0; index < uniqueMetricIds.length; index += FOLLOWER_COUNT_BATCH_LIMIT) {
     const batch = uniqueMetricIds.slice(index, index + FOLLOWER_COUNT_BATCH_LIMIT);
     try {
-      const data = await postJson<unknown>(session, `${PULSE}/subscriptions:batchGetMetricFollowerCounts`, {
-        metric_ids: batch,
-      }, {
-        contentType: 'application/vnd.tableau.pulse.subscriptionservice.v1.BatchGetMetricFollowerCountsRequest+json',
-        accept: 'application/vnd.tableau.pulse.subscriptionservice.v1.BatchGetMetricFollowerCountsResponse+json',
-      });
+      const query = new URLSearchParams({ metric_ids: batch.join(',') });
+      const data = await getJson<unknown>(session,
+        `${PULSE}/subscriptions:batchGetMetricFollowerCounts?${query}`,
+        'application/vnd.tableau.pulse.subscriptionservice.v1.BatchGetMetricFollowerCountsResponse+json');
       const counts = normalizeFollowerCountEnvelope(data);
       for (const metricId of batch) {
         if (Object.hasOwn(counts, metricId)) result.countsByMetricId[metricId] = counts[metricId]!;

@@ -27,6 +27,7 @@ import type { CompleteOptions, CompleteResult, LlmCompletionTracker, LlmProvider
 import { LlmProviderError } from './types.js';
 
 export interface ProviderRegistryOptions {
+  environment?: NodeJS.ProcessEnv;
   providers?: LlmProvider[];
   store?: LlmProfileStore;
   stateStore?: LlmRegistryStateStore;
@@ -44,6 +45,7 @@ export class LlmModelCatalogError extends Error {
 }
 
 export class ProviderRegistry {
+  private readonly environment: NodeJS.ProcessEnv;
   private readonly staticProviders: LlmProvider[] | null;
   private readonly store: LlmProfileStore;
   private readonly stateStore: LlmRegistryStateStore;
@@ -52,6 +54,7 @@ export class ProviderRegistry {
   private readonly modelCatalogCache = new Map<string, { fingerprint: string; loadedAt: number; models: LlmModelOption[] }>();
 
   constructor(options: ProviderRegistryOptions = {}) {
+    this.environment = options.environment ?? process.env;
     this.staticProviders = options.providers ?? null;
     this.store = options.store ?? new EncryptedLlmProfileStore();
     this.stateStore = options.stateStore ?? new DbLlmRegistryStateStore();
@@ -110,13 +113,21 @@ export class ProviderRegistry {
     };
   }
 
+  async listSetupModels(command?: string): Promise<LlmModelCatalogResponse> {
+    const profile: StoredLlmProfile = { id: 'opencode-setup', label: 'OpenCode', protocol: 'opencode', baseUrl: '', model: '', authMode: 'none', secret: '', headers: {}, region: '', awsProfile: '', command: command?.trim() || this.environment.OPENCODE_BIN?.trim() || 'opencode', source: 'environment' };
+    return { provider: 'opencode', source: 'opencode-cli-cache', models: await this.currentOpenCodeModels(profile, true) };
+  }
+
   async saveProfile(input: LlmProfileWrite): Promise<LlmProfilePublic> {
     const before = this.profiles().find((profile) => profile.id === input.id);
     const beforeFingerprint = before ? this.profileFingerprint(input.id, before) : null;
+    // Resolve preservation against the effective profile, which can come from
+    // the environment rather than the encrypted store. Clear flags win here.
+    const prospective = this.prospectiveProfile(input, before);
     if (input.protocol === 'opencode') {
-      await this.assertCurrentOpenCodeModel(this.prospectiveProfile(input, before), true);
+      await this.assertCurrentOpenCodeModel(prospective, true);
     }
-    const saved = this.store.save(input);
+    const saved = this.store.save({ ...input, secret: prospective.secret, headers: prospective.headers, credentialCommand: prospective.credentialCommand });
     const after = this.profiles().find((profile) => profile.id === input.id);
     if (!after || beforeFingerprint !== this.profileFingerprint(input.id, after)) {
       this.stateStore.deleteReadiness(input.id);
@@ -219,7 +230,7 @@ export class ProviderRegistry {
   }
 
   private profiles(): StoredLlmProfile[] {
-    const profiles = new Map(environmentProfiles().map((profile) => [profile.id, profile]));
+    const profiles = new Map(environmentProfiles(this.environment).map((profile) => [profile.id, profile]));
     for (const profile of this.store.list()) profiles.set(profile.id, profile);
     return [...profiles.values()];
   }
@@ -251,6 +262,7 @@ export class ProviderRegistry {
       region: profile.region,
       awsProfile: profile.awsProfile,
       command: profile.command,
+      credentialCommand: profile.credentialCommand ?? '',
       allowPrivateNetwork: profile.allowPrivateNetwork ?? false,
       source: profile.source,
     };
@@ -354,6 +366,7 @@ export class ProviderRegistry {
       region: input.region ?? '',
       awsProfile: input.awsProfile ?? '',
       command: input.command ?? '',
+      credentialCommand: input.credentialCommand ?? existing?.credentialCommand ?? '',
       allowPrivateNetwork: input.allowPrivateNetwork ?? false,
       source: 'saved',
     };
@@ -402,32 +415,42 @@ export class ProviderRegistry {
   }
 }
 
-function environmentProfiles(): StoredLlmProfile[] {
-  return [
+function environmentProfiles(environment: NodeJS.ProcessEnv): StoredLlmProfile[] {
+  const explicit = (keys: string[]) => keys.some(key => Boolean(environment[key]?.trim()));
+  const value = (key: string, fallback = '') => environment[key]?.trim() || fallback;
+  const enabledFlag = (key: string) => ['1', 'true', 'yes'].includes(value(key).toLowerCase());
+  const enabled: Record<string, boolean> = {
+    opencode: explicit(['OPENCODE_MODEL']),
+    bedrock: explicit(['BEDROCK_MODEL_ID', 'AWS_ENDPOINT_URL_BEDROCK', 'AWS_PROFILE', 'AWS_ACCESS_KEY_ID', 'AWS_WEB_IDENTITY_TOKEN_FILE']) || environment.PULSE_METRIC_STUDIO_LLM_PROVIDER === 'bedrock',
+    'openai-compat': explicit(['OPENAI_COMPAT_BASE_URL', 'OPENAI_COMPAT_API_KEY', 'OPENAI_COMPAT_MODEL']),
+    anthropic: explicit(['ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_MODEL']),
+  };
+  const profiles: StoredLlmProfile[] = [
     {
-      id: 'opencode', label: 'OpenCode CLI', protocol: 'opencode', baseUrl: '', model: config.llm.opencode.model,
-      authMode: 'none', secret: '', headers: {}, region: '', awsProfile: '', command: config.llm.opencode.bin, source: 'environment',
+      id: 'opencode', label: 'OpenCode', protocol: 'opencode', baseUrl: '', model: value('OPENCODE_MODEL'),
+      authMode: 'none', secret: '', headers: {}, region: '', awsProfile: '', command: value('OPENCODE_BIN', 'opencode'), source: 'environment',
       allowPrivateNetwork: false,
     },
     {
-      id: 'bedrock', label: 'Amazon Bedrock Converse', protocol: 'bedrock-converse', baseUrl: config.llm.bedrock.endpointOverride,
-      model: config.llm.bedrock.modelId, authMode: 'aws', secret: '', headers: {}, region: config.llm.bedrock.region,
-      awsProfile: config.llm.bedrock.awsProfile, command: '', source: 'environment',
-      allowPrivateNetwork: config.llm.bedrock.allowPrivateNetwork,
+      id: 'bedrock', label: 'Amazon Bedrock', protocol: 'bedrock-converse', baseUrl: value('AWS_ENDPOINT_URL_BEDROCK'),
+      model: value('BEDROCK_MODEL_ID', config.llm.bedrock.modelId), authMode: 'aws', secret: '', headers: {}, region: value('AWS_REGION', 'us-east-1'),
+      awsProfile: value('AWS_PROFILE'), command: '', source: 'environment',
+      allowPrivateNetwork: enabledFlag('BEDROCK_ALLOW_PRIVATE_NETWORK'),
     },
     {
-      id: 'openai-compat', label: 'OpenAI-compatible Chat Completions', protocol: 'openai-chat', baseUrl: config.llm.openaiCompat.baseUrl,
-      model: config.llm.openaiCompat.model, authMode: 'bearer', secret: config.llm.openaiCompat.apiKey,
+      id: 'openai-compat', label: 'OpenAI-compatible API', protocol: 'openai-chat', baseUrl: value('OPENAI_COMPAT_BASE_URL'),
+      model: value('OPENAI_COMPAT_MODEL'), authMode: 'bearer', secret: value('OPENAI_COMPAT_API_KEY'),
       headers: {}, region: '', awsProfile: '', command: '', source: 'environment',
-      allowPrivateNetwork: config.llm.openaiCompat.allowPrivateNetwork,
+      allowPrivateNetwork: enabledFlag('OPENAI_COMPAT_ALLOW_PRIVATE_NETWORK'),
     },
     {
-      id: 'anthropic', label: 'Anthropic Messages', protocol: 'anthropic-messages', baseUrl: config.llm.anthropic.baseUrl,
-      model: config.llm.anthropic.model, authMode: 'x-api-key', secret: config.llm.anthropic.apiKey,
+      id: 'anthropic', label: 'Anthropic API', protocol: 'anthropic-messages', baseUrl: value('ANTHROPIC_BASE_URL', 'https://api.anthropic.com/v1'),
+      model: value('ANTHROPIC_MODEL', config.llm.anthropic.model), authMode: 'x-api-key', secret: value('ANTHROPIC_API_KEY'),
       headers: {}, region: '', awsProfile: '', command: '', source: 'environment',
-      allowPrivateNetwork: config.llm.anthropic.allowPrivateNetwork,
+      allowPrivateNetwork: enabledFlag('ANTHROPIC_ALLOW_PRIVATE_NETWORK'),
     },
   ];
+  return profiles.filter(profile => enabled[profile.id]);
 }
 
 function providerForProfile(profile: StoredLlmProfile): LlmProvider {

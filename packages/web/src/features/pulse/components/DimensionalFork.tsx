@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { pulseDimensionalForkApi } from '../dimensional-fork-api';
-import { createRequestSequencer } from '../dimensional-fork-requests';
+import { useEffect, useMemo, useRef, useState } from "react";
+import { pulseDimensionalForkApi } from "../dimensional-fork-api";
+import { createRequestSequencer } from "../dimensional-fork-requests";
 import {
   applyDomainToggle,
   chooseValueMode,
@@ -12,13 +12,13 @@ import {
   type DimensionValueMode,
   type PulseDimensionValue,
   type PulseFilterDimensionField,
-} from '../dimensional-filter';
+} from "../dimensional-filter";
 import {
   dimensionClauseSummary,
   removeDimensionClause,
   upsertDimensionClause,
   type StagedDimensionClause,
-} from '../fork-plan';
+} from "../fork-plan";
 
 interface SourceMetric {
   id: string;
@@ -29,7 +29,11 @@ interface DimensionalForkProps {
   sources: SourceMetric[];
   clauses: StagedDimensionClause[];
   onChange: (clauses: StagedDimensionClause[]) => void;
-  onCompatibilityResolved: (sourceContextKey: string, eligibleFieldIds: string[]) => void;
+  onEditingState: (reason: string | null) => void;
+  onCompatibilityResolved: (
+    sourceContextKey: string,
+    eligibleFieldIds: string[],
+  ) => void;
 }
 
 // Above this many rendered rows, switch from the multi-column grid to a
@@ -39,11 +43,21 @@ interface DimensionalForkProps {
 // which keeps the picker responsive no matter how many members are loaded.
 const VALUE_GRID_MAX = 1500;
 
-export function DimensionalFork({ sources, clauses, onChange, onCompatibilityResolved }: DimensionalForkProps) {
-  const sourceMetricIds = useMemo(() => sources.map((source) => source.id), [sources]);
-  const sourceContextKey = sourceMetricIds.join(' ');
+export function DimensionalFork({
+  sources,
+  clauses,
+  onChange,
+  onCompatibilityResolved,
+  onEditingState,
+}: DimensionalForkProps) {
+  const sourceMetricIds = useMemo(
+    () => sources.map((source) => source.id),
+    [sources],
+  );
+  const sourceContextKey = sourceMetricIds.join("\u0000");
   const [fields, setFields] = useState<PulseFilterDimensionField[]>([]);
-  const [fieldId, setFieldId] = useState('');
+  const [fieldId, setFieldId] = useState("");
+  const [valueContext, setValueContext] = useState("");
   const [fieldsLoading, setFieldsLoading] = useState(false);
   const [fieldsError, setFieldsError] = useState<string | null>(null);
   const [memberCount, setMemberCount] = useState<number | null>(null);
@@ -55,7 +69,7 @@ export function DimensionalFork({ sources, clauses, onChange, onCompatibilityRes
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   // Include (OPERATOR_EQUAL) vs exclude (OPERATOR_NOT_EQUAL) for the active clause.
   const [exclude, setExclude] = useState(false);
-  const [search, setSearch] = useState('');
+  const [search, setSearch] = useState("");
   const [valuesLoading, setValuesLoading] = useState(false);
   const [allLoading, setAllLoading] = useState(false);
   const [valuesError, setValuesError] = useState<string | null>(null);
@@ -73,7 +87,7 @@ export function DimensionalFork({ sources, clauses, onChange, onCompatibilityRes
 
   useEffect(() => {
     setFieldsLoading(false);
-    setFieldId('');
+    setFieldId("");
     setFields([]);
     setFieldsError(null);
     resetValues();
@@ -83,14 +97,21 @@ export function DimensionalFork({ sources, clauses, onChange, onCompatibilityRes
     if (sourceMetricIds.length === 0) return;
 
     setFieldsLoading(true);
-    void pulseDimensionalForkApi.fields(sourceMetricIds)
+    void pulseDimensionalForkApi
+      .fields(sourceMetricIds)
       .then((response) => {
         if (!fieldsSeqRef.current.isLatest(token)) return;
         setFields(response.fields);
-        onCompatibilityResolved(sourceContextKey, response.fields.map((field) => field.id));
+        onCompatibilityResolved(
+          sourceContextKey,
+          response.fields.map((field) => field.id),
+        );
       })
       .catch((error) => {
-        if (fieldsSeqRef.current.isLatest(token)) setFieldsError(error instanceof Error ? error.message : String(error));
+        if (fieldsSeqRef.current.isLatest(token))
+          setFieldsError(
+            error instanceof Error ? error.message : String(error),
+          );
       })
       .finally(() => {
         if (fieldsSeqRef.current.isLatest(token)) setFieldsLoading(false);
@@ -120,24 +141,35 @@ export function DimensionalFork({ sources, clauses, onChange, onCompatibilityRes
     setValuesLoading(true);
     void (async () => {
       try {
-        const { count } = await pulseDimensionalForkApi.count(sourceMetricIds, fieldId);
+        const { count } = await pulseDimensionalForkApi.count(
+          sourceMetricIds,
+          fieldId,
+        );
         if (!valuesSeqRef.current.isLatest(token)) return;
         const mode = chooseValueMode(count);
         setMemberCount(count);
         setValueMode(mode);
+        setValueContext(`${sourceContextKey}\u0000${fieldId}`);
         setKnownValues(uniqueDimensionValues(stagedValues));
         setSelectedKeys(new Set(stagedValues.map((entry) => entry.key)));
         setExclude(existingClause?.exclude ?? false);
 
-        if (mode !== 'fetch-all') return;
-        const page = await pulseDimensionalForkApi.values(sourceMetricIds, fieldId, '');
+        if (mode !== "fetch-all") return;
+        const page = await pulseDimensionalForkApi.values(
+          sourceMetricIds,
+          fieldId,
+          "",
+        );
         if (!valuesSeqRef.current.isLatest(token)) return;
         const values = uniqueDimensionValues(page.values);
         setDomain(values);
         setKnownValues(mergeDimensionValues(values, stagedValues));
         setTruncated(page.truncated);
       } catch (error) {
-        if (valuesSeqRef.current.isLatest(token)) setValuesError(error instanceof Error ? error.message : String(error));
+        if (valuesSeqRef.current.isLatest(token))
+          setValuesError(
+            error instanceof Error ? error.message : String(error),
+          );
       } finally {
         if (valuesSeqRef.current.isLatest(token)) setValuesLoading(false);
       }
@@ -149,7 +181,7 @@ export function DimensionalFork({ sources, clauses, onChange, onCompatibilityRes
   // never enters this effect.
   useEffect(() => {
     const token = searchSeqRef.current.next();
-    if (valueMode !== 'search-required') return;
+    if (valueMode !== "search-required") return;
     if (!search.trim()) {
       setMatches([]);
       setTruncated(false);
@@ -169,7 +201,8 @@ export function DimensionalFork({ sources, clauses, onChange, onCompatibilityRes
     setValuesLoading(true);
     setValuesError(null);
     const timer = window.setTimeout(() => {
-      void pulseDimensionalForkApi.values(sourceMetricIds, fieldId, search.trim())
+      void pulseDimensionalForkApi
+        .values(sourceMetricIds, fieldId, search.trim())
         .then((page) => {
           if (!searchSeqRef.current.isLatest(token)) return;
           const values = uniqueDimensionValues(page.values);
@@ -178,7 +211,10 @@ export function DimensionalFork({ sources, clauses, onChange, onCompatibilityRes
           setTruncated(page.truncated);
         })
         .catch((error) => {
-          if (searchSeqRef.current.isLatest(token)) setValuesError(error instanceof Error ? error.message : String(error));
+          if (searchSeqRef.current.isLatest(token))
+            setValuesError(
+              error instanceof Error ? error.message : String(error),
+            );
         })
         .finally(() => {
           if (searchSeqRef.current.isLatest(token)) {
@@ -192,26 +228,21 @@ export function DimensionalFork({ sources, clauses, onChange, onCompatibilityRes
     };
   }, [valueMode, fieldId, search, sourceContextKey]);
 
-  const searchRequired = valueMode === 'search-required';
+  const searchRequired = valueMode === "search-required";
   // Values shown as checkboxes: client-filtered domain in fetch-all mode, the
   // server match set in search-required mode.
-  const visibleValues = searchRequired ? matches : filterDimensionValues(domain, search);
+  const visibleValues = searchRequired
+    ? matches
+    : filterDimensionValues(domain, search);
   // Values the Select-all toggle acts on: the whole domain in fetch-all mode so
   // it ignores the client filter; the current match set in search-required.
   const toggleValues = searchRequired ? matches : domain;
   const toggleState = domainToggleState(toggleValues, selectedKeys, {
-    mode: valueMode ?? 'fetch-all',
+    mode: valueMode ?? "fetch-all",
     truncated,
   });
   const selectedValues = selectedProviderValues(knownValues, selectedKeys);
   const selectedField = fields.find((field) => field.id === fieldId);
-  const stageDisabledReason = getStageDisabledReason({
-    sourceCount: sourceMetricIds.length,
-    fieldsLoading,
-    valuesLoading: valuesLoading || allLoading,
-    fieldId,
-    selectedCount: selectedValues.length,
-  });
 
   const toggleValue = (key: string) => {
     setSelectedKeys((current) => {
@@ -222,22 +253,65 @@ export function DimensionalFork({ sources, clauses, onChange, onCompatibilityRes
     });
   };
 
-  const stageClause = () => {
-    if (stageDisabledReason || !selectedField) return;
-    const selected = new Set(selectedKeys);
-    const values = knownValues.filter((entry) => selected.has(entry.key));
-    onChange(upsertDimensionClause(clauses, {
-      fieldId: selectedField.id,
-      fieldLabel: selectedField.label,
-      ...(selectedField.table ? { table: selectedField.table } : {}),
-      exclude,
-      ...(memberCount !== null ? { memberTotal: memberCount } : {}),
-      values,
-    }));
-    // Return the picker to "Select a field" so the next clause starts clean.
-    // Clearing fieldId re-runs the field effect, which resets values/mode/exclude.
-    setFieldId('');
-  };
+  // Every complete field selection updates the typed plan immediately.
+  // No parallel staging buffer can diverge from the preview or submitted request.
+  useEffect(() => {
+    const editingFilters = Boolean(fieldId || clauses.length);
+    const reason =
+      editingFilters && fieldsLoading
+        ? "Loading filter fields..."
+        : editingFilters && fieldsError
+          ? "Filter fields could not load."
+          : fieldId && valuesError
+            ? "Filter values could not load."
+            : fieldId &&
+                (valuesLoading ||
+                  allLoading ||
+                  valueContext !== `${sourceContextKey}\u0000${fieldId}`)
+              ? "Loading filter values..."
+              : fieldId && selectedValues.length === 0
+                ? "Choose values for the selected filter."
+                : null;
+    onEditingState(reason);
+    if (
+      valueContext !== `${sourceContextKey}\u0000${fieldId}` ||
+      !selectedField ||
+      valuesLoading ||
+      allLoading ||
+      fieldsLoading ||
+      valuesError ||
+      !valueMode
+    )
+      return;
+    const next = selectedValues.length
+      ? upsertDimensionClause(clauses, {
+          fieldId: selectedField.id,
+          fieldLabel: selectedField.label,
+          ...(selectedField.table ? { table: selectedField.table } : {}),
+          exclude,
+          ...(memberCount !== null ? { memberTotal: memberCount } : {}),
+          values: knownValues.filter((value) => selectedKeys.has(value.key)),
+        })
+      : removeDimensionClause(clauses, selectedField.id);
+    if (JSON.stringify(next) !== JSON.stringify(clauses)) onChange(next);
+  }, [
+    selectedField,
+    selectedValues,
+    exclude,
+    memberCount,
+    fieldsLoading,
+    fieldsError,
+    fieldId,
+    valuesLoading,
+    allLoading,
+    valuesError,
+    valueMode,
+    valueContext,
+    sourceContextKey,
+    clauses,
+    onChange,
+    onEditingState,
+  ]);
 
   // Load the whole domain on demand for a large (search-required) dimension.
   // Fetches every value in one query, then behaves like fetch-all mode so the
@@ -251,19 +325,23 @@ export function DimensionalFork({ sources, clauses, onChange, onCompatibilityRes
     searchLoadingRef.current = false;
     setAllLoading(true);
     setValuesError(null);
-    void pulseDimensionalForkApi.values(sourceMetricIds, fieldId, '', { all: true })
+    void pulseDimensionalForkApi
+      .values(sourceMetricIds, fieldId, "", { all: true })
       .then((page) => {
         if (!valuesSeqRef.current.isLatest(token)) return;
         const values = uniqueDimensionValues(page.values);
         setDomain(values);
         setKnownValues((current) => mergeDimensionValues(current, values));
         setMatches([]);
-        setSearch('');
+        setSearch("");
         setTruncated(page.truncated);
-        setValueMode('fetch-all');
+        setValueMode("fetch-all");
       })
       .catch((error) => {
-        if (valuesSeqRef.current.isLatest(token)) setValuesError(error instanceof Error ? error.message : String(error));
+        if (valuesSeqRef.current.isLatest(token))
+          setValuesError(
+            error instanceof Error ? error.message : String(error),
+          );
       })
       .finally(() => {
         if (valuesSeqRef.current.isLatest(token)) setAllLoading(false);
@@ -275,46 +353,64 @@ export function DimensionalFork({ sources, clauses, onChange, onCompatibilityRes
     setAllLoading(false);
     setMemberCount(null);
     setValueMode(null);
+    setValueContext("");
     setDomain([]);
     setMatches([]);
     setKnownValues([]);
     setSelectedKeys(new Set());
     setExclude(false);
-    setSearch('');
+    setSearch("");
     setValuesLoading(false);
     setValuesError(null);
     setTruncated(false);
   }
 
-  const searchPlaceholder = searchRequired ? 'Type to search values' : 'Filter loaded values';
-  const showEmpty = !valuesLoading && !valuesError && visibleValues.length === 0
-    && (!searchRequired || Boolean(search.trim()));
+  const searchPlaceholder = searchRequired
+    ? "Type to search values"
+    : "Filter loaded values";
+  const showEmpty =
+    !valuesLoading &&
+    !valuesError &&
+    visibleValues.length === 0 &&
+    (!searchRequired || Boolean(search.trim()));
 
   return (
     <section className="dimension-fork" aria-labelledby="dimension-fork-title">
-      <div className="subpanel-title" id="dimension-fork-title">Dimension clauses</div>
-      <p className="section-hint">Stage zero or more filters. Values within a clause use OR. Separate clauses use AND.</p>
-
-      <div className="dimension-fork-source-summary">
-        <span>{sources.length} exact source metric{sources.length === 1 ? '' : 's'} selected</span>
-        {sources.length > 0 && (
-          <span className="mono" title={sources.map((source) => source.label).join(', ')}>
-            {sources.map((source) => source.label).join(', ')}
-          </span>
-        )}
+      <div className="subpanel-title" id="dimension-fork-title">
+        Filters
       </div>
       {clauses.length > 0 && (
-        <div className="pulse-clause-list" aria-label="Staged dimension clauses">
+        <div className="pulse-clause-list" aria-label="Selected filters">
           {clauses.map((clause) => (
-            <div className="pulse-clause" key={clause.fieldId} title={clause.table ? `${clause.fieldLabel} - ${clause.table}` : clause.fieldLabel}>
+            <div
+              className="pulse-clause"
+              key={clause.fieldId}
+              title={
+                clause.table
+                  ? `${clause.fieldLabel} - ${clause.table}`
+                  : clause.fieldLabel
+              }
+            >
               <span>
-                <strong>{clause.fieldLabel}</strong>: {dimensionClauseSummary(clause)}
+                <strong>{clause.fieldLabel}</strong>:{" "}
+                {dimensionClauseSummary(clause)}
               </span>
               <button
                 className="btn small"
                 type="button"
-                aria-label={`Remove ${clause.fieldLabel} clause`}
-                onClick={() => onChange(removeDimensionClause(clauses, clause.fieldId))}
+                onClick={() => setFieldId(clause.fieldId)}
+                aria-label={`Edit ${clause.fieldLabel} filter`}
+              >
+                Edit
+              </button>
+              <button
+                className="btn small"
+                type="button"
+                aria-label={`Remove ${clause.fieldLabel} filter`}
+                onClick={() => {
+                  if (fieldId === clause.fieldId) setFieldId("");
+                  onChange(removeDimensionClause(clauses, clause.fieldId));
+                }}
               >
                 Remove
               </button>
@@ -329,12 +425,20 @@ export function DimensionalFork({ sources, clauses, onChange, onCompatibilityRes
           <select
             aria-label="Dimension field"
             value={fieldId}
-            disabled={sourceMetricIds.length === 0 || fieldsLoading || Boolean(fieldsError)}
+            disabled={
+              sourceMetricIds.length === 0 ||
+              fieldsLoading ||
+              Boolean(fieldsError)
+            }
             onChange={(event) => setFieldId(event.target.value)}
           >
-            <option value="">{fieldsLoading ? 'Loading fields...' : 'Select a field'}</option>
+            <option value="">
+              {fieldsLoading ? "Loading fields..." : "Select a field"}
+            </option>
             {fields.map((field) => (
-              <option key={field.id} value={field.id}>{field.table ? `${field.label} - ${field.table}` : field.label}</option>
+              <option key={field.id} value={field.id}>
+                {field.table ? `${field.label} - ${field.table}` : field.label}
+              </option>
             ))}
           </select>
         </label>
@@ -351,14 +455,29 @@ export function DimensionalFork({ sources, clauses, onChange, onCompatibilityRes
         </label>
       </div>
 
-      {sourceMetricIds.length === 0 && <p className="section-hint">Select exact source metrics from the registry.</p>}
-      {fieldsError && <div className="dimension-fork-error" role="alert">Fields could not load: {fieldsError}</div>}
-      {!fieldsLoading && sourceMetricIds.length > 0 && !fieldsError && fields.length === 0 && (
-        <p className="section-hint">The selected source context has no eligible string dimensions.</p>
+      {sourceMetricIds.length === 0 && (
+        <p className="section-hint">Select metrics to create variants.</p>
       )}
+      {fieldsError && (
+        <div className="dimension-fork-error" role="alert">
+          Fields could not load: {fieldsError}
+        </div>
+      )}
+      {!fieldsLoading &&
+        sourceMetricIds.length > 0 &&
+        !fieldsError &&
+        fields.length === 0 && (
+          <p className="section-hint">
+            No filter fields are available for these metrics.
+          </p>
+        )}
       {fieldId && (
         <div className="dimension-value-picker">
-          <div className="dimension-value-mode" role="radiogroup" aria-label="Filter mode">
+          <div
+            className="dimension-value-mode"
+            role="radiogroup"
+            aria-label="Filter mode"
+          >
             <label className="dimension-value-mode-option">
               <input
                 type="radio"
@@ -380,8 +499,8 @@ export function DimensionalFork({ sources, clauses, onChange, onCompatibilityRes
           </div>
           <p className="section-hint">
             {exclude
-              ? 'Excluded values are removed; every other member (including any added later) stays in the metric.'
-              : 'Only the selected values are kept. Members added to the datasource later are not included.'}
+              ? "Excluded values are removed; every other member (including any added later) stays in the metric."
+              : "Only the selected values are kept. Members added to the datasource later are not included."}
           </p>
           <div className="dimension-value-toolbar">
             <button
@@ -389,48 +508,86 @@ export function DimensionalFork({ sources, clauses, onChange, onCompatibilityRes
               type="button"
               disabled={toggleState.disabled}
               title={toggleState.reason}
-              onClick={() => setSelectedKeys((current) => applyDomainToggle(toggleState, toggleValues, current))}
+              onClick={() =>
+                setSelectedKeys((current) =>
+                  applyDomainToggle(toggleState, toggleValues, current),
+                )
+              }
             >
-              {toggleState.action === 'deselect'
-                ? 'Deselect all'
-                : searchRequired ? 'Select all matches' : 'Select all'}
+              {toggleState.action === "deselect"
+                ? "Deselect all"
+                : searchRequired
+                  ? "Select all matches"
+                  : "Select all"}
             </button>
-            {toggleState.action !== 'deselect' && selectedKeys.size > 0 && (
-              <button className="btn small" type="button" onClick={() => setSelectedKeys(new Set())}>Deselect all</button>
-            )}
-            <span className="dimension-value-count">{selectedKeys.size} selected</span>
-            {memberCount !== null && (
-              <span className="dimension-value-count" title="Total distinct members in this dimension">
-                Total members: {memberCount.toLocaleString()}
-              </span>
-            )}
-            {valuesLoading && <span className="dimension-value-state" role="status">Loading values...</span>}
-          </div>
-          {searchRequired && !search.trim() && !valuesLoading && memberCount !== null && (
-            <div className="dimension-load-all">
-              <p className="section-hint">
-                This dimension has {memberCount.toLocaleString()} members - type to search, or load them all.
-              </p>
+            {toggleState.action !== "deselect" && selectedKeys.size > 0 && (
               <button
                 className="btn small"
                 type="button"
-                disabled={allLoading}
-                onClick={loadAllValues}
+                onClick={() => setSelectedKeys(new Set())}
               >
-                {allLoading ? `Loading all ${memberCount.toLocaleString()}...` : `Load all ${memberCount.toLocaleString()} values`}
+                Deselect all
               </button>
+            )}
+            <span className="dimension-value-count">
+              {selectedKeys.size} selected
+            </span>
+            {memberCount !== null && (
+              <span
+                className="dimension-value-count"
+                title="Total distinct members in this dimension"
+              >
+                Total members: {memberCount.toLocaleString()}
+              </span>
+            )}
+            {valuesLoading && (
+              <span className="dimension-value-state" role="status">
+                Loading values...
+              </span>
+            )}
+          </div>
+          {searchRequired &&
+            !search.trim() &&
+            !valuesLoading &&
+            memberCount !== null && (
+              <div className="dimension-load-all">
+                <p className="section-hint">
+                  This dimension has {memberCount.toLocaleString()} members -
+                  type to search, or load them all.
+                </p>
+                <button
+                  className="btn small"
+                  type="button"
+                  disabled={allLoading}
+                  onClick={loadAllValues}
+                >
+                  {allLoading
+                    ? `Loading all ${memberCount.toLocaleString()}...`
+                    : `Load all ${memberCount.toLocaleString()} values`}
+                </button>
+              </div>
+            )}
+          {searchRequired && truncated && (
+            <p className="section-hint warn">
+              Showing the first {matches.length} matches. Refine your search to
+              narrow the results.
+            </p>
+          )}
+          {!valuesLoading && toggleState.reason && (
+            <p className="section-hint warn">{toggleState.reason}</p>
+          )}
+          {valuesError && (
+            <div className="dimension-fork-error" role="alert">
+              Values could not load: {valuesError}
             </div>
           )}
-          {searchRequired && truncated && (
-            <p className="section-hint warn">Showing the first {matches.length} matches. Refine your search to narrow the results.</p>
-          )}
-          {!valuesLoading && toggleState.reason && <p className="section-hint warn">{toggleState.reason}</p>}
-          {valuesError && <div className="dimension-fork-error" role="alert">Values could not load: {valuesError}</div>}
           {showEmpty && (
-            <div className="empty-note">{search.trim() ? 'No matching values.' : 'No selectable values.'}</div>
+            <div className="empty-note">
+              {search.trim() ? "No matching values." : "No selectable values."}
+            </div>
           )}
-          {visibleValues.length > 0 && (
-            visibleValues.length > VALUE_GRID_MAX ? (
+          {visibleValues.length > 0 &&
+            (visibleValues.length > VALUE_GRID_MAX ? (
               <VirtualizedValueList
                 key={`${fieldId}:${visibleValues.length}`}
                 items={visibleValues}
@@ -439,13 +596,17 @@ export function DimensionalFork({ sources, clauses, onChange, onCompatibilityRes
                 onToggle={toggleValue}
               />
             ) : (
-              <div className="dimension-value-options" role="group" aria-label="Dimension values">
+              <div
+                className="dimension-value-options"
+                role="group"
+                aria-label="Dimension values"
+              >
                 {visibleValues.map((entry) => {
                   const isSelected = selectedKeys.has(entry.key);
                   return (
                     <label
                       key={entry.key}
-                      className={`dimension-value-option${exclude && isSelected ? ' is-excluded' : ''}`}
+                      className={`dimension-value-option${exclude && isSelected ? " is-excluded" : ""}`}
                     >
                       <input
                         type="checkbox"
@@ -457,43 +618,11 @@ export function DimensionalFork({ sources, clauses, onChange, onCompatibilityRes
                   );
                 })}
               </div>
-            )
-          )}
+            ))}
         </div>
       )}
-
-      <div className="dimension-fork-submit-row">
-        <div>
-          <strong>{clauses.length}</strong> staged clause{clauses.length === 1 ? '' : 's'}
-          {stageDisabledReason && <div className="section-hint">{stageDisabledReason}</div>}
-        </div>
-        <button
-          className="btn"
-          type="button"
-          disabled={Boolean(stageDisabledReason)}
-          title={stageDisabledReason ?? undefined}
-          onClick={stageClause}
-        >
-          {clauses.some((clause) => clause.fieldId === fieldId) ? 'Update clause' : 'Add clause'}
-        </button>
-      </div>
     </section>
   );
-}
-
-function getStageDisabledReason(input: {
-  sourceCount: number;
-  fieldsLoading: boolean;
-  valuesLoading: boolean;
-  fieldId: string;
-  selectedCount: number;
-}): string | null {
-  if (input.sourceCount === 0) return 'Select at least one exact source metric.';
-  if (input.fieldsLoading) return 'Wait for eligible fields to load.';
-  if (!input.fieldId) return 'Select a dimension field.';
-  if (input.valuesLoading) return 'Wait for dimension values to load.';
-  if (input.selectedCount === 0) return 'Select at least one value.';
-  return null;
 }
 
 // Fixed-height windowed list for very large value sets: only the rows in (and
@@ -517,8 +646,12 @@ function VirtualizedValueList({
 }) {
   const [scrollTop, setScrollTop] = useState(0);
   const total = items.length;
-  const firstVisible = Math.max(0, Math.floor(scrollTop / VALUE_ROW_HEIGHT) - VALUE_OVERSCAN);
-  const windowRows = Math.ceil(VALUE_VIEWPORT_HEIGHT / VALUE_ROW_HEIGHT) + VALUE_OVERSCAN * 2;
+  const firstVisible = Math.max(
+    0,
+    Math.floor(scrollTop / VALUE_ROW_HEIGHT) - VALUE_OVERSCAN,
+  );
+  const windowRows =
+    Math.ceil(VALUE_VIEWPORT_HEIGHT / VALUE_ROW_HEIGHT) + VALUE_OVERSCAN * 2;
   const lastVisible = Math.min(total, firstVisible + windowRows);
   const slice = items.slice(firstVisible, lastVisible);
   return (
@@ -526,25 +659,40 @@ function VirtualizedValueList({
       className="dimension-value-virtual"
       role="group"
       aria-label="Dimension values"
-      style={{ height: VALUE_VIEWPORT_HEIGHT, overflowY: 'auto', position: 'relative' }}
+      style={{
+        height: VALUE_VIEWPORT_HEIGHT,
+        overflowY: "auto",
+        position: "relative",
+      }}
       onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
     >
-      <div style={{ height: total * VALUE_ROW_HEIGHT, position: 'relative' }}>
+      <div style={{ height: total * VALUE_ROW_HEIGHT, position: "relative" }}>
         {slice.map((entry, offset) => {
           const index = firstVisible + offset;
           const isSelected = selectedKeys.has(entry.key);
           return (
             <label
               key={entry.key}
-              className={`dimension-value-option${exclude && isSelected ? ' is-excluded' : ''}`}
-              style={{ position: 'absolute', top: index * VALUE_ROW_HEIGHT, left: 0, right: 0, height: VALUE_ROW_HEIGHT }}
+              className={`dimension-value-option${exclude && isSelected ? " is-excluded" : ""}`}
+              style={{
+                position: "absolute",
+                top: index * VALUE_ROW_HEIGHT,
+                left: 0,
+                right: 0,
+                height: VALUE_ROW_HEIGHT,
+              }}
             >
               <input
                 type="checkbox"
                 checked={isSelected}
                 onChange={() => onToggle(entry.key)}
               />
-              <span className="dimension-value-virtual-label" title={entry.label}>{entry.label}</span>
+              <span
+                className="dimension-value-virtual-label"
+                title={entry.label}
+              >
+                {entry.label}
+              </span>
             </label>
           );
         })}

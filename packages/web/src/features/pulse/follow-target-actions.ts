@@ -1,12 +1,12 @@
 import type {
   FollowTargetOperation,
   FollowTargetOperationResult,
-} from '../../api/client';
-import type { RegistryActionItem } from './registry-actions';
+} from "./registry/view-types";
+import type { RegistryActionItem } from "./registry-actions";
 
 export interface FollowTargetChoice {
   id: string;
-  kind: 'GROUP' | 'USER';
+  kind: "GROUP" | "USER";
   label: string;
   /**
    * Text the local filter matches against, when it differs from `label`. The
@@ -28,10 +28,15 @@ export function currentUserFollowTarget(
   currentUserName?: string,
 ): FollowTargetChoice | null {
   if (!currentUserId) return null;
-  const name = (currentUserName ?? '').trim();
+  const name = (currentUserName ?? "").trim();
   return name
-    ? { id: currentUserId, kind: 'USER', label: `${name} (you)`, searchText: name }
-    : { id: currentUserId, kind: 'USER', label: 'You' };
+    ? {
+        id: currentUserId,
+        kind: "USER",
+        label: `${name} (you)`,
+        searchText: name,
+      }
+    : { id: currentUserId, kind: "USER", label: "You" };
 }
 
 /**
@@ -48,11 +53,11 @@ export function resolveCurrentUserFollowTarget(
   currentUserName?: string,
 ): { currentUser: FollowTargetChoice | null; others: FollowTargetChoice[] } {
   const others = targets.filter(
-    (target) => !(target.kind === 'USER' && target.id === currentUserId),
+    (target) => !(target.kind === "USER" && target.id === currentUserId),
   );
   if (!currentUserId) return { currentUser: null, others };
   const inventoryRow = targets.find(
-    (target) => target.kind === 'USER' && target.id === currentUserId,
+    (target) => target.kind === "USER" && target.id === currentUserId,
   );
   const currentUser = inventoryRow
     ? {
@@ -65,50 +70,69 @@ export function resolveCurrentUserFollowTarget(
 }
 
 /** Case-insensitive substring match over a target's label and search text. */
-export function followTargetMatchesQuery(target: FollowTargetChoice, query: string): boolean {
+export function followTargetMatchesQuery(
+  target: FollowTargetChoice,
+  query: string,
+): boolean {
   const needle = query.trim().toLowerCase();
-  if (needle === '') return true;
-  const haystack = `${target.label} ${target.searchText ?? ''}`.toLowerCase();
+  if (needle === "") return true;
+  const haystack = `${target.label} ${target.searchText ?? ""}`.toLowerCase();
   return haystack.includes(needle);
 }
 
 export function buildFollowTargetOperations(
   metrics: Array<{ id: string }>,
-  targets: Array<{ id: string; kind: 'GROUP' | 'USER' }>,
+  targets: Array<{ id: string; kind: "GROUP" | "USER" }>,
 ): FollowTargetOperation[] {
   const seen = new Set<string>();
-  return metrics.flatMap((metric) => targets.flatMap((target) => {
-    const operation = { metricId: metric.id, target: { id: target.id, kind: target.kind } };
-    const key = followTargetOperationKey(operation);
-    if (seen.has(key)) return [];
-    seen.add(key);
-    return [operation];
-  }));
+  return metrics.flatMap((metric) =>
+    targets.flatMap((target) => {
+      const operation = {
+        metricId: metric.id,
+        target: { id: target.id, kind: target.kind },
+      };
+      const key = followTargetOperationKey(operation);
+      if (seen.has(key)) return [];
+      seen.add(key);
+      return [operation];
+    }),
+  );
 }
 
 export function reconcileFollowTargetResults(
-  kind: 'follow' | 'unfollow',
+  kind: "follow" | "unfollow",
   operations: FollowTargetOperation[],
   results: FollowTargetOperationResult[],
   labels: {
     metricLabels: ReadonlyMap<string, string>;
     targetLabels: ReadonlyMap<string, string>;
   },
-  missingDetail = 'The server returned no result for this metric and target.',
+  missingDetail = "The server returned no result for this metric and target.",
 ): { items: RegistryActionItem[]; retryOperations: FollowTargetOperation[] } {
-  const returned = new Map(results.map((result) => [followTargetResultKey(result), result]));
+  const returned = new Map(
+    results.map((result) => [followTargetResultKey(result), result]),
+  );
   const retryOperations: FollowTargetOperation[] = [];
   const items = operations.map((operation) => {
     const result = returned.get(followTargetOperationKey(operation));
     const status = registryStatus(kind, result);
-    if (status === 'failed') retryOperations.push(operation);
+    if (status === "failed" || status === "not_attempted")
+      retryOperations.push(operation);
     return {
       key: `${kind}:${operation.metricId}:${operation.target.kind}:${operation.target.id}`,
       metricId: operation.metricId,
-      metricLabel: labels.metricLabels.get(operation.metricId) ?? operation.metricId,
-      targetLabel: labels.targetLabels.get(targetLabelKey(operation.target.kind, operation.target.id)) ?? operation.target.id,
+      metricLabel:
+        labels.metricLabels.get(operation.metricId) ?? operation.metricId,
+      targetLabel:
+        labels.targetLabels.get(
+          targetLabelKey(operation.target.kind, operation.target.id),
+        ) ?? operation.target.id,
       status,
-      ...(!result ? { detail: missingDetail } : result.error ? { detail: result.error } : {}),
+      ...(!result
+        ? { detail: missingDetail }
+        : result.error
+          ? { detail: result.error }
+          : {}),
     } satisfies RegistryActionItem;
   });
   return { items, retryOperations };
@@ -125,39 +149,55 @@ export function handleFollowTargetSelectionKey<T>(
   activeTarget: T | undefined,
   selectTarget: (target: T) => void,
 ): boolean {
-  if (!activeTarget || event.key !== 'Enter') return false;
+  if (!activeTarget || event.key !== "Enter") return false;
   event.preventDefault();
   selectTarget(activeTarget);
   return true;
 }
 
-export function followTargetOperationKey(operation: FollowTargetOperation): string {
-  return followTargetKeyParts(operation.metricId, operation.target.kind, operation.target.id);
+export function followTargetOperationKey(
+  operation: FollowTargetOperation,
+): string {
+  return followTargetKeyParts(
+    operation.metricId,
+    operation.target.kind,
+    operation.target.id,
+  );
 }
 
-export function targetLabelKey(kind: 'GROUP' | 'USER', id: string): string {
+export function targetLabelKey(kind: "GROUP" | "USER", id: string): string {
   return `${kind}\u0000${id}`;
 }
 
 function followTargetResultKey(result: FollowTargetOperationResult): string {
-  return followTargetKeyParts(result.metricId, result.targetKind, result.targetId);
+  return followTargetKeyParts(
+    result.metricId,
+    result.targetKind,
+    result.targetId,
+  );
 }
 
-function followTargetKeyParts(metricId: string, targetKind: 'GROUP' | 'USER', targetId: string): string {
+function followTargetKeyParts(
+  metricId: string,
+  targetKind: "GROUP" | "USER",
+  targetId: string,
+): string {
   return `${metricId}\u0000${targetKind}\u0000${targetId}`;
 }
 
 function registryStatus(
-  kind: 'follow' | 'unfollow',
+  kind: "follow" | "unfollow",
   result: FollowTargetOperationResult | undefined,
-): RegistryActionItem['status'] {
-  if (!result || !result.ok || result.status === 'failed') return 'failed';
-  if (kind === 'follow') {
-    if (result.status === 'followed') return 'created';
-    if (result.status === 'already_followed') return 'existing';
-    return 'failed';
+): RegistryActionItem["status"] {
+  if (result?.status === "not_attempted" || result?.status === "unknown")
+    return result.status;
+  if (!result || !result.ok || result.status === "failed") return "failed";
+  if (kind === "follow") {
+    if (result.status === "followed") return "created";
+    if (result.status === "already_followed") return "existing";
+    return "failed";
   }
-  if (result.status === 'unfollowed') return 'removed';
-  if (result.status === 'not_followed') return 'not_followed';
-  return 'failed';
+  if (result.status === "unfollowed") return "removed";
+  if (result.status === "not_followed") return "not_followed";
+  return "failed";
 }

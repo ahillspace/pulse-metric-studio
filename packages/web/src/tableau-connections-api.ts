@@ -1,3 +1,5 @@
+import { invoke as tauriInvoke } from '@tauri-apps/api/core';
+import { desktopFetch } from './desktop-transport';
 export type CredentialStorageKind = 'os' | 'encrypted';
 export type CredentialPlatform = 'windows' | 'macos' | 'browser' | 'unsupported';
 
@@ -197,7 +199,7 @@ export function createTableauConnectionsApi(
   };
 }
 
-export const tableauConnectionsApi = createTableauConnectionsApi();
+export const tableauConnectionsApi = createTableauConnectionsApi((input, init) => desktopFetch(typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url, init));
 
 async function request<T>(
   fetchImpl: typeof fetch,
@@ -358,6 +360,5 @@ export function isTauriRuntime(): boolean {
 
 async function loadTauriInvoke(): Promise<Invoke> {
   if (!isTauriRuntime()) throw new Error('OS credential storage requires the desktop app.');
-  const { invoke } = await import('@tauri-apps/api/core');
-  return invoke as Invoke;
+  return tauriInvoke as Invoke;
 }

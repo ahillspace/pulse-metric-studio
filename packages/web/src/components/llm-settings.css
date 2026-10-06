@@ -1,0 +1,13 @@
+.llm-setup-choices { min-width: 0; }
+.llm-setup-choices h2, .llm-editor-heading { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
+.llm-choice-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
+.llm-choice { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; min-width: 0; padding: 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-raised, #252528); color: var(--text); text-align: left; cursor: pointer; }
+.llm-choice:hover { border-color: #787889; background: #2e2e35; }
+.llm-choice strong { font-size: 13px; }
+.llm-choice span { font-size: 12px; color: #c0c0cd; }
+.llm-choice small { font-size: 12px; line-height: 1.55; color: #aaaaba; }
+.llm-choice:focus-visible { outline: 2px solid #b8b9ff; outline-offset: 3px; }
+.llm-advanced { border-top: 1px solid var(--border); margin-top: 6px; padding-top: 12px; }
+.llm-advanced summary { cursor: pointer; color: var(--text-muted); margin-bottom: 12px; }
+.llm-profile-editor > .section-hint { margin-bottom: 16px; }
+@media (max-width: 640px) { .llm-choice-grid { grid-template-columns: 1fr; } }

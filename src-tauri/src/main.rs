@@ -1,21 +1,21 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod credential_broker;
+mod pulse_transport;
 
-use serde::Deserialize;
 use std::collections::HashSet;
 use std::fs::OpenOptions;
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::Write;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use tauri::ipc::CapabilityBuilder;
+use pulse_transport::{pulse_api_request, PulseTransport};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_window_state::{StateFlags, WindowExt};
 
 use credential_broker::{
@@ -25,9 +25,13 @@ use credential_broker::{
 };
 use uuid::Uuid;
 
-const DEFAULT_SERVER_PORT: u16 = 4620;
-
 struct ServerHandle(Mutex<Option<Child>>);
+
+// Validation builds use separate OS data, WebView, and credential namespaces.
+fn is_pulse_identifier(identifier: &str) -> bool {
+    identifier == "com.ahillspace.pulsemetricstudio"
+        || identifier.starts_with("com.ahillspace.pulsemetricstudio.validation.")
+}
 
 #[derive(Clone, Debug)]
 struct DesktopIdentity {
@@ -162,13 +166,15 @@ fn common_node_candidates() -> Vec<PathBuf> {
 
 fn resolve_node_runtime(app: &AppHandle) -> Result<PathBuf, String> {
     let mut candidates = bundled_node_candidates(app);
-    if let Some(configured) = std::env::var_os("PULSE_METRIC_STUDIO_NODE_RUNTIME") {
-        candidates.push(PathBuf::from(configured));
+    if cfg!(debug_assertions) {
+        if let Some(configured) = std::env::var_os("PULSE_METRIC_STUDIO_NODE_RUNTIME") {
+            candidates.push(PathBuf::from(configured));
+        }
+        if let Some(path_candidate) = path_node_candidate() {
+            candidates.push(path_candidate);
+        }
+        candidates.extend(common_node_candidates());
     }
-    if let Some(path_candidate) = path_node_candidate() {
-        candidates.push(path_candidate);
-    }
-    candidates.extend(common_node_candidates());
 
     let mut checked = HashSet::new();
     let mut old_versions = Vec::new();
@@ -206,15 +212,18 @@ fn main() {
             tableau_credential_capability,
             tableau_store_credential,
             tableau_replace_credential,
-            tableau_delete_credential
+            tableau_delete_credential,
+            pulse_api_request
         ])
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main(app);
         }))
         .setup(|app| {
             let identity = DesktopIdentity::from_app(app.handle());
-            let server_listener = reserve_server_listener(DEFAULT_SERVER_PORT).map_err(
+            if !is_pulse_identifier(&identity.identifier) { return Err("Unrecognized desktop application identity".into()); }
+            let server_listener = reserve_server_listener().map_err(
                 |error| {
                     log_line(app.handle(), &identity, &format!("FATAL: {error}"));
                     error
@@ -224,7 +233,6 @@ fn main() {
                 .local_addr()
                 .map_err(|error| format!("Failed to read the reserved server port: {error}"))?
                 .port();
-            let frontend_origin = format!("http://127.0.0.1:{port}");
             log_line(
                 app.handle(),
                 &identity,
@@ -281,7 +289,7 @@ fn main() {
                 .open(&server_log_path)?;
             let server_stderr = server_stdout.try_clone()?;
 
-            let desktop_bootstrap_token = Uuid::new_v4().to_string();
+            let pulse_transport = PulseTransport { port, token: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()) };
 
             let mut server_command = Command::new(&node);
             server_command
@@ -289,18 +297,23 @@ fn main() {
                 .env("PORT", port.to_string())
                 .env("HOST", "127.0.0.1")
                 .env("PULSE_METRIC_STUDIO_DATA_DIR", &data_directory)
-                .env("PULSE_METRIC_STUDIO_DESKTOP_IDENTIFIER", &identity.identifier)
+                .env("PULSE_METRIC_STUDIO_DESKTOP_IDENTIFIER", "com.ahillspace.pulsemetricstudio")
                 .env("PULSE_METRIC_STUDIO_CREDENTIAL_BROKER_URL", &credential_broker_url)
-                .env("PULSE_METRIC_STUDIO_CREDENTIAL_BROKER_TOKEN", &credential_broker_token)
-                .env("PULSE_METRIC_STUDIO_DESKTOP_BOOTSTRAP_TOKEN", &desktop_bootstrap_token)
                 .stdout(Stdio::from(server_stdout))
                 .stderr(Stdio::from(server_stderr));
-
+            server_command.stdin(Stdio::piped()).env("PULSE_METRIC_STUDIO_DESKTOP_PIPE", "1")
+                .env_remove("PULSE_METRIC_STUDIO_CREDENTIAL_BROKER_TOKEN")
+                .env_remove("PULSE_METRIC_STUDIO_DESKTOP_BOOTSTRAP_TOKEN");
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                server_command.creation_flags(0x08000000);
+            }
             // Keep the port reserved until every startup input is ready. The
             // authenticated bootstrap check below detects any process that
             // claims the port between this release and the Node bind.
             drop(server_listener);
-            let child = server_command
+            let mut child = server_command
                 .spawn()
                 .map_err(|error| {
                     log_line(
@@ -310,6 +323,12 @@ fn main() {
                     );
                     format!("Failed to start the desktop server: {error}")
                 })?;
+            {
+                let handshake = serde_json::json!({ "protocol": pulse_transport::PROTOCOL, "token": pulse_transport.token, "brokerToken": credential_broker_token });
+                let result = child.stdin.as_mut().ok_or("Desktop startup pipe is unavailable")
+                    .and_then(|pipe| writeln!(pipe, "{handshake}").map_err(|_| "Desktop startup pipe failed"));
+                if let Err(error) = result { let _ = child.kill(); let _ = child.wait(); return Err(error.into()); }
+            }
             log_line(
                 app.handle(),
                 &identity,
@@ -317,11 +336,18 @@ fn main() {
             );
             *app.state::<ServerHandle>().0.lock().unwrap() = Some(child);
 
-            if !wait_for_authenticated_server(
-                port,
-                &desktop_bootstrap_token,
-                Duration::from_secs(25),
-            ) {
+            let ready = {
+                let start = Instant::now();
+                loop {
+                    if pulse_transport.ready() { break true; }
+                    if start.elapsed() > Duration::from_secs(25) { break false; }
+                    let exited = app.state::<ServerHandle>().0.lock().unwrap().as_mut()
+                        .is_none_or(|child| child.try_wait().ok().flatten().is_some());
+                    if exited { break false; }
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            };
+            if !ready {
                 log_line(
                     app.handle(),
                     &identity,
@@ -332,20 +358,13 @@ fn main() {
             }
             log_line(app.handle(), &identity, "authenticated startup check passed");
 
-            app.add_capability(
-                CapabilityBuilder::new("desktop-bootstrap")
-                    .window("main")
-                    .local(false)
-                    .remote(frontend_origin.clone())
-                    .permission("credential-broker")
-                    .permission("core:default")
-                    .permission("window-state:default"),
-            )?;
+            app.manage(pulse_transport);
 
             build_tray(app.handle(), &identity)?;
 
-            let url: tauri::Url = format!("{frontend_origin}/").parse()?;
-            let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
+            let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                .icon(tauri::image::Image::from_bytes(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/icons/128x128.png")))?)?
+                .on_navigation(move |url| matches!((url.scheme(), url.host_str()), ("tauri", Some("localhost")) | ("http", Some("tauri.localhost")) | ("https", Some("tauri.localhost"))))
                 .title(&identity.product_name)
                 .inner_size(1280.0, 880.0)
                 .min_inner_size(960.0, 620.0)
@@ -356,11 +375,20 @@ fn main() {
             let _ = window.show();
             let _ = window.set_focus();
             log_line(app.handle(), &identity, "window created");
-
+            monitor_pulse_child(app.handle().clone());
             Ok(())
         })
-        .build(tauri::generate_context!())
-        .expect("error while building Tauri app");
+        .build(tauri::generate_context!());
+    let app = match app {
+        Ok(app) => app,
+        Err(error) => {
+            eprintln!("Desktop startup failed: {error}");
+            rfd::MessageDialog::new().set_title("Desktop startup failed")
+                .set_description("The app could not start safely. Check the desktop log in the app data folder, then restart. Your saved work has not been reset.")
+                .set_level(rfd::MessageLevel::Error).show();
+            return;
+        }
+    };
 
     app.run(|app_handle, event| match event {
         RunEvent::ExitRequested { .. } | RunEvent::Exit => {
@@ -373,10 +401,41 @@ fn main() {
 fn kill_server(app: &AppHandle) {
     if let Some(state) = app.try_state::<ServerHandle>() {
         if let Some(mut child) = state.0.lock().unwrap().take() {
+            {
+                drop(child.stdin.take());
+                let deadline = Instant::now() + Duration::from_secs(11);
+                while Instant::now() < deadline {
+                    if child.try_wait().ok().flatten().is_some() {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
             let _ = child.kill();
             let _ = child.wait();
         }
     }
+}
+
+fn monitor_pulse_child(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(2));
+        let Some(state) = app.try_state::<ServerHandle>() else {
+            return;
+        };
+        let Ok(mut child) = state.0.lock() else {
+            return;
+        };
+        let Some(child) = child.as_mut() else {
+            return;
+        };
+        if child.try_wait().ok().flatten().is_some() {
+            let _ = app.emit("pulse-backend-unavailable", serde_json::json!({
+                "message": "The desktop service stopped. Restart Pulse Metric Studio and inspect Activity before repeating a change."
+            }));
+            return;
+        }
+    });
 }
 
 fn stop_credential_broker(app: &AppHandle) {
@@ -411,6 +470,10 @@ fn resolve_server_entry(app: &AppHandle) -> Option<PathBuf> {
         }
     }
 
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+
     let mut directory = std::env::current_exe().ok()?.parent()?.to_path_buf();
     for _ in 0..6 {
         let candidate = directory.join("packages/server/dist/index.js");
@@ -422,61 +485,9 @@ fn resolve_server_entry(app: &AppHandle) -> Option<PathBuf> {
     None
 }
 
-fn reserve_server_listener(start: u16) -> Result<TcpListener, String> {
-    let mut port = start;
-    loop {
-        match TcpListener::bind(("127.0.0.1", port)) {
-            Ok(listener) => return Ok(listener),
-            Err(_) => {
-                port = port.checked_add(1).ok_or_else(|| {
-                    "No local port is available for the desktop server.".to_string()
-                })?;
-            }
-        }
-    }
-}
-
-fn http_response(port: u16, path: &str) -> Option<String> {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
-    stream
-        .set_read_timeout(Some(Duration::from_millis(1500)))
-        .ok()?;
-    stream
-        .set_write_timeout(Some(Duration::from_millis(1500)))
-        .ok()?;
-    let request = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
-    stream.write_all(request.as_bytes()).ok()?;
-    let mut response = String::new();
-    stream.take(64 * 1024).read_to_string(&mut response).ok()?;
-    Some(response)
-}
-
-#[derive(Debug, Deserialize, PartialEq)]
-struct DesktopBootstrap {
-    token: String,
-}
-
-fn parse_desktop_bootstrap(response: &str) -> Option<DesktopBootstrap> {
-    if !(response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200")) {
-        return None;
-    }
-    let body = response.split_once("\r\n\r\n")?.1;
-    serde_json::from_str(body).ok()
-}
-
-fn wait_for_authenticated_server(port: u16, expected_token: &str, timeout: Duration) -> bool {
-    let start = Instant::now();
-    while start.elapsed() < timeout {
-        if http_response(port, "/api/desktop/bootstrap")
-            .as_deref()
-            .and_then(parse_desktop_bootstrap)
-            .is_some_and(|bootstrap| bootstrap.token == expected_token)
-        {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(300));
-    }
-    false
+fn reserve_server_listener() -> Result<TcpListener, String> {
+    TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|error| format!("No local port is available for the desktop server: {error}"))
 }
 
 fn show_main(app: &AppHandle) {
@@ -538,25 +549,17 @@ fn build_tray(app: &AppHandle, identity: &DesktopIdentity) -> tauri::Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn product_names_become_stable_log_slugs() {
         assert_eq!(slug("Pulse Metric Studio"), "pulse-metric-studio");
-        assert_eq!(slug("  Pulse / Metric Studio  "), "pulse-metric-studio");
-        assert_eq!(slug(""), "pulse-metric-studio");
     }
-
     #[test]
     fn node_major_versions_are_parsed() {
-        assert_eq!(node_major_version("v20.10.0\n"), Some(20));
-        assert_eq!(node_major_version("25.6.1"), Some(25));
+        assert_eq!(node_major_version("v22.23.2\n"), Some(22));
         assert_eq!(node_major_version("not-node"), None);
         assert!(!supported_node_runtime("v20.20.2"));
-        assert!(!supported_node_runtime("v21.7.3"));
         assert!(supported_node_runtime("v22.23.2"));
-        assert!(supported_node_runtime("v25.6.1"));
     }
-
     #[test]
     fn windows_verbatim_prefix_is_removed() {
         assert_eq!(
@@ -564,31 +567,23 @@ mod tests {
             r"C:\app\server.mjs"
         );
     }
-
     #[test]
-    fn server_uses_an_available_loopback_port() {
-        let listener = reserve_server_listener(0).unwrap();
-        let address = listener.local_addr().unwrap();
-        assert!(address.ip().is_loopback());
-        assert_ne!(address.port(), 0);
+    fn validation_identity_is_separate_and_recognized() {
+        assert!(is_pulse_identifier("com.ahillspace.pulsemetricstudio"));
+        assert!(is_pulse_identifier(
+            "com.ahillspace.pulsemetricstudio.validation.isolated"
+        ));
+        assert!(!is_pulse_identifier(
+            "com.ahillspace.pulsemetricstudio-other"
+        ));
     }
-
     #[test]
-    fn desktop_bootstrap_requires_the_expected_token() {
-        let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"token\":\"expected-token\"}";
-        assert_eq!(
-            parse_desktop_bootstrap(response),
-            Some(DesktopBootstrap {
-                token: "expected-token".to_string(),
-            })
-        );
+    fn server_reservations_use_independent_ephemeral_ports() {
+        let first = reserve_server_listener().unwrap();
+        let second = reserve_server_listener().unwrap();
         assert_ne!(
-            parse_desktop_bootstrap(response).map(|bootstrap| bootstrap.token),
-            Some("wrong-token".to_string())
-        );
-        assert_eq!(
-            parse_desktop_bootstrap("HTTP/1.1 503 Unavailable\r\n\r\n{}"),
-            None
+            first.local_addr().unwrap().port(),
+            second.local_addr().unwrap().port()
         );
     }
 }

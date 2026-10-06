@@ -7,11 +7,13 @@ const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const outDir = path.join(root, 'src-tauri', 'icons');
 fs.mkdirSync(outDir, { recursive: true });
 
-const iconSvg = path.join(root, 'design', 'icon.svg');
-const traySvg = path.join(root, 'design', 'tray.svg');
+// The original supplied artwork is shared with the web identity. Preserve its
+// aspect ratio and pixels; every platform icon derives from this one asset.
+const artwork = path.join(root, 'packages', 'web', 'src', 'assets', 'pulse-icon.png');
+const options = { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } };
 
-await sharp(iconSvg, { density: 300 }).resize(1024, 1024).png().toFile(path.join(outDir, 'app-icon.png'));
-await sharp(traySvg, { density: 300 }).resize(32, 32).png().toFile(path.join(outDir, 'tray-32.png'));
-await sharp(traySvg, { density: 300 }).resize(64, 64).png().toFile(path.join(outDir, 'tray-32@2x.png'));
+await sharp(artwork).resize(1024, 1024, options).png().toFile(path.join(outDir, 'app-icon.png'));
+await sharp(artwork).resize(32, 32, options).png().toFile(path.join(outDir, 'tray-32.png'));
+await sharp(artwork).resize(64, 64, options).png().toFile(path.join(outDir, 'tray-32@2x.png'));
 
 console.log('rendered app-icon.png (1024), tray-32.png, tray-32@2x.png ->', outDir);

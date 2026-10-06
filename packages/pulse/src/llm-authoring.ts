@@ -1,7 +1,7 @@
+import type { LlmMessage,LlmProvider } from '@pulse-metric-studio/core';
+import { extractJsonBlock,LlmProviderError } from '@pulse-metric-studio/core';
+import type { CatalogField,DatasourceCatalog } from '@pulse-metric-studio/shared';
 import { OpsSchema } from '@pulse-metric-studio/shared';
-import type { CatalogField, DatasourceCatalog } from '@pulse-metric-studio/shared';
-import type { LlmProvider, LlmMessage } from '@pulse-metric-studio/core';
-import { extractJsonBlock, LlmProviderError } from '@pulse-metric-studio/core';
 /**
  * Pulse metric authoring: prompt construction + structured ops validation +
  * one-shot JSON repair loop. The model never writes payloads directly.
@@ -40,9 +40,10 @@ Return valid JSON only - no markdown, no commentary, no text outside the JSON ob
 Each op is one of ADD_METRIC, MODIFY_METRIC, REMOVE_METRIC, ADD_SLICER, REMOVE_SLICER, SET_DIGEST_AUDIENCE. No additional keys per op beyond those below.
 
 ADD_METRIC:
-{"op":"ADD_METRIC","fieldId":"<measure id>","name":"Business Friendly Name","aggregation":"SUM|AVERAGE|MIN|MAX|COUNT_DISTINCT","timeDimensionFieldId":"<time field id or null>","cumulative":false,"format":"NUMBER|CURRENCY|PERCENT","sentiment":"UP|DOWN|NONE","description":"one to two sentence business meaning","minGranularity":"DAY|WEEK|MONTH|QUARTER|YEAR","temporality":"OVER_TIME|LATEST","reason":"optional short why"}
+{"op":"ADD_METRIC","fieldId":"<measure or valuable entity dimension id>","name":"Business Friendly Name","aggregation":"SUM|AVERAGE|MIN|MAX|COUNT_DISTINCT","timeDimensionFieldId":"<time field id or null>","cumulative":false,"format":"NUMBER|CURRENCY|PERCENT","sentiment":"UP|DOWN|NONE","description":"one to two sentence business meaning","reason":"optional short why"}
 MODIFY_METRIC (same optional fields; only include attributes you are changing):
 {"op":"MODIFY_METRIC","fieldId":"<existing metric field id>","name":"...","aggregation":"...","reason":"..."}
+ADD_METRIC and MODIFY_METRIC may include optional "minGranularity":"DAY|WEEK|MONTH|QUARTER|YEAR" only under the minimum time granularity rules below.
 REMOVE_METRIC: {"op":"REMOVE_METRIC","fieldId":"...","reason":"optional"}
 ADD_SLICER:    {"op":"ADD_SLICER","fieldId":"<dimension id>","reason":"optional"}
 REMOVE_SLICER: {"op":"REMOVE_SLICER","fieldId":"...","reason":"optional"}
@@ -55,7 +56,9 @@ FIELD RULES
 - The catalog "name" is for display/reasoning only; never use it as a field reference.
 - Never select a field that is not in the catalog.
 - A calculated field that is a variation of a hidden field is still a valid metric - it is common to hide the underlying components of a calc, so do not exclude it on that basis.
-- Prefer 3-8 focused metrics and 3-6 meaningful slicers. Skip identifier-like dimensions (emails, order ids, keys) as slicers.
+- Include all metrics and slicers that provide business value to the intended audience. Do not impose an arbitrary number limit or include redundant fields just to increase coverage.
+- Include distinct counts of dimensions only when they provide significant business value, such as the number of customers or orders. Do not count every dimension by default.
+- Choose useful business filters. Skip technical identifiers and keys as slicers unless the user requests them or their business use is clear.
 
 ------------------------------------------------------------
 METRIC NAMING RULES
@@ -89,8 +92,10 @@ ENUM CONSTRAINTS & GUIDANCE
 - aggregation: SUM, AVERAGE, MIN, MAX, COUNT_DISTINCT, USER. Counting distinct entities -> COUNT_DISTINCT on the entity dimension; do NOT use COUNT_DISTINCT to sum a measure. For a field flagged USER_AGG (a pre-aggregated rate like a ratio of sums) the USER aggregation is applied automatically - you may omit aggregation, and set cumulative:false.
 - format: NUMBER, CURRENCY, PERCENT. If format is PERCENT, cumulative MUST be false.
 - sentiment: UP if an increase is good, DOWN if an increase is bad (refunds, defects, churn), NONE otherwise.
-- temporality: OVER_TIME for flowing time-series metrics (default). LATEST only for snapshot data where the most recent value per entity is what matters (inventory on hand, headcount).
-- minGranularity: the coarsest sensible display grain (DAY, WEEK, MONTH, QUARTER, YEAR). Default to DAY; use a coarser grain for slow-moving data (e.g. MONTH for financials) or when the user asks (e.g. "monthly only").
+- Timeframe and data mode are app-owned, not assistant decisions. Newly built metrics use month-to-date and OVER_TIME. Never emit temporality or measurement-period changes. Preserve existing manually chosen data modes.
+- minGranularity: Preserve the current minimum time granularity. Omit this attribute from proposed changes unless the user explicitly requests a change or the measure name or description explicitly states that daily data is unavailable.
+- New metrics have minimum time granularity DAY by default. Do not infer a coarser minimum from the business subject, slow-moving values, financial data, or a monthly reporting preference.
+- New metrics use month-to-date; this does not change their minimum time granularity. The metric timeframe and minimum time granularity are separate settings. Do not encode a timeframe using minGranularity.
 - description: every ADD_METRIC includes a one to two sentence, plain-English business description. MODIFY_METRIC only re-sends description when changing it.
 
 ------------------------------------------------------------
@@ -143,13 +148,14 @@ function buildUserPrompt(input: AuthorInput): string {
     if (input.selection && Object.keys(input.selection).length > 0) {
         lines.push('');
         lines.push('CURRENT SELECTION STATE (active/locked entries):');
-        lines.push(JSON.stringify(input.selection).slice(0, 4000));
+        lines.push(JSON.stringify(input.selection));
     }
     if (input.chat.length > 0) {
         lines.push('');
         lines.push('RECENT CHAT:');
-        for (const msg of input.chat.slice(-8) as Array<{ role: string; content: string }>) {
-            lines.push(`${msg.role}: ${msg.content.slice(0, 300)}`);
+        for (const msg of input.chat as Array<{ role: string; content: string; proposalContext?: string }>) {
+            lines.push(`${msg.role}: ${msg.content}`);
+            if (msg.proposalContext) lines.push(`Previous proposed changes (not necessarily accepted): ${msg.proposalContext}`);
         }
     }
     lines.push('');
@@ -212,7 +218,7 @@ async function tryParse(provider: LlmProvider, messages: LlmMessage[]): Promise<
             return { ok: false, error: 'missing ops array', rawText: result.text };
         }
         const issues: string[] = [];
-        const validOps = opsRaw.filter((o: unknown) => {
+        const validOps = opsRaw.flatMap((o: unknown) => {
             const check = OpsSchema.safeParse(o);
             if (!check.success) {
                 const summary = check.error.issues
@@ -220,9 +226,9 @@ async function tryParse(provider: LlmProvider, messages: LlmMessage[]): Promise<
                     .join('; ')
                     .slice(0, 200);
                 issues.push(`Dropped ${String((o as any)?.op ?? '?')} for "${String((o as any)?.fieldId ?? '?')}": ${summary}`);
-                return false;
+                return [];
             }
-            return true;
+            return [check.data];
         });
         if (validOps.length === 0 && opsRaw.length > 0) {
             return { ok: false, error: `all ops invalid: ${issues.join(' | ').slice(0, 400)}`, rawText: result.text };

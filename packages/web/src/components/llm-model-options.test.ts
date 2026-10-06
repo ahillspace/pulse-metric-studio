@@ -33,8 +33,8 @@ test('only an explicit current catalog model is selectable as usable', () => {
   assert.equal(isCurrentOpenCodeModel(catalog, 'opencode/big-pickle'), true);
 });
 
-test('protocol conversion loads the default OpenCode catalog', () => {
-  assert.equal(openCodeCatalogProfileId(true, 'openai-chat', 'saved-http'), 'opencode');
+test('new setup and protocol conversion discover models without a synthetic profile', () => {
+  assert.equal(openCodeCatalogProfileId(true, 'openai-chat', 'saved-http'), null);
   assert.equal(openCodeCatalogProfileId(true, 'opencode', 'saved-opencode'), 'saved-opencode');
-  assert.equal(openCodeCatalogProfileId(false, undefined, 'new-profile'), 'opencode');
+  assert.equal(openCodeCatalogProfileId(false, undefined, 'new-profile'), null);
 });

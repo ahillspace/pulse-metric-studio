@@ -1,12 +1,14 @@
 export * from './pulse-enums.js';
-export * from './pulse-payload.js';
 export * from './field-catalog.js';
 export * from './ops.js';
 export * from './timeframes.js';
 export * from './dimensional-fork.js';
 export * from './llm-contracts.js';
+export * from './pulse-contracts.js';
+export * from './pulse-domain.js';
+export * from './pulse-proposal.js';
 
-/** Builder selection state — serialized to the drafts store. */
+/** Builder selection state - serialized to the drafts store. */
 import type { Granularity } from './pulse-enums.js';
 import type { UiAgg, UiNumberFormat, UiSentiment } from './pulse-enums.js';
 import { allowedGranularitiesForMinimumDate } from './timeframes.js';

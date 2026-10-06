@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import type { TableauSession } from './rest-client.js';
-import { getFieldCatalog, invalidateFieldsCache } from './vds-fields.js';
+import { getFieldCatalog, getLoadedFieldCatalog, invalidateFieldsCache } from './vds-fields.js';
 
 const datasourceLuid = '11111111-1111-1111-1111-111111111111';
 const originalFetch = globalThis.fetch;
@@ -69,6 +69,9 @@ test('field catalog cache isolates server, site, and user while excluding creden
   assert.equal(cached.timeDimensions[0]?.id, 'date_token-a');
   assert.equal(requestCount, 8);
 
+  globalThis.fetch = async () => { throw new Error('Metadata network unavailable'); };
+  assert.equal(getLoadedFieldCatalog(sessions[0]!, datasourceLuid)?.timeDimensions[0]?.id, 'date_token-a');
+  assert.equal(getLoadedFieldCatalog({ ...sessions[0]!, siteId: 'wrong-owner' }, datasourceLuid), undefined);
 });
 
 test('catalog carries the exact Tableau caption for calc fields while label dedups', async () => {
