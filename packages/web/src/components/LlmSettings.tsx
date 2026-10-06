@@ -10,7 +10,7 @@ import type {
 } from '@pulse-metric-studio/shared';
 import { WorkbenchModal } from './workbench';
 import { buildOpenCodeModelOptions, isCurrentOpenCodeModel, openCodeCatalogProfileId } from './llm-model-options';
-import { ProviderSetupChoices, newProviderId, providerChoice, type ProviderChoice } from './llm-provider-choices';
+import { ProviderSetupChoices, newProviderId, providerAccess, providerChoice, providerDescription, straightenQuotes, type ProviderChoice } from './llm-provider-choices';
 import './llm-settings.css';
 import { LLM_HEALTH_EVENT } from '../llm-health-events';
 
@@ -132,10 +132,10 @@ export function LlmBadge() {
   const save = async () => {
     setBusy(true); setFeedback(null);
     try {
-      const headers = JSON.parse(form.headersText || '{}');
+      const headers = JSON.parse(straightenQuotes(form.headersText || '{}'));
       if (!headers || Array.isArray(headers) || typeof headers !== 'object') throw new Error('Custom headers must be a JSON object.');
       if (form.headersDirty && Object.values(headers).some((value) => value === '[configured]')) throw new Error('Replace every [configured] header placeholder with its value before saving header changes.');
-      const saved = await llmApi.save(form.id, { label: form.label, protocol: form.protocol, baseUrl: form.baseUrl, model: form.model, authMode: form.authMode, secret: form.secret || undefined, clearSecret: form.clearSecret, ...(form.headersDirty ? { headers } : {}), clearHeaders: form.clearHeaders, region: form.region, awsProfile: form.awsProfile, command: form.command, credentialCommand: form.credentialCommand, allowPrivateNetwork: form.allowPrivateNetwork });
+      const saved = await llmApi.save(form.id, { label: form.label, protocol: form.protocol, baseUrl: form.baseUrl, model: form.model, authMode: form.authMode, secret: form.secret || undefined, clearSecret: form.clearSecret, ...(form.headersDirty ? { headers } : {}), clearHeaders: form.clearHeaders, region: form.region, awsProfile: form.awsProfile, command: form.command, credentialCommand: straightenQuotes(form.credentialCommand), allowPrivateNetwork: form.allowPrivateNetwork });
       setForm(formFromProfile(saved)); setFormDirty(false); setEditingExisting(true); setFeedback({ tone: 'success', message: 'Provider profile saved securely.' }); await load();
     } catch (error) { setFeedback({ tone: 'error', message: error instanceof Error ? error.message : String(error) }); }
     finally { setBusy(false); }
@@ -181,7 +181,7 @@ export function LlmBadge() {
           <p className="section-hint">Configure OpenCode or an API provider, test its connection, then select it for Pulse Metric Studio.</p>
           <div className="llm-settings-layout">
             <div className="llm-profile-list">
-              {profiles.map(profile => { const provider = status?.providers[profile.id]; return <button key={profile.id} className={`llm-profile-card ${!choosing && form.id === profile.id ? 'active' : ''}`} type="button" onClick={() => edit(profile)}><strong>{profile.label}</strong><span>{providerChoice(profile.protocol).access}{status?.active === profile.id ? ' · In use' : ''}</span><span className={`llm-health ${provider?.healthy ? 'healthy' : provider?.healthy === false ? 'unhealthy' : ''}`}>{provider?.healthy ? 'Connected' : provider?.reason || 'Not tested'}</span></button>; })}
+              {profiles.map(profile => { const provider = status?.providers[profile.id]; return <button key={profile.id} className={`llm-profile-card ${!choosing && form.id === profile.id ? 'active' : ''}`} type="button" onClick={() => edit(profile)}><strong>{profile.label}</strong><span>{providerAccess(profile.protocol, profile.authMode)}{status?.active === profile.id ? ' · In use' : ''}</span><span className={`llm-health ${provider?.healthy ? 'healthy' : provider?.healthy === false ? 'unhealthy' : ''}`}>{provider?.healthy ? 'Connected' : provider?.reason || 'Not tested'}</span></button>; })}
               <button className="btn" type="button" onClick={() => edit()}>Add provider</button>
             </div>
             {choosing ? <ProviderSetupChoices onChoose={choose} /> : <ProfileEditor key={editingExisting ? form.id : 'new'} form={form} setForm={(next) => { editorInitialized.current = true; setForm(next); setFormDirty(true); }} dirty={formDirty} existing={editingExisting} busy={busy} status={form.id ? status?.providers[form.id] : undefined} onSave={save} onTest={testProfile} onSelect={() => void selectProvider(form.id)} onDelete={() => void deleteProfile()} />}
@@ -287,7 +287,7 @@ function ProfileEditor({
   return (
     <div className="llm-profile-editor">
       <h2 className="llm-editor-heading">{providerChoice(form.protocol).label}</h2>
-      <p className="section-hint">{providerChoice(form.protocol).description}</p>
+      <p className="section-hint">{providerDescription(form.protocol, form.authMode)}</p>
       <div className="llm-form-grid">
         <label>Display name<input value={form.label} onChange={(event) => set('label', event.target.value)} placeholder="Company gateway" /></label>
         {(http || bedrock) && <label className="full">Endpoint<input value={form.baseUrl} onChange={(event) => set('baseUrl', event.target.value)} placeholder="https://gateway.example.com/v1" /></label>}
@@ -317,8 +317,8 @@ function ProfileEditor({
           {opencode && <label>Command<input value={form.command} onChange={(event) => set('command', event.target.value)} placeholder="opencode" /></label>}
           {(http || bedrock) && <>
             <label>Authentication<select value={form.authMode} onChange={(event) => changeAuth(event.target.value as LlmAuthMode)}>{bedrock && <option value="aws">AWS credentials</option>}<option value="bearer">Bearer token</option>{http && <option value="x-api-key">API key header</option>}{http && <option value="none">No authentication</option>}</select></label>
-            {authUsesSecret && <label className="full">Credential command (optional)<input value={form.credentialCommand} onChange={(event) => set('credentialCommand', event.target.value)} placeholder="e.g. a CLI that prints a fresh token" /><span className="section-hint">Run for each request; its output is used as the key or token. Use this for gateways that mint short-lived tokens. Leave blank to use a static key.</span></label>}
-            {showHeaders && <><label className="full">Safe custom headers<textarea rows={3} value={form.headersText} onChange={(event) => setForm({ ...form, headersText: event.target.value, headersDirty: true, clearHeaders: false })} /></label><label className="full llm-clear-secret"><input type="checkbox" checked={form.clearHeaders} onChange={(event) => setForm({ ...form, clearHeaders: event.target.checked, headersDirty: false })} /> Clear all saved custom headers</label></>}
+            {authUsesSecret && <label className="full">Credential command (optional)<input value={form.credentialCommand} autoCorrect="off" autoCapitalize="off" spellCheck={false} onChange={(event) => set('credentialCommand', event.target.value)} placeholder="e.g. a CLI that prints a fresh token" /><span className="section-hint">Run for each request; its output is used as the key or token. Use this for gateways that mint short-lived tokens. Leave blank to use a static key.</span></label>}
+            {showHeaders && <><label className="full">Safe custom headers<textarea rows={3} value={form.headersText} autoCorrect="off" autoCapitalize="off" spellCheck={false} onChange={(event) => setForm({ ...form, headersText: event.target.value, headersDirty: true, clearHeaders: false })} /></label><label className="full llm-clear-secret"><input type="checkbox" checked={form.clearHeaders} onChange={(event) => setForm({ ...form, clearHeaders: event.target.checked, headersDirty: false })} /> Clear all saved custom headers</label></>}
             <label className="full llm-clear-secret"><input type="checkbox" checked={form.allowPrivateNetwork} onChange={(event) => set('allowPrivateNetwork', event.target.checked)} /> Allow this profile to reach an approved private company gateway</label>
           </>}
         {existing && authUsesSecret && <label className="full llm-clear-secret"><input type="checkbox" checked={form.clearSecret} onChange={(event) => setForm({ ...form, clearSecret: event.target.checked, secret: event.target.checked ? '' : form.secret })} /> Clear the saved secret</label>}

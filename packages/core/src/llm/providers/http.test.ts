@@ -5,6 +5,7 @@ import type { StoredLlmProfile } from '../profiles.js';
 import { HttpLlmProvider } from './openai-compat.js';
 import { assertSafeLlmEndpoint } from './network-policy.js';
 import { clearCredentialCache } from './credential.js';
+import { LlmProviderError } from '../types.js';
 
 const allowEndpoint = async () => undefined;
 
@@ -97,6 +98,17 @@ test('HTTP provider failures never include response bodies or secrets', async ()
   );
 });
 
+test('HTTP provider error explanations never echo the request credential', async () => {
+  const provider = new HttpLlmProvider(profile('openai-chat'), async () => Response.json(
+    { error: { message: 'Key secret-value is not valid for this model.' } },
+    { status: 400 },
+  ), allowEndpoint);
+  await assert.rejects(
+    () => provider.complete({ messages: [{ role: 'user', content: 'hello' }] }),
+    (error: Error) => !error.message.includes('secret-value') && /HTTP 400: Key \[redacted\] is not valid/.test(error.message),
+  );
+});
+
 test('HTTP providers disable redirects so credentials cannot cross origins', async () => {
   let init: RequestInit | undefined;
   const provider = new HttpLlmProvider(profile('openai-chat'), async (_input, requestInit) => {
@@ -111,4 +123,17 @@ test('endpoint policy blocks private resolved addresses unless explicitly allowe
   const lookup = async () => [{ address: '10.20.30.40', family: 4 }] as const;
   await assert.rejects(() => assertSafeLlmEndpoint('https://gateway.example.test/v1', false, lookup), /private network/i);
   await assert.doesNotReject(() => assertSafeLlmEndpoint('https://gateway.example.test/v1', true, lookup));
+});
+
+test('HTTP providers surface the provider explanation and report truncation', async () => {
+  const rejecting = new HttpLlmProvider(profile('anthropic-messages'), async () => Response.json(
+    { error: { message: 'Authentication Error, No api key passed in.', type: 'auth_error' } },
+    { status: 401 },
+  ), allowEndpoint);
+  await assert.rejects(() => rejecting.complete({ messages: [{ role: 'user', content: 'hello' }] }), (error: unknown) =>
+    error instanceof LlmProviderError && /rejected authentication: Authentication Error, No api key passed in\./.test(error.message));
+  const truncating = new HttpLlmProvider(profile('anthropic-messages'), async () => Response.json(
+    { content: [{ type: 'text', text: '{"ops":[' }], stop_reason: 'max_tokens' },
+  ), allowEndpoint);
+  assert.equal((await truncating.complete({ messages: [{ role: 'user', content: 'hello' }] })).truncated, true);
 });

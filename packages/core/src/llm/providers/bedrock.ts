@@ -6,6 +6,7 @@ import type { CompleteOptions, CompleteResult, LlmMessage, LlmProviderHealth } f
 import { LlmProviderError } from '../types.js';
 import { assertSafeLlmEndpoint, UnsafeLlmEndpointError } from './network-policy.js';
 import { resolveProfileSecret } from './credential.js';
+import { readProviderErrorDetail, withProviderDetail } from './error-detail.js';
 
 type EndpointPolicy = (endpoint: string, allowPrivateNetwork: boolean) => Promise<void>;
 
@@ -105,13 +106,13 @@ export class BedrockProvider {
       }
       const text = (response.output?.message?.content ?? []).map((content) => content.text ?? '').join('').trim();
       if (!text) throw new LlmProviderError({ code: 'invalid_provider_response', message: 'Amazon Bedrock returned no text content.', provider: this.id, model: this.profile.model });
-      return { text, provider: this.id, model: this.profile.model };
+      return { text, provider: this.id, model: this.profile.model, truncated: response.stopReason === 'max_tokens' };
     } catch (error) {
       if (error instanceof LlmProviderError) throw error;
       const failure = classifyBedrockError(error);
       throw new LlmProviderError({
         code: failure.code,
-        message: failure.message,
+        message: withProviderDetail(failure.message, error instanceof Error ? error.message : undefined),
         provider: this.id,
         model: this.profile.model,
         retryable: failure.retryable,
@@ -162,9 +163,10 @@ export class BedrockProvider {
     if (!response.ok) {
       const requestId = response.headers.get('x-amzn-requestid');
       const reference = requestId && /^[a-z0-9._:-]{1,160}$/i.test(requestId) ? requestId : undefined;
+      const detail = await readProviderErrorDetail(response, [token]);
       throw new LlmProviderError({
         code: response.status === 401 || response.status === 403 ? 'provider_authentication' : response.status === 429 ? 'provider_quota' : response.status >= 500 ? 'provider_unavailable' : 'provider_execution',
-        message: `Amazon Bedrock request failed with HTTP ${response.status}.`,
+        message: withProviderDetail(`Amazon Bedrock request failed with HTTP ${response.status}.`, detail),
         provider: this.id,
         model: this.profile.model,
         retryable: response.status === 429 || response.status >= 500,
@@ -174,7 +176,7 @@ export class BedrockProvider {
     const data = await readBoundedJson(response, this.id, this.profile.model);
     const text = (data?.output?.message?.content ?? []).map((content: { text?: string }) => content.text ?? '').join('').trim();
     if (!text) throw new LlmProviderError({ code: 'invalid_provider_response', message: 'Amazon Bedrock returned no text content.', provider: this.id, model: this.profile.model });
-    return { text, provider: this.id, model: this.profile.model };
+    return { text, provider: this.id, model: this.profile.model, truncated: data?.stopReason === 'max_tokens' };
   }
 }
 

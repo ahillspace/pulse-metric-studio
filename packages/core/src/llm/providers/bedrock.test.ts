@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import type { StoredLlmProfile } from '../profiles.js';
 import { BedrockProvider, classifyBedrockError } from './bedrock.js';
 import { clearCredentialCache } from './credential.js';
+import { LlmProviderError } from '../types.js';
 
 const allowEndpoint = async () => undefined;
 
@@ -66,4 +67,20 @@ test('Bedrock SDK errors use AWS names and status metadata for classification', 
   assert.equal(classifyBedrockError({ name: 'AccessDeniedException', $metadata: { httpStatusCode: 403 } }).code, 'provider_authentication');
   assert.equal(classifyBedrockError({ name: 'ThrottlingException', $metadata: { httpStatusCode: 429 } }).code, 'provider_quota');
   assert.equal(classifyBedrockError({ name: 'ServiceUnavailableException', $metadata: { httpStatusCode: 503 } }).code, 'provider_unavailable');
+});
+
+test('Bedrock bearer failures surface the gateway explanation and truncation', async () => {
+  const profile: StoredLlmProfile = {
+    id: 'gateway', label: 'Gateway', protocol: 'bedrock-converse', baseUrl: 'https://gateway.example.test/bedrock',
+    model: 'claude-model', authMode: 'bearer', secret: 'gateway-secret', headers: {},
+    region: 'us-east-2', awsProfile: '', command: '', source: 'saved',
+  };
+  const rejecting = new BedrockProvider(profile, async () => Response.json(
+    { detail: { error: JSON.stringify({ message: 'The model returned the following errors: `temperature` is deprecated for this model.' }) } },
+    { status: 400 },
+  ), allowEndpoint);
+  await assert.rejects(() => rejecting.complete({ messages: [{ role: 'user', content: 'hello' }] }), (error: unknown) =>
+    error instanceof LlmProviderError && error.message === 'Amazon Bedrock request failed with HTTP 400: The model returned the following errors: `temperature` is deprecated for this model.');
+  const truncating = new BedrockProvider(profile, async () => Response.json({ output: { message: { content: [{ text: '{"ops":[' }] } }, stopReason: 'max_tokens' }), allowEndpoint);
+  assert.equal((await truncating.complete({ messages: [{ role: 'user', content: 'hello' }] })).truncated, true);
 });

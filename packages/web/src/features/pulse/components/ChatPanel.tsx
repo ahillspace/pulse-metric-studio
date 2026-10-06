@@ -43,7 +43,7 @@ export function ChatPanel({ collapsed = false }: { collapsed?: boolean }) {
                   void useAuthor
                     .getState()
                     .requestProposal(
-                      "Design Pulse metrics for a business audience. Include all metrics and slicers that provide end-user business value, with meaningful names and sensible formats and sentiment. Include distinct counts of dimensions only when they provide significant business value. Newly built metrics use month-to-date and over-time data mode, controlled by the app. Do not choose or change their timeframe or data mode. Minimum time granularity defaults to DAY; choose a coarser minimum only when explicitly requested or the measure name or description states that daily data is unavailable. Preserve existing manual settings.",
+                      "Design Pulse metrics for a business audience. Include all metrics and slicers that provide end-user business value, with meaningful names and sensible formats and sentiment. Start each metric name with a single emoji that best represents the metric, followed by a space. Include distinct counts of dimensions only when they provide significant business value. Newly built metrics use month-to-date and over-time data mode, controlled by the app. Do not choose or change their timeframe or data mode. Minimum time granularity defaults to DAY; choose a coarser minimum only when explicitly requested or the measure name or description states that daily data is unavailable. Preserve existing manual settings.",
                     )
                 }
               >

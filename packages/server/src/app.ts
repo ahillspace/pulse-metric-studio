@@ -136,7 +136,7 @@ export function buildApp(hooks: FeatureHooks = {}, options: { desktopToken?: str
       return;
     }
     const reference = `err_${crypto.randomUUID()}`;
-    app.log.error({ name: error.name, reference }, 'Unhandled server error');
+    app.log.error({ name: error.name, message: sanitizeProviderMessage(error.message), reference }, 'Unhandled server error');
     reply.code(500).send({
       message: 'Internal server error.',
       error: {

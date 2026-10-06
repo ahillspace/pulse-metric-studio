@@ -4,6 +4,7 @@ import type { CompleteOptions, CompleteResult, LlmMessage, LlmProviderHealth } f
 import { LlmProviderError } from '../types.js';
 import { assertSafeLlmEndpoint, UnsafeLlmEndpointError } from './network-policy.js';
 import { resolveProfileSecret } from './credential.js';
+import { readProviderErrorDetail, withProviderDetail } from './error-detail.js';
 
 type Fetch = typeof fetch;
 type EndpointPolicy = (endpoint: string, allowPrivateNetwork: boolean) => Promise<void>;
@@ -120,7 +121,7 @@ export class HttpLlmProvider {
         cause: error,
       });
     }
-    if (!response.ok) throw httpProviderError(response, this.id, this.profile.model, this.label);
+    if (!response.ok) throw httpProviderError(response, await readProviderErrorDetail(response, [token]), this.id, this.profile.model, this.label);
     const data = await readJsonResponse(response, this.id, this.profile.model);
     const text = responseText(protocol, data);
     if (!text) {
@@ -131,7 +132,7 @@ export class HttpLlmProvider {
         model: this.profile.model,
       });
     }
-    return { text, provider: this.id, model: this.profile.model };
+    return { text, provider: this.id, model: this.profile.model, truncated: responseTruncated(protocol, data) };
   }
 }
 
@@ -189,24 +190,30 @@ function responseText(protocol: StoredLlmProfile['protocol'], data: any): string
   return String(data?.choices?.[0]?.message?.content ?? '').trim();
 }
 
+function responseTruncated(protocol: StoredLlmProfile['protocol'], data: any): boolean {
+  if (protocol === 'anthropic-messages') return data?.stop_reason === 'max_tokens';
+  if (protocol === 'openai-responses') return data?.status === 'incomplete' && data?.incomplete_details?.reason === 'max_output_tokens';
+  return data?.choices?.[0]?.finish_reason === 'length';
+}
+
 function endpointUrl(baseUrl: string, suffix: string): string {
   const base = baseUrl.replace(/\/+$/, '');
   return base.toLowerCase().endsWith(suffix) ? base : `${base}${suffix}`;
 }
 
-function httpProviderError(response: Response, provider: string, model: string, label: string): LlmProviderError {
+function httpProviderError(response: Response, detail: string | undefined, provider: string, model: string, label: string): LlmProviderError {
   const status = response.status;
   const requestId = response.headers.get('request-id') || response.headers.get('x-request-id') || response.headers.get('x-amzn-requestid');
   const safeReference = requestId && /^[a-z0-9._:-]{1,160}$/i.test(requestId) ? requestId : undefined;
   if (status === 401 || status === 403) {
-    return new LlmProviderError({ code: 'provider_authentication', message: `${label} rejected authentication.`, provider, model, reference: safeReference });
+    return new LlmProviderError({ code: 'provider_authentication', message: withProviderDetail(`${label} rejected authentication.`, detail), provider, model, reference: safeReference });
   }
   if (status === 429) {
-    return new LlmProviderError({ code: 'provider_quota', message: `${label} rejected the request because of rate or quota limits.`, provider, model, retryable: true, reference: safeReference });
+    return new LlmProviderError({ code: 'provider_quota', message: withProviderDetail(`${label} rejected the request because of rate or quota limits.`, detail), provider, model, retryable: true, reference: safeReference });
   }
   return new LlmProviderError({
     code: status >= 500 ? 'provider_unavailable' : 'provider_execution',
-    message: `${label} request failed with HTTP ${status}.`,
+    message: withProviderDetail(`${label} request failed with HTTP ${status}.`, detail),
     provider,
     model,
     retryable: status >= 500,
