@@ -6,7 +6,8 @@ const definition: any = { metadata: { id: 'definition', name: 'Revenue' }, speci
 const metric: any = { id: 'metric', specification: { measurement_period: { granularity: 'GRANULARITY_BY_MONTH', range: 'RANGE_CURRENT_PARTIAL' }, filters: [] } };
 const popc = { type: 'popc', score: 1, markup: '<span>100</span>', facts: { value: 100 }, viz: { mark: 'line', data: { values: [{ value: 100 }] } } };
 const top = { type: 'top-drivers', score: 5, markup: 'Category grew.', facts: { change: 10 } };
-const bundle = (insights: unknown[], extras = {}) => ({ bundle_response: { result: { insight_groups: [{ insights: insights.map(result => ({ result })) }], ...extras } } });
+const sparkline = { mark: 'line', data: { values: [{ value: 100 }] }, width: 320 };
+const bundle = (insights: unknown[], extras = {}) => ({ bundle_response: { result: { insight_groups: [{ type: 'ban', insights: insights.map(result => ({ result })), summaries: [{ result: { viz: sparkline } }] }], ...extras } } });
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 
 test('preview uses exact provider metadata and preserves chart, markup, and facts', () => {
@@ -14,7 +15,7 @@ test('preview uses exact provider metadata and preserves chart, markup, and fact
   assert.deepEqual(input.bundle_request.input.metric.definition, definition.specification);
   assert.deepEqual(input.bundle_request.input.metric.metric_specification, metric.specification);
   const card = previewCardInput(definition, metric, bundle([popc, { ...top, score: 1, markup: 'Lower-ranked' }, top]));
-  assert.deepEqual(card.input.viz, popc.viz);
+  assert.deepEqual(card.input.viz, sparkline);
   assert.deepEqual(card.input.insights.popc, { markup: popc.markup, facts: popc.facts });
   assert.deepEqual(card.input.insights.top, { markup: top.markup, facts: top.facts });
   assert.deepEqual(card.input.metricMetadata.measurementPeriod, metric.specification.measurement_period);
@@ -40,6 +41,23 @@ test('missing, ambiguous, skipped, and failed required insights produce unavaila
 
 test('missing metric metadata does not manufacture a preview definition', () => {
   assert.throws(() => previewInsightInput(definition, { id: 'metric' }, 'metric', 'definition'), /metadata/);
+});
+
+test('preview requires one successful BAN summary chart instead of using an insight chart', () => {
+  const summary = { result: { viz: sparkline } };
+  for (const summaries of [
+    [], [summary, summary], [{ error: { code: 'failed' }, ...summary }],
+    [{ skip_details: { reason: 'no_data' }, ...summary }], [{ result: { viz: {} } }],
+  ]) {
+    const response = bundle([popc, top]);
+    response.bundle_response.result.insight_groups[0]!.summaries = summaries as any;
+    assert.throws(() => previewCardInput(definition, metric, response), /summary chart/);
+  }
+  const wrongGroup = bundle([popc, top]);
+  wrongGroup.bundle_response.result.insight_groups[0]!.type = 'top';
+  assert.throws(() => previewCardInput(definition, metric, wrongGroup), /summary chart/);
+  const { viz: _detailChart, ...comparison } = popc;
+  assert.deepEqual(previewCardInput(definition, metric, bundle([comparison, top])).input.viz, sparkline);
 });
 
 test('preview validates PNG data, decoded size, and dimensions', () => {

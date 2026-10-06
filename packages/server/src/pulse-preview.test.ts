@@ -16,7 +16,8 @@ const context = { connectionId: 'connection', serverUrl: session.serverUrl, site
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 const metric = { id: 'metric', definition_id: 'definition', site_id: session.siteId, specification: { measurement_period: { granularity: 'GRANULARITY_BY_MONTH', range: 'RANGE_CURRENT_PARTIAL' }, filters: [] } };
 const definition = { metadata: { id: 'definition', name: 'Revenue' }, specification: { datasource: { id: 'source' } }, extension_options: {}, representation_options: {}, insights_options: {} };
-const bundle = { bundle_response: { result: { insight_groups: [{ insights: [
+const sparkline = { mark: 'line', data: { values: [{ value: 100 }] } };
+const bundle = { bundle_response: { result: { insight_groups: [{ type: 'ban', summaries: [{ result: { viz: sparkline } }], insights: [
   { result: { type: 'popc', score: 2, markup: '<span>Revenue grew</span>', facts: { value: 100 }, viz: { mark: 'line' } } },
   { result: { type: 'top-drivers', score: 3, markup: 'Retail grew fastest', facts: { change: 20 } } },
 ] }] } } };
@@ -65,6 +66,7 @@ test('real preview route checks ownership, renders through Tableau, and returns 
   assert.equal(requests[3]!.body.settings.theme, 'THEME_DARK');
   assert.equal(requests[3]!.body.input.metricMetadata.definitionName, 'Revenue');
   assert.equal(requests[3]!.body.input.insights.top.markup, 'Retail grew fastest');
+  assert.deepEqual(requests[3]!.body.input.viz, sparkline);
 });
 
 test('preview requires active matching connection before any provider request', async () => {
