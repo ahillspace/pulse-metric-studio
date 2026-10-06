@@ -38,3 +38,11 @@ test('without a key file the OS store supplies a fresh random key', async () => 
   assert.equal(fs.existsSync(config.machineKeyPath), false);
   assert.equal(decryptSecret(encryptSecret('fresh')), 'fresh');
 });
+
+test('after migration a missing OS key locks saved secrets instead of creating a new key file', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const script = `import('${new URL('./crypto.ts', import.meta.url).href}').then((m) => { try { m.encryptSecret('x'); console.log('encrypted'); } catch (e) { console.log(e.name); } })`;
+  const result = spawnSync(process.execPath, ['--import', 'tsx', '-e', script], { env: process.env, encoding: 'utf8' });
+  assert.equal(result.stdout.trim(), 'DataKeyUnavailableError');
+  assert.equal(fs.existsSync(config.machineKeyPath), false);
+});

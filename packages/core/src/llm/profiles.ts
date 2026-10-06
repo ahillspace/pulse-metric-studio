@@ -1,6 +1,6 @@
 import type { Db } from '../db/index.js';
 import { getDb, getSetting, setSetting } from '../db/index.js';
-import { decryptSecret, encryptSecret } from '../db/crypto.js';
+import { DataKeyUnavailableError, decryptSecret, encryptSecret } from '../db/crypto.js';
 import type { LlmAuthMode, LlmHealthReasonCode, LlmProfilePublic, LlmProfileWrite, LlmProtocol } from '@pulse-metric-studio/shared';
 
 const PROFILES_KEY = 'llm.profiles.v1';
@@ -84,7 +84,8 @@ export class EncryptedLlmProfileStore implements LlmProfileStore {
       const parsed = JSON.parse(decryptSecret(blob));
       if (!Array.isArray(parsed) || !parsed.every(isStoredProfile)) throw new Error('Invalid profile storage.');
       return parsed;
-    } catch {
+    } catch (error) {
+      if (error instanceof DataKeyUnavailableError) throw error;
       throw new LlmProfileStoreError();
     }
   }

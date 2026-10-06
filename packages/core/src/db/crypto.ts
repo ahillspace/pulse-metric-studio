@@ -16,6 +16,22 @@ function ensureDataDir(): void {
 
 let cachedKey: Buffer | null = null;
 
+/**
+ * Written once the OS store holds the data key. With it present a missing key
+ * must never be replaced by a fresh key file: data encrypted under the OS key
+ * would become unreadable and the next save would overwrite it.
+ */
+function osKeyMarkerPath(): string {
+  return path.join(config.dataDir, 'data-key-in-os-store');
+}
+
+export class DataKeyUnavailableError extends Error {
+  constructor() {
+    super('Saved secrets are locked: the OS credential store did not provide the data key. Restart Pulse Metric Studio once Keychain or Credential Manager is available.');
+    this.name = 'DataKeyUnavailableError';
+  }
+}
+
 /** Uses an OS-held key instead of the key file. */
 export function installDataKey(hexKey: string): void {
   if (!/^[a-f0-9]{64}$/i.test(hexKey)) throw new Error('Invalid data key.');
@@ -42,6 +58,8 @@ export async function adoptOsDataKey(store: { dataKey(candidate: string): Promis
     return 'kept-file';
   }
   installDataKey(key);
+  ensureDataDir();
+  fs.writeFileSync(osKeyMarkerPath(), 'The local data key is held in the OS credential store.\n', { mode: 0o600 });
   if (!legacy) return 'os';
   fs.rmSync(config.machineKeyPath, { force: true });
   return 'migrated';
@@ -49,6 +67,7 @@ export async function adoptOsDataKey(store: { dataKey(candidate: string): Promis
 
 function machineKey(): Buffer {
   if (cachedKey) return cachedKey;
+  if (fs.existsSync(osKeyMarkerPath()) && !fs.existsSync(config.machineKeyPath)) throw new DataKeyUnavailableError();
   ensureDataDir();
   if (!fs.existsSync(config.machineKeyPath)) {
     const key = crypto.randomBytes(32);

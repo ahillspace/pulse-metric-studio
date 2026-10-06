@@ -107,9 +107,10 @@ async function useNativeCredentialServices(): Promise<void> {
     if (outcome === "kept-file")
       console.warn("The OS credential store holds a different data key; the existing key file stays in use.");
   } catch (error) {
-    // Saved secrets stay readable through the key file until the OS store is available again.
+    // Before migration the key file still works; after it, saved secrets stay
+    // locked (never re-keyed) until the OS store is available again.
     console.warn(
-      `The OS credential store could not provide the data key; using the key file. ${error instanceof Error ? error.message : ""}`.trim(),
+      `The OS credential store could not provide the data key. ${error instanceof Error ? error.message : ""}`.trim(),
     );
   }
 }
