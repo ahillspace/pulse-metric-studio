@@ -30,3 +30,7 @@ src-tauri/gen/
 /.codex/
 /native-artifacts/
 /packages/server/.generated-entry.mjs
+
+# Local planning notes and API reference copies
+/TODO.md
+/pulse_metric_definition.md
