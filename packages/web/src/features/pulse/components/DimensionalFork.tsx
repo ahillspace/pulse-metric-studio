@@ -412,7 +412,7 @@ export function DimensionalFork({
               <div className="pulse-clause" key={filter.fieldId}>
                 <span>
                   <strong>{filter.fieldLabel}</strong>:{" "}
-                  {dimensionClauseSummary(filter)}
+                  {inheritedSummary(filter)}
                   <small className="pulse-clause-origin"> · Scoped</small>
                 </span>
                 <button
@@ -674,6 +674,12 @@ export function DimensionalFork({
       )}
     </section>
   );
+}
+
+function inheritedSummary(filter: InheritedDimensionFilter): string {
+  const shown = filter.values.slice(0, 4).map((value) => value.label).join(", ");
+  const more = filter.values.length > 4 ? ` and ${filter.values.length - 4} more` : "";
+  return `${filter.exclude ? "excluding " : ""}${shown}${more}`;
 }
 
 // Fixed-height windowed list for very large value sets: only the rows in (and

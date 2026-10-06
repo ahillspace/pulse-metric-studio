@@ -24,7 +24,7 @@ export interface PreviewState {
   close(): void;
 }
 
-async function requestPreview(context: PulseDraftContext, metricId: string) {
+export async function requestMetricPreview(context: PulseDraftContext, metricId: string) {
   return PulseMetricPreviewSchema.parse(
     await pulseRequest(
       `/api/pulse/metrics/${encodeURIComponent(metricId)}/preview`,
@@ -34,7 +34,7 @@ async function requestPreview(context: PulseDraftContext, metricId: string) {
   );
 }
 
-export function createPreviewController(transport = requestPreview) {
+export function createPreviewController(transport = requestMetricPreview) {
   let generation = 0;
   return create<PreviewState>((set, get) => ({
     scope: null,
