@@ -1,8 +1,18 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createHmac } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 import { LlmProviderError, TableauError } from '@pulse-metric-studio/core';
 import { buildApp } from './app.js';
+
+/** Signs a request the way the native transport does. */
+function signed(token: string, method: string, target: string, timestamp = Date.now()) {
+  const nonce = randomBytes(32).toString('hex');
+  return {
+    'x-pulse-nonce': nonce,
+    'x-pulse-timestamp': String(timestamp),
+    'x-pulse-signature': createHmac('sha256', token).update(`request:${method}\n${target}\n${nonce}\n${timestamp}`).digest('hex'),
+  };
+}
 
 test('packaged Pulse desktop requires private startup credentials', () => {
   const previous = process.env.PULSE_METRIC_STUDIO_DESKTOP_IDENTIFIER;
@@ -26,20 +36,29 @@ test('desktop authentication rejects absent or wrong credentials before route ef
     const address = app.server.address();
     assert.ok(address && typeof address !== 'string');
     const origin = `http://127.0.0.1:${address.port}`;
-    const rejectedHeaders: Record<string, string>[] = [{}, { authorization: 'Bearer wrong' }, { origin: 'http://localhost:5173' }];
+    const replayed = signed(token, 'POST', '/api/pulse/test');
+    const rejectedHeaders: Record<string, string>[] = [
+      {},
+      { authorization: `Bearer ${token}` },
+      signed('b'.repeat(64), 'POST', '/api/pulse/test'),
+      signed(token, 'GET', '/api/pulse/test'),
+      signed(token, 'POST', '/api/pulse/other'),
+      signed(token, 'POST', '/api/pulse/test', Date.now() - 10 * 60_000),
+      { origin: 'http://localhost:5173' },
+    ];
     for (const headers of rejectedHeaders) {
       const result = await fetch(`${origin}/api/pulse/test`, { method: 'POST', headers });
       assert.equal(result.status, 401);
     }
     assert.equal(effects, 0);
-    const headers = { authorization: `Bearer ${token}` };
-    const successful = await fetch(`${origin}/api/pulse/test`, { method: 'POST', headers });
+    const successful = await fetch(`${origin}/api/pulse/test`, { method: 'POST', headers: replayed });
     assert.equal(successful.status, 200);
     assert.equal(effects, 1);
-    const hostile = await fetch(`${origin}/api/pulse/test`, { method: 'POST', headers: { ...headers, origin: 'https://attacker.example' } });
+    assert.equal((await fetch(`${origin}/api/pulse/test`, { method: 'POST', headers: replayed })).status, 401, 'a signature works once');
+    const hostile = await fetch(`${origin}/api/pulse/test`, { method: 'POST', headers: { ...signed(token, 'POST', '/api/pulse/test'), origin: 'https://attacker.example' } });
     assert.equal(hostile.status, 403);
     assert.equal(effects, 1);
-    assert.equal((await fetch(`${origin}/api/desktop/bootstrap`, { headers })).status, 404);
+    assert.equal((await fetch(`${origin}/api/desktop/bootstrap`, { headers: signed(token, 'GET', '/api/desktop/bootstrap') })).status, 404);
     const challenge = 'b'.repeat(64);
     const ready = await fetch(`${origin}/api/desktop/ready?challenge=${challenge}`, {
       headers: { 'x-pulse-proof': createHmac('sha256', token).update(`ready-request:${challenge}`).digest('hex') },
@@ -52,11 +71,11 @@ test('desktop authentication rejects absent or wrong credentials before route ef
     const unauthenticatedReady = await fetch(`${origin}/api/desktop/ready?challenge=${challenge}`);
     assert.equal(unauthenticatedReady.status, 401);
     const transcript = await fetch(`${origin}/api/pulse/test`, {
-      method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: JSON.stringify('x'.repeat(3 * 1024 * 1024)),
+      method: 'POST', headers: { ...signed(token, 'POST', '/api/pulse/test'), 'Content-Type': 'application/json' }, body: JSON.stringify('x'.repeat(3 * 1024 * 1024)),
     });
     assert.equal(transcript.status, 200);
     const oversized = await app.inject({
-      method: 'POST', url: '/api/pulse/test', headers: { ...headers, 'Content-Type': 'application/json' }, payload: JSON.stringify('x'.repeat(16 * 1024 * 1024)),
+      method: 'POST', url: '/api/pulse/test', headers: { ...signed(token, 'POST', '/api/pulse/test'), 'Content-Type': 'application/json' }, payload: JSON.stringify('x'.repeat(16 * 1024 * 1024)),
     });
     assert.equal(oversized.statusCode, 413);
     assert.equal(effects, 2);

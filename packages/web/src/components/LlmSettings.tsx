@@ -34,14 +34,25 @@ const llmApi = {
 
 interface ProfileForm {
   id: string; label: string; protocol: LlmProtocol; baseUrl: string; model: string; authMode: LlmAuthMode;
-  secret: string; hasSecret: boolean; clearSecret: boolean; headersText: string; headersDirty: boolean; clearHeaders: boolean; region: string; awsProfile: string; command: string; credentialCommand: string; secretHint: string | null; allowPrivateNetwork: boolean; source: 'environment' | 'saved' | 'new';
+  secret: string; hasSecret: boolean; clearSecret: boolean; headersText: string; headersDirty: boolean; clearHeaders: boolean; region: string; awsProfile: string; command: string; credentialCommand: string; hasCredentialCommand: boolean; credentialCommandHint: string | null; clearCredentialCommand: boolean; secretHint: string | null; allowPrivateNetwork: boolean; source: 'environment' | 'saved' | 'new';
   persistedProtocol?: LlmProtocol;
 }
 
-const emptyForm: ProfileForm = { id: '', label: '', protocol: 'opencode', baseUrl: '', model: '', authMode: 'none', secret: '', hasSecret: false, clearSecret: false, headersText: '{}', headersDirty: false, clearHeaders: false, region: '', awsProfile: '', command: 'opencode', credentialCommand: '', secretHint: null, allowPrivateNetwork: false, source: 'new' };
+const emptyForm: ProfileForm = { id: '', label: '', protocol: 'opencode', baseUrl: '', model: '', authMode: 'none', secret: '', hasSecret: false, clearSecret: false, headersText: '{}', headersDirty: false, clearHeaders: false, region: '', awsProfile: '', command: 'opencode', credentialCommand: '', hasCredentialCommand: false, credentialCommandHint: null, clearCredentialCommand: false, secretHint: null, allowPrivateNetwork: false, source: 'new' };
 
 function formFromProfile(profile: LlmProfilePublic): ProfileForm {
-  return { id: profile.id, label: profile.label, protocol: profile.protocol, baseUrl: profile.baseUrl, model: profile.model, authMode: profile.authMode, secret: '', hasSecret: profile.hasSecret, clearSecret: false, headersText: JSON.stringify(profile.headers, null, 2), headersDirty: false, clearHeaders: false, region: profile.region, awsProfile: profile.awsProfile, command: profile.command, credentialCommand: profile.credentialCommand, secretHint: profile.secretHint, allowPrivateNetwork: profile.allowPrivateNetwork, source: profile.source, persistedProtocol: profile.protocol };
+  return { id: profile.id, label: profile.label, protocol: profile.protocol, baseUrl: profile.baseUrl, model: profile.model, authMode: profile.authMode, secret: '', hasSecret: profile.hasSecret, clearSecret: false, headersText: JSON.stringify(profile.headers, null, 2), headersDirty: false, clearHeaders: false, region: profile.region, awsProfile: profile.awsProfile, command: profile.command, credentialCommand: '', hasCredentialCommand: profile.hasCredentialCommand, credentialCommandHint: profile.credentialCommandHint, clearCredentialCommand: false, secretHint: profile.secretHint, allowPrivateNetwork: profile.allowPrivateNetwork, source: profile.source, persistedProtocol: profile.protocol };
+}
+
+/** Saved commands are never sent back to the UI: send one only when it is new or being cleared. */
+function credentialCommandWrite(form: ProfileForm): { credentialCommand?: string; clearCredentialCommand?: boolean } {
+  if (form.clearCredentialCommand) return { credentialCommand: '', clearCredentialCommand: true };
+  const command = straightenQuotes(form.credentialCommand).trim();
+  return command ? { credentialCommand: command } : {};
+}
+
+function usesCredentialCommand(form: ProfileForm): boolean {
+  return Boolean(form.credentialCommand.trim()) || (form.hasCredentialCommand && !form.clearCredentialCommand);
 }
 
 function hasConfiguredHeaders(text: string): boolean {
@@ -135,7 +146,7 @@ export function LlmBadge() {
       const headers = JSON.parse(straightenQuotes(form.headersText || '{}'));
       if (!headers || Array.isArray(headers) || typeof headers !== 'object') throw new Error('Custom headers must be a JSON object.');
       if (form.headersDirty && Object.values(headers).some((value) => value === '[configured]')) throw new Error('Replace every [configured] header placeholder with its value before saving header changes.');
-      const saved = await llmApi.save(form.id, { label: form.label, protocol: form.protocol, baseUrl: form.baseUrl, model: form.model, authMode: form.authMode, secret: form.secret || undefined, clearSecret: form.clearSecret, ...(form.headersDirty ? { headers } : {}), clearHeaders: form.clearHeaders, region: form.region, awsProfile: form.awsProfile, command: form.command, credentialCommand: straightenQuotes(form.credentialCommand), allowPrivateNetwork: form.allowPrivateNetwork });
+      const saved = await llmApi.save(form.id, { label: form.label, protocol: form.protocol, baseUrl: form.baseUrl, model: form.model, authMode: form.authMode, secret: form.secret || undefined, clearSecret: form.clearSecret, ...(form.headersDirty ? { headers } : {}), clearHeaders: form.clearHeaders, region: form.region, awsProfile: form.awsProfile, command: form.command, ...credentialCommandWrite(form), allowPrivateNetwork: form.allowPrivateNetwork });
       setForm(formFromProfile(saved)); setFormDirty(false); setEditingExisting(true); setFeedback({ tone: 'success', message: 'Provider profile saved securely.' }); await load();
     } catch (error) { setFeedback({ tone: 'error', message: error instanceof Error ? error.message : String(error) }); }
     finally { setBusy(false); }
@@ -271,6 +282,7 @@ function ProfileEditor({
       baseUrl: protocol === 'opencode' ? '' : form.baseUrl,
       secret: clearsSensitive ? '' : form.secret,
       credentialCommand: clearsSensitive ? '' : form.credentialCommand,
+      clearCredentialCommand: clearsSensitive ? existing && form.hasCredentialCommand : form.clearCredentialCommand,
       clearSecret: clearsSensitive && existing && form.hasSecret,
       headersText: clearsSensitive ? '{}' : form.headersText,
       headersDirty: false,
@@ -280,7 +292,7 @@ function ProfileEditor({
   const changeAuth = (authMode: LlmAuthMode) => setForm({
     ...form,
     authMode,
-    ...((authMode === 'aws' || authMode === 'none') ? { secret: '', clearSecret: existing && form.hasSecret, credentialCommand: '' } : {}),
+    ...((authMode === 'aws' || authMode === 'none') ? { secret: '', clearSecret: existing && form.hasSecret, credentialCommand: '', clearCredentialCommand: existing && form.hasCredentialCommand } : {}),
     ...(authMode === 'aws' ? { headersText: '{}', headersDirty: false, clearHeaders: existing && hasConfiguredHeaders(form.headersText) } : {}),
   });
 
@@ -307,7 +319,7 @@ function ProfileEditor({
           </>
         ) : <label>Model<input value={form.model} onChange={(event) => set('model', event.target.value)} placeholder="Provider model ID" /></label>}
         {(http || bedrock) && <>
-            {authUsesSecret && <label>Key or token<input type="password" autoComplete="new-password" value={form.secret} disabled={form.clearSecret} onChange={(event) => setForm({ ...form, secret: event.target.value, clearSecret: false })} placeholder={form.credentialCommand.trim() ? 'Not needed - using the credential command' : existing ? 'Leave blank to keep saved secret' : 'Required by provider'} /></label>}
+            {authUsesSecret && <label>Key or token<input type="password" autoComplete="new-password" value={form.secret} disabled={form.clearSecret} onChange={(event) => setForm({ ...form, secret: event.target.value, clearSecret: false })} placeholder={usesCredentialCommand(form) ? 'Not needed - using the credential command' : existing ? 'Leave blank to keep saved secret' : 'Required by provider'} /></label>}
             {authUsesSecret && existing && form.hasSecret && !form.secret && !form.clearSecret && <p className="section-hint full">A key is saved{form.secretHint ? ` (ends ${form.secretHint})` : ''}. Leave the field blank to keep it, or type a new value to replace it.</p>}
         </>}
         {bedrock && <><label>AWS region<input value={form.region} onChange={(event) => set('region', event.target.value)} placeholder="us-east-1" /></label><label>AWS profile<input value={form.awsProfile} onChange={(event) => set('awsProfile', event.target.value)} placeholder="Optional profile" /></label></>}
@@ -317,7 +329,8 @@ function ProfileEditor({
           {opencode && <label>Command<input value={form.command} onChange={(event) => set('command', event.target.value)} placeholder="opencode" /></label>}
           {(http || bedrock) && <>
             <label>Authentication<select value={form.authMode} onChange={(event) => changeAuth(event.target.value as LlmAuthMode)}>{bedrock && <option value="aws">AWS credentials</option>}<option value="bearer">Bearer token</option>{http && <option value="x-api-key">API key header</option>}{http && <option value="none">No authentication</option>}</select></label>
-            {authUsesSecret && <label className="full">Credential command (optional)<input value={form.credentialCommand} autoCorrect="off" autoCapitalize="off" spellCheck={false} onChange={(event) => set('credentialCommand', event.target.value)} placeholder="e.g. a CLI that prints a fresh token" /><span className="section-hint">Run for each request; its output is used as the key or token. Use this for gateways that mint short-lived tokens. Leave blank to use a static key.</span></label>}
+            {authUsesSecret && <label className="full">Credential command (optional)<input value={form.credentialCommand} disabled={form.clearCredentialCommand} autoCorrect="off" autoCapitalize="off" spellCheck={false} onChange={(event) => setForm({ ...form, credentialCommand: event.target.value, clearCredentialCommand: false })} placeholder={form.hasCredentialCommand && existing ? `Saved (${form.credentialCommandHint ?? 'command'}) - leave blank to keep it` : 'e.g. a CLI that prints a fresh token'} /><span className="section-hint">Run for each request; its output is used as the key or token. Use this for gateways that mint short-lived tokens. Leave blank to use a static key. The first run of a new command asks for your approval.</span></label>}
+            {authUsesSecret && existing && form.hasCredentialCommand && <label className="full llm-clear-secret"><input type="checkbox" checked={form.clearCredentialCommand} onChange={(event) => setForm({ ...form, clearCredentialCommand: event.target.checked, credentialCommand: event.target.checked ? '' : form.credentialCommand })} /> Clear the saved credential command</label>}
             {showHeaders && <><label className="full">Safe custom headers<textarea rows={3} value={form.headersText} autoCorrect="off" autoCapitalize="off" spellCheck={false} onChange={(event) => setForm({ ...form, headersText: event.target.value, headersDirty: true, clearHeaders: false })} /></label><label className="full llm-clear-secret"><input type="checkbox" checked={form.clearHeaders} onChange={(event) => setForm({ ...form, clearHeaders: event.target.checked, headersDirty: false })} /> Clear all saved custom headers</label></>}
             <label className="full llm-clear-secret"><input type="checkbox" checked={form.allowPrivateNetwork} onChange={(event) => set('allowPrivateNetwork', event.target.checked)} /> Allow this profile to reach an approved private company gateway</label>
           </>}

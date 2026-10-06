@@ -6,7 +6,7 @@ import sensible from '@fastify/sensible';
 import { ProviderRegistry } from './registry.js';
 import { registerLlmRoutes } from './routes.js';
 import { encryptSecret } from '../db/crypto.js';
-import { DbLlmRegistryStateStore, EncryptedLlmProfileStore, LlmProfileStoreError } from './profiles.js';
+import { credentialCommandHint, DbLlmRegistryStateStore, EncryptedLlmProfileStore, LlmProfileStoreError } from './profiles.js';
 
 function setLegacyProfiles(db: Database.Database, profiles: unknown[]): void {
   db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('llm.profiles.v1', encryptSecret(JSON.stringify(profiles)));
@@ -160,7 +160,14 @@ test('corrupt profile storage fails closed and is not overwritten by a save', ()
   }
 });
 
-test('credential commands persist, echo in public metadata, and tolerate legacy stored profiles', () => {
+test('credential command hints show only the executable name', () => {
+  assert.equal(credentialCommandHint('/usr/local/bin/devbar credential get --secret abc'), 'devbar ...');
+  assert.equal(credentialCommandHint('"C:\\Program Files\\mint.exe" --key x'), 'mint.exe ...');
+  assert.equal(credentialCommandHint('mint'), 'mint');
+  assert.equal(credentialCommandHint('  '), null);
+});
+
+test('credential commands persist, stay out of public metadata, and tolerate legacy stored profiles', () => {
   const db = new Database(':memory:');
   db.exec('CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
   const store = new EncryptedLlmProfileStore(() => db);
@@ -170,8 +177,16 @@ test('credential commands persist, echo in public metadata, and tolerate legacy 
       model: 'claude-model', authMode: 'x-api-key', clearSecret: false, headers: {}, region: '', awsProfile: '', command: '',
       credentialCommand: 'printf %s MINTED-TOKEN',
     });
-    assert.equal(saved.credentialCommand, 'printf %s MINTED-TOKEN');
+    assert.equal(saved.hasCredentialCommand, true);
+    assert.equal(saved.credentialCommandHint, 'printf ...');
+    assert.doesNotMatch(JSON.stringify(saved), /MINTED-TOKEN/);
     assert.equal(store.get('gateway')?.credentialCommand, 'printf %s MINTED-TOKEN');
+
+    // Omitting the command keeps it; clearing removes it.
+    store.save({ id: 'gateway', label: 'Gateway', protocol: 'anthropic-messages', baseUrl: 'https://gateway.example.test/v1', model: 'claude-model', authMode: 'x-api-key' });
+    assert.equal(store.get('gateway')?.credentialCommand, 'printf %s MINTED-TOKEN');
+    store.save({ id: 'gateway', label: 'Gateway', protocol: 'anthropic-messages', baseUrl: 'https://gateway.example.test/v1', model: 'claude-model', authMode: 'x-api-key', clearCredentialCommand: true });
+    assert.equal(store.get('gateway')?.credentialCommand, '');
 
     // A stored profile written before the field existed still validates on read.
     const legacy = [{
@@ -183,7 +198,8 @@ test('credential commands persist, echo in public metadata, and tolerate legacy 
     const restored = new EncryptedLlmProfileStore(() => db);
     const publicLegacy = restored.publicList().find((profile) => profile.id === 'legacy');
     assert.ok(publicLegacy);
-    assert.equal(publicLegacy?.credentialCommand, '');
+    assert.equal(publicLegacy?.hasCredentialCommand, false);
+    assert.equal(publicLegacy?.credentialCommandHint, null);
   } finally {
     db.close();
   }

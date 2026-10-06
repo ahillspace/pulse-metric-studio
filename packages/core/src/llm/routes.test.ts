@@ -19,7 +19,8 @@ function publicProfile(id: string) {
     region: '',
     awsProfile: '',
     command: '',
-    credentialCommand: '',
+    hasCredentialCommand: false,
+    credentialCommandHint: null,
     allowPrivateNetwork: false,
     source: 'saved' as const,
   };

@@ -46,6 +46,10 @@ Manual verification is still required for desktop credential restoration after a
 Configure AI assistance in the application's provider settings.
 Supported providers include OpenCode CLI, Amazon Bedrock, OpenAI-compatible endpoints, and Anthropic.
 Select an explicit model before using AI authoring.
+AI provider keys are encrypted in the application database with a key that the desktop app keeps in Windows Credential Manager or macOS Keychain.
+A provider can mint short-lived tokens with a credential command; the first time a new command runs, the desktop app shows the exact command and asks you to allow it.
+Saved credential commands are never shown again in the settings, because their arguments can contain secrets.
+The desktop backend trusts your operating system's certificate store so that corporate TLS inspection works, which means any root certificate your system trusts can inspect Tableau and AI traffic.
 
 ## Author and manage metrics
 

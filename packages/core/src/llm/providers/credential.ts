@@ -14,6 +14,45 @@ interface CacheEntry {
 
 const cache = new Map<string, CacheEntry>();
 
+/**
+ * Desktop builds confirm every new credential command natively before it runs,
+ * so a compromised WebView cannot save and run an arbitrary shell command.
+ * Without an approver (browser development mode) commands run as configured.
+ */
+type CommandApprover = (command: string) => Promise<boolean>;
+let approver: CommandApprover | null = null;
+const approvedCommands = new Set<string>();
+
+export function setCredentialCommandApprover(next: CommandApprover | null): void {
+  approver = next;
+  approvedCommands.clear();
+}
+
+async function assertApproved(command: string, provider: string, model: string): Promise<void> {
+  if (!approver || approvedCommands.has(command)) return;
+  let approved: boolean;
+  try {
+    approved = await approver(command);
+  } catch (error) {
+    throw new LlmProviderError({
+      code: 'provider_authentication',
+      message: 'The credential command could not be approved because the desktop credential service is unavailable.',
+      provider,
+      model,
+      cause: error,
+    });
+  }
+  if (!approved) {
+    throw new LlmProviderError({
+      code: 'provider_authentication',
+      message: 'The credential command was not allowed to run. Test the connection again to approve it.',
+      provider,
+      model,
+    });
+  }
+  approvedCommands.add(command);
+}
+
 export function clearCredentialCache(): void {
   cache.clear();
 }
@@ -27,6 +66,7 @@ export async function resolveCredentialCommand(
 ): Promise<string> {
   const cached = cache.get(command);
   if (cached && cached.expiresAt > now()) return cached.value;
+  await assertApproved(command, provider, model);
   const token = (await runner(command)).trim();
   if (!token) {
     throw new LlmProviderError({

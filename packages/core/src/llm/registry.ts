@@ -365,7 +365,7 @@ export class ProviderRegistry {
       region: input.region ?? '',
       awsProfile: input.awsProfile ?? '',
       command: input.command ?? '',
-      credentialCommand: input.credentialCommand ?? existing?.credentialCommand ?? '',
+      credentialCommand: input.clearCredentialCommand ? '' : input.credentialCommand ?? existing?.credentialCommand ?? '',
       allowPrivateNetwork: input.allowPrivateNetwork ?? false,
       source: 'saved',
     };
@@ -500,7 +500,8 @@ function fallbackPublicProfile(provider: LlmProvider, health: LlmProviderHealth)
     region: '',
     awsProfile: '',
     command: '',
-    credentialCommand: '',
+    hasCredentialCommand: false,
+    credentialCommandHint: null,
     allowPrivateNetwork: false,
     source: 'saved',
   };

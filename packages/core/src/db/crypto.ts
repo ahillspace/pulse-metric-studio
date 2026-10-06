@@ -4,9 +4,10 @@ import crypto from 'node:crypto';
 import { config } from '../config.js';
 
 /**
- * Machine-local secret encryption (AES-256-GCM).
- * Key file is generated on first use inside the data dir. This protects PAT
- * secrets at rest from casual disk access — a local tool, not a HSM.
+ * Machine-local secret encryption (AES-256-GCM) for AI provider profiles and
+ * fallback Tableau credentials. The desktop app keeps the key in the OS
+ * credential store (installDataKey, before any secret is read). Browser
+ * development mode falls back to a key file inside the data dir.
  */
 
 function ensureDataDir(): void {
@@ -14,6 +15,37 @@ function ensureDataDir(): void {
 }
 
 let cachedKey: Buffer | null = null;
+
+/** Uses an OS-held key instead of the key file. */
+export function installDataKey(hexKey: string): void {
+  if (!/^[a-f0-9]{64}$/i.test(hexKey)) throw new Error('Invalid data key.');
+  cachedKey = Buffer.from(hexKey, 'hex');
+}
+
+/** The legacy key file's key, if one exists. */
+export function readLegacyKeyFile(): string | null {
+  if (!fs.existsSync(config.machineKeyPath)) return null;
+  const value = fs.readFileSync(config.machineKeyPath, 'utf8').trim().toLowerCase();
+  return /^[a-f0-9]{64}$/.test(value) ? value : null;
+}
+
+/**
+ * Moves the data key into the OS store. An existing key file is migrated and
+ * removed once the store returns the same key; if the store already holds a
+ * different key, the file key (which encrypted the existing data) stays in use.
+ */
+export async function adoptOsDataKey(store: { dataKey(candidate: string): Promise<string> }): Promise<'migrated' | 'kept-file' | 'os'> {
+  const legacy = readLegacyKeyFile();
+  const key = await store.dataKey(legacy ?? crypto.randomBytes(32).toString('hex'));
+  if (legacy && key !== legacy) {
+    installDataKey(legacy);
+    return 'kept-file';
+  }
+  installDataKey(key);
+  if (!legacy) return 'os';
+  fs.rmSync(config.machineKeyPath, { force: true });
+  return 'migrated';
+}
 
 function machineKey(): Buffer {
   if (cachedKey) return cachedKey;
