@@ -32,8 +32,14 @@ function provider(overrides: Partial<Record<string, () => Response>> = {}) {
     if (overrides[endpoint]) return overrides[endpoint]!();
     if (endpoint === '/api/-/pulse/metrics/metric') return Response.json({ metric });
     if (endpoint === '/api/-/pulse/definitions/definition') return Response.json({ definition });
-    if (endpoint === '/api/-/pulse/insights/springboard') return Response.json(bundle, { status: 201 });
-    if (endpoint === '/api/-/pulse/images/metricCard') return Response.json({ content: png }, { status: 201 });
+    if (endpoint === '/api/-/pulse/insights/springboard') {
+      if (requests.at(-1)?.body.bundle_request.version !== '1') return Response.json({ httpErrorCode: 400, message: 'Bad Request' }, { status: 400 });
+      return Response.json(bundle, { status: 201 });
+    }
+    if (endpoint === '/api/-/pulse/images/metricCard') {
+      if (requests.at(-1)?.body.settings.locale === 'en-US') return Response.json({ httpErrorCode: 400, message: 'Bad Request' }, { status: 400 });
+      return Response.json({ content: png }, { status: 201 });
+    }
     throw new Error(`Unexpected provider path ${endpoint}`);
   };
   return requests;
@@ -54,6 +60,9 @@ test('real preview route checks ownership, renders through Tableau, and returns 
   assert.doesNotMatch(result.body, /private-session-token|test-pat|<span>/);
   assert.deepEqual(requests.map(request => request.method), ['GET', 'GET', 'POST', 'POST']);
   assert.equal(requests[2]!.body.bundle_request.input.metadata.metric_id, 'metric');
+  assert.equal(requests[2]!.body.bundle_request.version, '1');
+  assert.equal(requests[3]!.body.settings.locale, undefined);
+  assert.equal(requests[3]!.body.settings.theme, 'THEME_DARK');
   assert.equal(requests[3]!.body.input.metricMetadata.definitionName, 'Revenue');
   assert.equal(requests[3]!.body.input.insights.top.markup, 'Retail grew fastest');
 });

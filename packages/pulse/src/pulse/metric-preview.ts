@@ -41,6 +41,7 @@ export function previewInsightInput(definition: PulseDefinition, metric: PulseEx
     return unavailable('Tableau did not return the definition settings needed to preview this metric.');
   return {
     bundle_request: {
+      version: '1',
       input: {
         metadata: { metric_id: metricId, definition_id: definitionId, name: definition.metadata.name },
         metric: {
@@ -102,7 +103,7 @@ export function previewCardInput(definition: PulseDefinition, metric: PulseExact
         top: { markup: top.markup, facts: top.facts },
       },
     },
-    settings: { scale: 'METRIC_CARD_IMAGE_SCALE_CSS', language: 'en-US', locale: 'en-US', theme: 'THEME_DARK', width: 420 },
+    settings: { scale: 'METRIC_CARD_IMAGE_SCALE_CSS', language: 'en-US', theme: 'THEME_DARK', width: 420 },
   };
 }
 
