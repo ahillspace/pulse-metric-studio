@@ -203,7 +203,6 @@ async function tryParse(provider: LlmProvider, messages: LlmMessage[]): Promise<
             system: SYSTEM_PROMPT,
             messages,
             maxTokens: 4096,
-            temperature: 0.2,
         });
         let parsed: any;
         try {

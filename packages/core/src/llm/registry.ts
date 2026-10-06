@@ -180,7 +180,6 @@ export class ProviderRegistry {
         system: 'This is a connection test. Do not use tools or access files.',
         messages: [{ role: 'user', content: 'Reply with the single word OK.' }],
         maxTokens: 16,
-        temperature: 0,
       });
       if (result.text?.trim().toUpperCase() !== 'OK') {
         throw new LlmProviderError({

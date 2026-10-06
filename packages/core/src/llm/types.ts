@@ -10,7 +10,6 @@ export interface CompleteOptions {
   system?: string;
   messages: LlmMessage[];
   maxTokens?: number;
-  temperature?: number;
 }
 
 export interface CompleteResult {

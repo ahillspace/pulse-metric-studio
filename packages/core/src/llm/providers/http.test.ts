@@ -41,6 +41,19 @@ test('Chat Completions profiles use bearer auth, safe headers, and the configure
   assert.equal(JSON.parse(String(request.init.body)).model, 'model-1');
 });
 
+test('HTTP protocols omit sampling parameters that current Claude models reject', async () => {
+  for (const protocol of ['openai-chat', 'openai-responses', 'anthropic-messages'] as const) {
+    const bodies: Array<Record<string, unknown>> = [];
+    const provider = new HttpLlmProvider(profile(protocol), async (_input, init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return Response.json({ choices: [{ message: { content: 'done' } }], output_text: 'done', content: [{ type: 'text', text: 'done' }] });
+    }, allowEndpoint);
+    await provider.complete({ messages: [{ role: 'user', content: 'hello' }] });
+    assert.equal(bodies.length, 1, protocol);
+    assert.equal('temperature' in bodies[0]!, false, protocol);
+  }
+});
+
 test('credential commands mint the x-api-key token per request and satisfy configuration', async () => {
   clearCredentialCache();
   const credentialed: StoredLlmProfile = {
