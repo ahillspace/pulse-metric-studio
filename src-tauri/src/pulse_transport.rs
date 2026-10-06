@@ -31,6 +31,24 @@ pub struct ApiResponse {
     content_type: String,
 }
 
+/// Assistant requests wait longer than the server's 5-minute deadline so its
+/// explanation arrives first. Writes (publishing, variants, deletion) keep five
+/// minutes so a long batch is never cut off with an unknown outcome. Reads
+/// fail within two minutes.
+fn request_timeout(method: &str, path: &str) -> Duration {
+    let route = path.split('?').next().unwrap_or("");
+    let assistant = route == "/api/llm/author"
+        || route.ends_with("/proposals")
+        || (route.starts_with("/api/llm/profiles/") && route.ends_with("/test"));
+    if assistant {
+        Duration::from_secs(330)
+    } else if method == "GET" {
+        Duration::from_secs(120)
+    } else {
+        Duration::from_secs(300)
+    }
+}
+
 fn validate_request(request: &ApiRequest) -> Result<(), String> {
     if !matches!(request.method.as_str(), "GET" | "POST" | "PUT" | "DELETE") {
         return Err("Unsupported desktop request method.".into());
@@ -90,9 +108,34 @@ impl PulseTransport {
             .map_err(|_| "The desktop transport could not start.".to_string())?;
         let method = reqwest::Method::from_bytes(method.as_bytes())
             .map_err(|_| "Invalid request method.".to_string())?;
+        let url = reqwest::Url::parse(&format!("http://127.0.0.1:{}{path}", self.port))
+            .map_err(|_| "Invalid desktop request path.".to_string())?;
+        // Each request carries a one-time signature instead of the launch token,
+        // so a process that takes over the port after the readiness proof
+        // learns nothing it can reuse.
+        let target = match url.query() {
+            Some(query) => format!("{}?{query}", url.path()),
+            None => url.path().to_string(),
+        };
+        let nonce = format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "The system clock is invalid.".to_string())?
+            .as_millis()
+            .to_string();
+        let signature = readiness_proof(
+            &self.token,
+            &request_message(method.as_str(), &target, &nonce, &timestamp),
+        );
         let mut request = client
-            .request(method, format!("http://127.0.0.1:{}{path}", self.port))
-            .bearer_auth(&self.token)
+            .request(method, url)
+            .header("X-Pulse-Nonce", nonce)
+            .header("X-Pulse-Timestamp", timestamp)
+            .header("X-Pulse-Signature", signature)
             .header("Accept", "application/json");
         if let Some(body) = body {
             request = request
@@ -175,6 +218,11 @@ impl PulseTransport {
     }
 }
 
+/// What a request signature covers; the server rebuilds the same string.
+fn request_message(method: &str, target: &str, nonce: &str, timestamp: &str) -> String {
+    format!("request:{method}\n{target}\n{nonce}\n{timestamp}")
+}
+
 fn readiness_proof(token: &str, message: &str) -> String {
     let mut mac =
         Hmac::<Sha256>::new_from_slice(token.as_bytes()).expect("HMAC accepts any key length");
@@ -201,8 +249,7 @@ pub async fn pulse_api_request(
     let transport = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         if !transport.ready() { return Err("The desktop service is unavailable. Restart Pulse Metric Studio and inspect Activity before repeating a change.".into()); }
-        // Longer than the server's 5-minute assistant deadline so its explanation arrives first.
-        transport.send(&request.method, &request.path, request.body, Duration::from_secs(330))
+        transport.send(&request.method, &request.path, request.body, request_timeout(&request.method, &request.path))
     })
         .await.map_err(|_| "Desktop request was interrupted.".to_string())?
 }
@@ -278,6 +325,47 @@ mod tests {
                 .unwrap();
         });
         (port, handle)
+    }
+
+    #[test]
+    fn only_assistant_routes_get_the_long_timeout() {
+        assert_eq!(request_timeout("POST", "/api/pulse/drafts/abc/proposals"), Duration::from_secs(330));
+        assert_eq!(request_timeout("POST", "/api/llm/author"), Duration::from_secs(330));
+        assert_eq!(request_timeout("POST", "/api/llm/profiles/gateway/test"), Duration::from_secs(330));
+        assert_eq!(request_timeout("POST", "/api/pulse/publish"), Duration::from_secs(300));
+        assert_eq!(request_timeout("GET", "/api/pulse/drafts"), Duration::from_secs(120));
+        assert_eq!(request_timeout("GET", "/api/tableau/status?x=/proposals"), Duration::from_secs(120));
+    }
+
+    #[test]
+    fn requests_carry_a_one_time_signature_and_never_the_token() {
+        let token = "c".repeat(64);
+        let secret = token.clone();
+        let (port, handle) = server(move |request| {
+            assert!(!request.contains(&secret));
+            assert!(!request.to_ascii_lowercase().contains("authorization:"));
+            let header = |name: &str| {
+                request
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(':')
+                            .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+                            .map(|(_, value)| value.trim().to_string())
+                    })
+                    .unwrap()
+            };
+            let expected = readiness_proof(
+                &secret,
+                &request_message("GET", "/api/pulse/status?q=a%20b", &header("x-pulse-nonce"), &header("x-pulse-timestamp")),
+            );
+            assert_eq!(header("x-pulse-signature"), expected);
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".into()
+        });
+        let response = PulseTransport { port, token }
+            .send("GET", "/api/pulse/status?q=a%20b", None, Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(response.status, 200);
+        handle.join().unwrap();
     }
 
     #[test]

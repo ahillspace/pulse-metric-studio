@@ -267,7 +267,7 @@ fn main() {
                 &format!("node runtime: {}", node.display()),
             );
 
-            let credential_context = CredentialContext::native(&identity.identifier);
+            let credential_context = CredentialContext::native(&identity.identifier, &data_directory);
             let credential_broker = start_credential_broker(credential_context.clone())?;
             let credential_broker_url = credential_broker.url().to_string();
             let credential_broker_token = credential_broker.token().to_string();

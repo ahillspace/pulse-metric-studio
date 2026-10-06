@@ -3,6 +3,7 @@ import type { StoredLlmProfile } from '../profiles.js';
 import type { CompleteOptions, CompleteResult, LlmMessage, LlmProviderHealth } from '../types.js';
 import { LLM_REQUEST_TIMEOUT_MS, LlmProviderError, timeoutDescription } from '../types.js';
 import { assertSafeLlmEndpoint, UnsafeLlmEndpointError } from './network-policy.js';
+import { guardedFetch } from './guarded-fetch.js';
 import { resolveProfileSecret } from './credential.js';
 import { readProviderErrorDetail, withProviderDetail } from './error-detail.js';
 
@@ -51,7 +52,7 @@ export class HttpLlmProvider {
 
   constructor(
     private readonly profile: StoredLlmProfile,
-    private readonly fetchImpl: Fetch = fetch,
+    private readonly fetchImpl?: Fetch,
     private readonly endpointPolicy: EndpointPolicy = assertSafeLlmEndpoint,
   ) {
     this.id = profile.id;
@@ -103,7 +104,9 @@ export class HttpLlmProvider {
 
     let response: Response;
     try {
-      response = await this.fetchImpl(url, {
+      // The default client re-checks every resolved address when it connects.
+      const send = this.fetchImpl ?? guardedFetch(this.profile.allowPrivateNetwork ?? false);
+      response = await send(url, {
         method: 'POST',
         headers,
         body: JSON.stringify(requestBody(protocol, this.profile.model, opts)),
@@ -111,6 +114,9 @@ export class HttpLlmProvider {
         redirect: 'error',
       });
     } catch (error) {
+      if (error instanceof UnsafeLlmEndpointError) {
+        throw new LlmProviderError({ code: 'provider_execution', message: error.message, provider: this.id, model: this.profile.model });
+      }
       const timeout = error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
       throw new LlmProviderError({
         code: timeout ? 'provider_timeout' : 'provider_unavailable',
@@ -137,13 +143,13 @@ export class HttpLlmProvider {
 }
 
 export class OpenAiCompatProvider extends HttpLlmProvider {
-  constructor(profile: StoredLlmProfile = envOpenAiProfile(), fetchImpl: Fetch = fetch, endpointPolicy: EndpointPolicy = assertSafeLlmEndpoint) {
+  constructor(profile: StoredLlmProfile = envOpenAiProfile(), fetchImpl?: Fetch, endpointPolicy: EndpointPolicy = assertSafeLlmEndpoint) {
     super(profile, fetchImpl, endpointPolicy);
   }
 }
 
 export class AnthropicProvider extends HttpLlmProvider {
-  constructor(profile: StoredLlmProfile = envAnthropicProfile(), fetchImpl: Fetch = fetch, endpointPolicy: EndpointPolicy = assertSafeLlmEndpoint) {
+  constructor(profile: StoredLlmProfile = envAnthropicProfile(), fetchImpl?: Fetch, endpointPolicy: EndpointPolicy = assertSafeLlmEndpoint) {
     super(profile, fetchImpl, endpointPolicy);
   }
 }

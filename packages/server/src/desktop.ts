@@ -3,9 +3,12 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import {
+  adoptOsDataKey,
   CREDENTIAL_BROKER_TOKEN_ENV,
   config,
+  createCredentialBrokerClient,
   setCredentialBrokerToken,
+  setCredentialCommandApprover,
 } from "@pulse-metric-studio/core";
 
 export const DESKTOP_PROTOCOL = 1;
@@ -88,7 +91,57 @@ export async function readDesktopStartup(): Promise<
     process.stdin.once("end", ended);
   });
   await acquireDesktopOwnership(config.dataDir);
+  await useNativeCredentialServices();
   return startup;
+}
+
+/**
+ * The native host keeps the local data key in the OS credential store and
+ * approves credential commands. Both are wired before any request is served.
+ */
+async function useNativeCredentialServices(): Promise<void> {
+  const broker = createCredentialBrokerClient();
+  setCredentialCommandApprover((command) => broker.approveCredentialCommand(command));
+  try {
+    const outcome = await adoptOsDataKey(broker);
+    if (outcome === "kept-file")
+      console.warn("The OS credential store holds a different data key; the existing key file stays in use.");
+  } catch (error) {
+    // Saved secrets stay readable through the key file until the OS store is available again.
+    console.warn(
+      `The OS credential store could not provide the data key; using the key file. ${error instanceof Error ? error.message : ""}`.trim(),
+    );
+  }
+}
+
+const REQUEST_SIGNATURE_WINDOW_MS = 120_000;
+
+/**
+ * Verifies the native transport's per-request signature: HMAC over method,
+ * target, a one-time nonce and a timestamp. The launch token itself never
+ * travels with a request, and each signature is accepted only once.
+ */
+export function createDesktopRequestVerifier(token: string, now: () => number = Date.now) {
+  const seen = new Map<string, number>();
+  return (method: string, target: string, headers: Record<string, string | string[] | undefined>): boolean => {
+    const nonce = headers["x-pulse-nonce"];
+    const timestamp = headers["x-pulse-timestamp"];
+    const signature = headers["x-pulse-signature"];
+    if (typeof nonce !== "string" || !/^[a-f0-9]{64}$/.test(nonce)) return false;
+    if (typeof timestamp !== "string" || !/^\d{1,16}$/.test(timestamp)) return false;
+    if (typeof signature !== "string" || !/^[a-f0-9]{64}$/.test(signature)) return false;
+    const current = now();
+    if (Math.abs(current - Number(timestamp)) > REQUEST_SIGNATURE_WINDOW_MS) return false;
+    const expected = crypto
+      .createHmac("sha256", token)
+      .update(`request:${method}\n${target}\n${nonce}\n${timestamp}`)
+      .digest("hex");
+    if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return false;
+    for (const [entry, expiry] of seen) if (expiry < current) seen.delete(entry);
+    if (seen.has(nonce)) return false;
+    seen.set(nonce, current + 2 * REQUEST_SIGNATURE_WINDOW_MS);
+    return true;
+  };
 }
 
 export function superviseDesktop(

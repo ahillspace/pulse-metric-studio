@@ -110,7 +110,7 @@ export class EncryptedLlmProfileStore implements LlmProfileStore {
       region: input.region ?? '',
       awsProfile: input.awsProfile ?? '',
       command: input.command ?? '',
-      credentialCommand: input.credentialCommand ?? existing?.credentialCommand ?? '',
+      credentialCommand: input.clearCredentialCommand ? '' : input.credentialCommand ?? existing?.credentialCommand ?? '',
       allowPrivateNetwork: input.allowPrivateNetwork ?? false,
       source: 'saved',
     };
@@ -187,10 +187,21 @@ export function toPublicProfile(profile: StoredLlmProfile): LlmProfilePublic {
     region: profile.region,
     awsProfile: profile.awsProfile,
     command: profile.command,
-    credentialCommand: profile.credentialCommand ?? '',
+    hasCredentialCommand: Boolean(profile.credentialCommand?.trim()),
+    credentialCommandHint: credentialCommandHint(profile.credentialCommand),
     allowPrivateNetwork: profile.allowPrivateNetwork ?? false,
     source: profile.source,
   };
+}
+
+/** The executable's name only: arguments after it can carry client secrets. */
+export function credentialCommandHint(command: string | undefined): string | null {
+  const trimmed = command?.trim();
+  if (!trimmed) return null;
+  const first = trimmed.match(/^"([^"]+)"|^'([^']+)'|^(\S+)/);
+  const executable = (first?.[1] ?? first?.[2] ?? first?.[3] ?? '').split(/[\\/]/).pop() ?? '';
+  const name = executable.length > 40 ? `${executable.slice(0, 37)}...` : executable;
+  return trimmed.length > (first?.[0].length ?? 0) ? `${name} ...` : name;
 }
 
 function isStoredProfile(value: unknown): value is StoredLlmProfile {

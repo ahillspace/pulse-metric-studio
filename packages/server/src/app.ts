@@ -17,7 +17,7 @@ import {
   sanitizeProviderMessage,
 } from '@pulse-metric-studio/core';
 import type { AuthorOpsFn } from '@pulse-metric-studio/core';
-import { DESKTOP_BODY_LIMIT, DESKTOP_PROTOCOL } from './desktop.js';
+import { createDesktopRequestVerifier, DESKTOP_BODY_LIMIT, DESKTOP_PROTOCOL } from './desktop.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -40,6 +40,7 @@ export function buildApp(hooks: FeatureHooks = {}, options: { desktopToken?: str
   if (process.env.PULSE_METRIC_STUDIO_DESKTOP_IDENTIFIER === 'com.ahillspace.pulsemetricstudio' && !desktopToken) {
     throw new Error('Pulse desktop authentication is required.');
   }
+  const verifyDesktopRequest = desktopToken ? createDesktopRequestVerifier(desktopToken) : null;
   const app = Fastify({
     bodyLimit: DESKTOP_BODY_LIMIT,
     logger: {
@@ -64,9 +65,7 @@ export function buildApp(hooks: FeatureHooks = {}, options: { desktopToken?: str
         await reply.code(401).send({ error: 'Desktop authentication required.' });
         return;
       }
-      const expected = Buffer.from(`Bearer ${desktopToken}`);
-      const actual = Buffer.from(request.headers.authorization ?? '');
-      if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
+      if (!verifyDesktopRequest!(request.method, request.raw.url ?? '', request.headers)) {
         await reply.code(401).send({ error: 'Desktop authentication required.' });
         return;
       }

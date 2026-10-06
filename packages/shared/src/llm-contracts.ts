@@ -79,7 +79,9 @@ export const LlmProfileWriteSchema = z.object({
   region: z.string().trim().max(80).optional().default(''),
   awsProfile: z.string().trim().max(120).optional().default(''),
   command: z.string().trim().max(1000).optional().default(''),
-  credentialCommand: z.string().trim().max(4000).optional().default(''),
+  /** Omit to keep the saved command; the API never returns a saved command. */
+  credentialCommand: z.string().trim().max(4000).optional(),
+  clearCredentialCommand: z.boolean().optional().default(false),
 }).superRefine((profile, ctx) => {
   if (['openai-chat', 'openai-responses', 'anthropic-messages'].includes(profile.protocol) && !profile.baseUrl) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['baseUrl'], message: 'Base URL is required for this protocol.' });
@@ -143,7 +145,9 @@ export interface LlmProfilePublic {
   region: string;
   awsProfile: string;
   command: string;
-  credentialCommand: string;
+  /** Saved credential commands can embed secrets, so only their presence and executable are returned. */
+  hasCredentialCommand: boolean;
+  credentialCommandHint: string | null;
   allowPrivateNetwork: boolean;
   source: 'environment' | 'saved';
 }

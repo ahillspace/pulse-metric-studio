@@ -38,7 +38,7 @@ function isLoopbackHost(hostname: string): boolean {
   return normalized === 'localhost' || normalized.endsWith('.localhost') || normalized === '127.0.0.1' || normalized === '::1';
 }
 
-function isPublicAddress(address: string): boolean {
+export function isPublicAddress(address: string): boolean {
   const normalized = address.replace(/^\[|\]$/g, '').toLowerCase();
   const version = net.isIP(normalized);
   if (version === 4) return isPublicIpv4(normalized);

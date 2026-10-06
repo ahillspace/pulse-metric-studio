@@ -3,7 +3,7 @@ import { beforeEach, test } from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { clearCredentialCache, credentialCommandEnv, resolveCredentialCommand, resolveProfileSecret, runCredentialCommand } from './credential.js';
+import { clearCredentialCache, credentialCommandEnv, resolveCredentialCommand, resolveProfileSecret, runCredentialCommand, setCredentialCommandApprover } from './credential.js';
 
 beforeEach(() => {
   clearCredentialCache();
@@ -107,5 +107,35 @@ test('a timed-out credential command is stopped with everything it started', { s
     assert.throws(() => process.kill(pid, 0), /ESRCH/);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('desktop credential commands run only after native approval, asked once per command', async () => {
+  const asked: string[] = [];
+  let answer = false;
+  setCredentialCommandApprover(async (command) => {
+    asked.push(command);
+    return answer;
+  });
+  let runs = 0;
+  const runner = async () => {
+    runs += 1;
+    return 'MINTED';
+  };
+  try {
+    await assert.rejects(resolveCredentialCommand('mint', 'provider', 'model', runner), /not allowed to run/);
+    assert.equal(runs, 0);
+    answer = true;
+    assert.equal(await resolveCredentialCommand('mint', 'provider', 'model', runner, () => 0), 'MINTED');
+    clearCredentialCache();
+    assert.equal(await resolveCredentialCommand('mint', 'provider', 'model', runner, () => 0), 'MINTED');
+    assert.deepEqual(asked, ['mint', 'mint']);
+    assert.equal(runs, 2);
+    setCredentialCommandApprover(async () => {
+      throw new Error('broker down');
+    });
+    await assert.rejects(resolveCredentialCommand('other', 'provider', 'model', runner), /could not be approved/);
+  } finally {
+    setCredentialCommandApprover(null);
   }
 });

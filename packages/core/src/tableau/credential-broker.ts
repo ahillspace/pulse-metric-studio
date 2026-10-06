@@ -4,6 +4,10 @@ export const CREDENTIAL_BROKER_URL_ENV = 'PULSE_METRIC_STUDIO_CREDENTIAL_BROKER_
 export const CREDENTIAL_BROKER_TOKEN_ENV = 'PULSE_METRIC_STUDIO_CREDENTIAL_BROKER_TOKEN';
 export const CREDENTIAL_BROKER_RESOLVE_PATH = '/v1/credentials/resolve';
 export const CREDENTIAL_BROKER_DELETE_PATH = '/v1/credentials/delete';
+export const CREDENTIAL_BROKER_DATA_KEY_PATH = '/v1/data-key';
+export const CREDENTIAL_BROKER_APPROVE_COMMAND_PATH = '/v1/approvals/credential-command';
+/** The approval waits for a person to answer a native dialog. */
+const APPROVAL_TIMEOUT_MS = 10 * 60_000;
 
 export type CredentialBrokerErrorCode =
   | 'unavailable'
@@ -27,6 +31,10 @@ export interface CredentialBrokerClient {
 
 export interface CredentialBrokerVaultClient extends CredentialBrokerClient {
   delete(credentialRef: string): Promise<boolean>;
+  /** Returns the OS-held data key, storing `candidate` (64 hex characters) if none exists. */
+  dataKey(candidate: string): Promise<string>;
+  /** Asks the native layer (and, the first time, the person) whether a credential command may run. */
+  approveCredentialCommand(command: string): Promise<boolean>;
 }
 
 /**
@@ -58,7 +66,7 @@ export function createCredentialBrokerClient(
   const fetchImpl = options.fetchImpl ?? fetch;
   const timeoutMs = options.timeoutMs ?? 5_000;
 
-  async function request(path: string, method: 'POST' | 'PUT' | 'DELETE', body: unknown): Promise<unknown> {
+  async function request(path: string, method: 'POST' | 'PUT' | 'DELETE', body: unknown, requestTimeoutMs = timeoutMs): Promise<unknown> {
     const brokerUrl = readBrokerUrl(env);
     const brokerToken = (options.token ?? configuredBrokerToken ?? '').trim();
     if (!brokerToken) {
@@ -80,7 +88,7 @@ export function createCredentialBrokerClient(
           'Content-Type': 'application/json',
         },
         body: requestBody,
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: AbortSignal.timeout(requestTimeoutMs),
       });
     } catch {
       throw new CredentialBrokerError('unavailable', 'The OS credential broker is unavailable.');
@@ -138,6 +146,22 @@ export function createCredentialBrokerClient(
         throw new CredentialBrokerError('invalid_response', 'The OS credential broker returned an invalid response.');
       }
       return removed;
+    },
+    async dataKey(candidate: string): Promise<string> {
+      const body = await request(CREDENTIAL_BROKER_DATA_KEY_PATH, 'POST', { candidate });
+      const key = (body as { key?: unknown } | null)?.key;
+      if (typeof key !== 'string' || !/^[a-f0-9]{64}$/i.test(key)) {
+        throw new CredentialBrokerError('invalid_response', 'The OS credential broker returned an invalid response.');
+      }
+      return key.toLowerCase();
+    },
+    async approveCredentialCommand(command: string): Promise<boolean> {
+      const body = await request(CREDENTIAL_BROKER_APPROVE_COMMAND_PATH, 'POST', { command }, APPROVAL_TIMEOUT_MS);
+      const approved = (body as { approved?: unknown } | null)?.approved;
+      if (typeof approved !== 'boolean') {
+        throw new CredentialBrokerError('invalid_response', 'The OS credential broker returned an invalid response.');
+      }
+      return approved;
     },
   };
 }

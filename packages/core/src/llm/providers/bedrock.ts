@@ -5,6 +5,7 @@ import type { StoredLlmProfile } from '../profiles.js';
 import type { CompleteOptions, CompleteResult, LlmMessage, LlmProviderHealth } from '../types.js';
 import { LLM_REQUEST_TIMEOUT_MS, LlmProviderError, timeoutDescription } from '../types.js';
 import { assertSafeLlmEndpoint, UnsafeLlmEndpointError } from './network-policy.js';
+import { guardedFetch, publicOnlyAgent } from './guarded-fetch.js';
 import { resolveProfileSecret } from './credential.js';
 import { readProviderErrorDetail, withProviderDetail } from './error-detail.js';
 
@@ -34,7 +35,7 @@ export class BedrockProvider {
 
   constructor(
     private readonly profile: StoredLlmProfile = envBedrockProfile(),
-    private readonly fetchImpl: typeof fetch = fetch,
+    private readonly fetchImpl?: typeof fetch,
     private readonly endpointPolicy: EndpointPolicy = assertSafeLlmEndpoint,
   ) {
     this.id = profile.id;
@@ -76,6 +77,8 @@ export class BedrockProvider {
     return new BedrockRuntimeClient({
       region: this.profile.region,
       ...(this.profile.baseUrl ? { endpoint: this.profile.baseUrl } : {}),
+      // A custom endpoint stays on public addresses for every connection, not just the first check.
+      ...(this.profile.baseUrl && !this.profile.allowPrivateNetwork ? { requestHandler: { httpsAgent: publicOnlyAgent() } } : {}),
       ...(this.profile.awsProfile ? { credentials: fromIni({ profile: this.profile.awsProfile }) } : {}),
     });
   }
@@ -135,7 +138,9 @@ export class BedrockProvider {
     const token = await resolveProfileSecret(this.profile, this.id, this.profile.model);
     let response: Response;
     try {
-      response = await this.fetchImpl(url, {
+      // The default client re-checks every resolved address when it connects.
+      const send = this.fetchImpl ?? guardedFetch(this.profile.allowPrivateNetwork ?? false);
+      response = await send(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...this.profile.headers, Authorization: `Bearer ${token}` },
         body: JSON.stringify({
@@ -150,6 +155,9 @@ export class BedrockProvider {
         redirect: 'error',
       });
     } catch (error) {
+      if (error instanceof UnsafeLlmEndpointError) {
+        throw new LlmProviderError({ code: 'provider_execution', message: error.message, provider: this.id, model: this.profile.model });
+      }
       const timeout = error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
       throw new LlmProviderError({
         code: timeout ? 'provider_timeout' : 'provider_unavailable',
