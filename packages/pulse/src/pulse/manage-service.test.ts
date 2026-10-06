@@ -1,23 +1,21 @@
+import { TableauError,type TableauSession } from '@pulse-metric-studio/core';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { TableauError, type TableauSession } from '@pulse-metric-studio/core';
-import {
-  buildFollowTargets,
-  cachedDefinitionInventory,
-  clearPulseManageCaches,
-  executeDeletes,
-  followTargets,
-  forkMetrics,
-  FOLLOW_OPERATION_BATCH_LIMIT,
-  getExistingMetrics,
-  getFollowersDetail,
-  getFollowState,
-  getFollowTargets,
-  invalidatePulseDefinitionInventory,
-  timeframeMeasurementPeriod,
-  unfollowTargets,
-  type PulseManageDependencies,
-} from './manage-service.js';
+import { executeDeletes } from '../application/delete-execution.js';
+import { cachedDefinitionInventory,clearInventoryCache,getExistingMetrics,invalidatePulseDefinitionInventory } from '../application/inventory.js';
+import type { PulseRegistryDependencies } from '../application/registry-dependencies.js';
+import { buildFollowTargets,clearSubscriptionCaches,FOLLOW_OPERATION_BATCH_LIMIT,followTargets,getFollowersDetail,getFollowState,getFollowTargets,unfollowTargets } from '../application/subscriptions.js';
+import { timeframeMeasurementPeriod } from '../domain/variants.js';
+function clearPulseManageCaches(): void { clearInventoryCache(); clearSubscriptionCaches(); }
+
+
+import { PulseForkPlanService, type PulseForkPlanDependencies } from './fork-plan-service.js';
+type PulseManageDependencies = PulseRegistryDependencies & Pick<PulseForkPlanDependencies, 'getDefinition' | 'getOrCreate' | 'reconcile'>;
+
+async function forkMetrics(session: TableauSession, items: Array<{ sourceMetricId: string; timeframeKey: string }>, deps: PulseManageDependencies) {
+  const result = await new PulseForkPlanService({ ...deps, getCatalog: async () => { throw new Error('Unexpected catalog lookup'); }, queryValues: async () => [] }).forkMetrics(session, { version: 1, sourceMetricIds: items.map((item) => item.sourceMetricId), timeframe: { key: items[0]!.timeframeKey }, clauses: [] });
+  return result.results;
+}
 
 const session: TableauSession = {
   serverUrl: 'https://example.test',
@@ -101,7 +99,8 @@ test('date forking clones the exact source and replaces only measurement_period'
 
   assert.equal(createCalls, 1);
   assert.equal(outcomes.length, 1);
-  assert.equal(outcomes[0]?.status, 'existing');
+  assert.equal(outcomes[0]?.status, 'visible');
+  assert.equal(outcomes[0]?.creationStatus, 'existing');
   assert.equal(outcomes[0]?.reconciliationStatus, 'visible');
   assert.deepEqual(requests[0], {
     definitionId: 'definition-1',
@@ -136,8 +135,8 @@ test('date forking preserves bounded structured provider diagnostics', async () 
     },
   }));
   assert.equal(outcomes[0]?.status, 'failed');
-  assert.equal(outcomes[0]?.diagnostic?.status, 400);
-  assert.ok((outcomes[0]?.diagnostic?.detail?.length ?? 0) <= 800);
+  assert.match(outcomes[0]?.error ?? '', /provider rejected request/);
+  assert.ok((outcomes[0]?.error?.length ?? 0) <= 1200);
 });
 
 test('date forking never reports a reconciliation failure as success', async () => {
@@ -155,7 +154,7 @@ test('date forking never reports a reconciliation failure as success', async () 
       diagnostic: { message: 'Metric belongs to another definition.' },
     }),
   }));
-  assert.equal(outcomes[0]?.status, 'failed');
+  assert.equal(outcomes[0]?.status, 'ownership_mismatch');
   assert.equal(outcomes[0]?.creationStatus, 'created');
   assert.equal(outcomes[0]?.reconciliationStatus, 'ownership_mismatch');
   assert.match(outcomes[0]?.error ?? '', /another definition/);
@@ -343,7 +342,7 @@ test('a failed exact-metric delete leaves the inventory cache intact', async () 
     [{ metricIds: ['metric-1'], name: 'Deal Cycle Length' }],
     {
       deleteDefinition: async () => assert.fail('no definition should be deleted'),
-      deleteMetric: async () => { throw new TableauError('boom', 500, '', 'http'); },
+      deleteMetric: async () => { throw new TableauError('denied', 403, '', 'http'); },
     },
   );
   assert.equal(result.metricsDeleted, 0);
@@ -352,6 +351,16 @@ test('a failed exact-metric delete leaves the inventory cache intact', async () 
   await cachedDefinitionInventory(session, deps);
   assert.equal(listCalls, 1);
   clearPulseManageCaches();
+});
+
+test('deletion keeps confirmed outcomes and stops unsent resources after authentication expires', async () => {
+  const calls: string[] = [];
+  const result = await executeDeletes(session, ['a', 'b', 'c'].map(definitionId => ({ definitionId, metricIds: [], name: definitionId })), {
+    deleteDefinition: async (_session, id) => { calls.push(id); if (id === 'b') throw new TableauError('expired', 401, '', 'auth'); },
+    deleteMetric: async () => assert.fail('No metric deletion expected'),
+  });
+  assert.deepEqual(calls, ['a', 'b']);
+  assert.deepEqual(result.outcomes.map(item => item.status), ['deleted', 'failed', 'not_attempted']);
 });
 
 test('follow state uses the selected group and retains partial per-metric failures', async () => {
@@ -505,7 +514,7 @@ test('unfollow reports and retries each exact metric-target pair independently',
       { id: 'subscription-user-1', follower: { id: 'target-1', type: 'USER' } },
     ],
     deleteSubscription: async (_session, subscriptionId) => {
-      if (subscriptionId === 'subscription-group-2' && failGroupTwo) throw new Error('delete failed');
+      if (subscriptionId === 'subscription-group-2' && failGroupTwo) throw new TableauError('delete failed', 403, '', 'http');
     },
   });
   const operations = [
@@ -658,6 +667,14 @@ test('follow-target inventory rethrows auth failures', async () => {
   await assert.rejects(() => getFollowTargets(session, deps), /expired/);
 });
 
+test('subscription result diagnostics redact provider credential text', async () => {
+  const result = await followTargets(session, { operations: [{ metricId: 'metric', target: { kind: 'USER', id: 'user' } }] }, dependencies({
+    createUserSubscriptions: async () => [{ metricId: 'metric', targetId: 'user', ok: false, alreadyExists: false, error: 'Provider rejected Authorization: Basic private-test-token' }],
+  }));
+  assert.equal(result[0].error?.includes('private-test-token'), false);
+  assert.match(result[0].error ?? '', /redacted/);
+});
+
 test('getFollowTargets over the real client sends no name:has filter in any request URL', async () => {
   const originalFetch = globalThis.fetch;
   const urls: string[] = [];
@@ -691,4 +708,26 @@ test('buildFollowTargets sorts merged targets case-insensitively by name', () =>
     [{ id: 'user-1', name: 'Alpha' }, { id: 'user-2', name: 'gamma' }],
   );
   assert.deepEqual(targets.map((target) => target.name), ['Alpha', 'beta', 'gamma']);
+});
+
+
+test('an inventory read started before a mutation cannot repopulate the invalidated cache', async () => {
+  clearPulseManageCaches();
+  let resolveOld!: (value: { definitions: []; truncated: boolean }) => void;
+  const old = new Promise<{ definitions: []; truncated: boolean }>((resolve) => { resolveOld = resolve; });
+  let calls = 0;
+  const deps = dependencies({ listDefinitions: async () => {
+    calls++;
+    return calls === 1 ? old : { definitions: [{ metadata: { id: 'new-definition' } }], truncated: false };
+  } });
+  const beforeMutation = cachedDefinitionInventory(session, deps);
+  const duplicateReader = cachedDefinitionInventory(session, deps);
+  assert.equal(calls, 1);
+  invalidatePulseDefinitionInventory(session);
+  const current = await cachedDefinitionInventory(session, deps);
+  resolveOld({ definitions: [], truncated: false });
+  await Promise.all([beforeMutation, duplicateReader]);
+  assert.deepEqual(await cachedDefinitionInventory(session, deps), current);
+  assert.equal(calls, 2);
+  clearPulseManageCaches();
 });

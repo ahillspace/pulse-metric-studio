@@ -1,13 +1,13 @@
 import type { TableauSession } from '@pulse-metric-studio/core';
 import { TableauError } from '@pulse-metric-studio/core';
+import { boundedProviderDiagnostic,type PulseProviderDiagnostic } from './provider-diagnostics.js';
 import {
-  getPulseDefinition,
-  getPulseMetric,
-  listMetricsForDefinition,
-  type PulseDefinition,
-  type PulseExactMetric,
+getPulseDefinition,
+getPulseMetric,
+listMetricsForDefinition,
+type PulseDefinition,
+type PulseExactMetric,
 } from './pulse-client.js';
-import { boundedProviderDiagnostic, type PulseProviderDiagnostic } from './provider-diagnostics.js';
 
 const DEFAULT_DELAYS_MS = [0, 250, 750, 1_500, 3_000] as const;
 

@@ -1,9 +1,9 @@
+import { TableauError,type TableauSession } from '@pulse-metric-studio/core';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { TableauError, type TableauSession } from '@pulse-metric-studio/core';
 import {
-  reconcileMetricOwnership,
-  type MetricReconciliationDependencies,
+reconcileMetricOwnership,
+type MetricReconciliationDependencies,
 } from './reconciliation.js';
 
 const session: TableauSession = {

@@ -3,7 +3,7 @@ import { GRANULARITIES, RANGES, type Granularity, type PeriodType } from './puls
 /**
  * Timeframe presets for forking existing metric definitions into new
  * measurement-period variants. Keys are stable API surface (used by the web
- * app); the mapping mirrors the working Pulse Metric Studio implementation.
+ * app); the mapping mirrors the working Juju implementation.
  */
 
 export interface TimeframeSpec {

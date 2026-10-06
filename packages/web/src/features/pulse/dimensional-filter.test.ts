@@ -10,7 +10,8 @@ import {
   selectedProviderValues,
   type PulseDimensionValue,
 } from './dimensional-filter.js';
-import { decodeDimensionalForkResponse } from './dimensional-fork-api.js';
+import { decodeVariantResponse } from './api/registry.js';
+import { DimensionMemberCountSchema, DimensionValuePageSchema } from '@pulse-metric-studio/shared';
 
 const values: PulseDimensionValue[] = [
   { key: 'west', label: 'West', value: 'West' },
@@ -82,29 +83,37 @@ test('total fork failures retain the structured summary and concise error', () =
     created: 0,
     existing: 0,
     failed: 1,
+    pendingVisibility: 0,
     results: [{
       sourceMetricId: 'metric-1',
       fieldId: 'Region',
       valueFingerprint: 'fingerprint',
       status: 'failed' as const,
+      requestedSpecification: {},
       error: 'Provider unavailable.',
     }],
   };
-  const outcome = decodeDimensionalForkResponse({ ok: false, status: 502 }, body);
+  const outcome = decodeVariantResponse({ ok: false, status: 502 }, body);
   assert.equal(outcome.error, body.error);
-  assert.strictEqual(outcome.summary, body);
-  assert.equal(outcome.summary.results[0]?.error, 'Provider unavailable.');
+  assert.equal(outcome.failed, 1);
+  assert.equal(outcome.results[0]?.error, 'Provider unavailable.');
 
-  const incompatible = decodeDimensionalForkResponse(
+  const incompatible = decodeVariantResponse(
     { ok: false, status: 422 },
     { ...body, error: 'Every source metric is incompatible with this dimensional fork.' },
   );
   assert.equal(incompatible.error, 'Every source metric is incompatible with this dimensional fork.');
-  assert.equal(incompatible.summary.failed, 1);
+  assert.equal(incompatible.failed, 1);
 });
 
 test('successful and mixed fork summaries do not add a top-level error', () => {
-  const summary = { attempted: 2, created: 1, existing: 0, failed: 1, results: [] };
-  assert.equal(decodeDimensionalForkResponse({ ok: true, status: 207 }, summary).error, undefined);
-  assert.equal(decodeDimensionalForkResponse({ ok: true, status: 200 }, summary).error, undefined);
+  const summary = { attempted: 2, created: 1, existing: 0, failed: 1, pendingVisibility: 0, results: [] };
+  assert.equal(decodeVariantResponse({ ok: true, status: 207 }, summary).error, undefined);
+  assert.equal(decodeVariantResponse({ ok: true, status: 200 }, summary).error, undefined);
+});
+
+test('dimension discovery rejects malformed counts and preserves truncation', () => {
+  assert.throws(() => DimensionMemberCountSchema.parse({ fieldId: 'Region', count: -1 }));
+  assert.throws(() => DimensionValuePageSchema.parse({ fieldId: 'Region', values: [], truncated: 'false' }));
+  assert.equal(DimensionValuePageSchema.parse({ fieldId: 'Region', values, truncated: true }).truncated, true);
 });

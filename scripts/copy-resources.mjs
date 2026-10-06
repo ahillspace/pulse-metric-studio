@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { bundleServer } from './bundle-server.mjs';
 import { assertSupportedNode, validateNodeExecutable, verifyPackagedSqlite } from './node-runtime.mjs';
 
+import { assertMacRuntime } from './macos-compatibility.mjs';
+
 const scriptPath = fileURLToPath(import.meta.url);
 const root = path.dirname(path.dirname(scriptPath));
 
@@ -27,6 +29,7 @@ export function copyNodeRuntime(resourcesDir, nodeExecutable = process.execPath,
 
 export async function composeResources(rootDir = root) {
   assertSupportedNode();
+  assertMacRuntime();
   const resourcesDir = path.join(rootDir, 'src-tauri', 'resources');
   const webSource = path.join(rootDir, 'packages', 'web', 'dist');
   if (!fs.existsSync(webSource)) {

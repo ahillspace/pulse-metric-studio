@@ -11,6 +11,11 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["dynamic-acl", "tray-icon", "image-png"] }
+tauri-plugin-opener = "=2.5.5"
+reqwest = { version = "0.12", default-features = false, features = ["blocking"] }
+hmac = "0.12"
+sha2 = "0.10"
+rfd = { version = "0.15", default-features = false }
 tauri-plugin-single-instance = "2"
 tauri-plugin-window-state = "2"
 serde = { version = "1", features = ["derive"] }

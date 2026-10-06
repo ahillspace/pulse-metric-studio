@@ -37,6 +37,7 @@ test('LLM settings routes return masked profiles and never echo secrets', async 
     }),
     listProfiles: async () => [publicProfile('gateway')],
     listModels: async (): Promise<LlmModelCatalogResponse> => ({ provider: 'opencode', source: 'opencode-cli-cache', models: [] }),
+    listSetupModels: async (): Promise<LlmModelCatalogResponse> => ({ provider: 'opencode', source: 'opencode-cli-cache', models: [] }),
     saveProfile: async (profile) => {
       saved = profile;
       return publicProfile(profile.id);

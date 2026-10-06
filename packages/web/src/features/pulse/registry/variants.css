@@ -1,0 +1,265 @@
+﻿.pulse-variant-dialog.overlay-backdrop {
+  --bg: #1c1c1f;
+  --surface: #232326;
+  --border: #39393f;
+  --text: #e4e4ea;
+  --text-dim: #aaaab5;
+  --text-faint: #90909c;
+  --cyan: #a4a0dd;
+  --cyan-glow: #a4a0dd15;
+  --mono: inherit;
+  color: var(--text);
+  font-family:
+    Inter,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: #08080baa;
+}
+.pulse-variant-dialog .modal-card {
+  width: min(980px, 100%);
+  background: #202023;
+  border: 1px solid #39393f;
+  max-width: none;
+  max-height: calc(100dvh - 48px);
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  border-radius: 12px;
+  overflow: hidden;
+}
+.pulse-variant-dialog .modal-header {
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--border, #383840);
+  font-size: 15px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.pulse-variant-dialog .modal-body {
+  padding: 0;
+  overflow: auto;
+  min-height: 0;
+}
+.pulse-variant-dialog .modal-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 15px 24px;
+  border-top: 1px solid var(--border, #383840);
+}
+.pulse-variant-dialog .modal-actions p {
+  margin: 0 auto 0 0;
+  color: var(--muted, #aaaaba);
+  font-size: 12px;
+}
+.pulse-variant-fields {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+.pulse-variant-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+.pulse-variant-config {
+  padding: 0 24px 24px;
+  min-width: 0;
+}
+.pulse-variant-config > section {
+  padding-top: 23px;
+}
+.pulse-variant-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 11px;
+}
+.pulse-variant-heading h3 {
+  margin: 0;
+  font-size: 13px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.pulse-variant-heading > span {
+  color: var(--muted, #aaaaba);
+  font-size: 11px;
+}
+.pulse-variant-config select,
+.pulse-variant-config input[type="search"] {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+.pulse-variant-sources {
+  border: 1px solid var(--border, #41414a);
+  border-radius: 6px;
+  padding: 0 10px;
+}
+.pulse-variant-sources > summary {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 0;
+  font-size: 12px;
+  cursor: pointer;
+}
+.pulse-variant-sources > summary span {
+  color: var(--muted, #aaaaba);
+  flex-shrink: 0;
+}
+.pulse-variant-source-list {
+  max-height: 220px;
+  overflow: auto;
+  padding-bottom: 6px;
+}
+.pulse-variant-source-list label {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  padding: 7px 3px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.pulse-variant-source-list small {
+  display: block;
+  font-size: 10px;
+  color: var(--muted, #aaaaba);
+}
+.pulse-variant-selection {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0;
+  font-size: 11px;
+}
+.pulse-variant-selection button {
+  margin-left: auto;
+}
+.pulse-variant-preview {
+  padding: 24px;
+  background: #1b1b1f;
+  border-left: 1px solid var(--border, #383840);
+  min-width: 0;
+}
+.pulse-variant-preview article {
+  padding: 14px;
+  margin-bottom: 10px;
+  border: 1px solid var(--border, #383840);
+  border-radius: 7px;
+  background: #232328;
+  font-size: 12px;
+}
+.pulse-variant-preview article strong {
+  font-size: 13px;
+}
+.pulse-variant-preview article p {
+  margin: 9px 0;
+}
+.pulse-variant-preview small {
+  display: block;
+  color: var(--muted, #aaaaba);
+  font-size: 11px;
+}
+.pulse-variant-preview ul {
+  padding-left: 15px;
+  margin: 8px 0;
+  overflow-wrap: anywhere;
+}
+.pulse-variant-preview .section-hint,
+.pulse-variant-empty {
+  font-size: 11px;
+  color: var(--muted, #aaaaba);
+  line-height: 1.6;
+}
+.pulse-variant-dialog .dimension-fork {
+  margin: 0;
+  border: 0;
+  background: none;
+}
+.pulse-variant-dialog .dimension-fork-controls {
+  display: grid;
+  grid-template-columns: 1fr;
+}
+.pulse-variant-dialog .dimension-values-grid {
+  max-height: 200px;
+  overflow: auto;
+}
+.pulse-variant-dialog .pulse-clause {
+  flex-wrap: wrap;
+}
+.pulse-variant-dialog .pulse-clause > span {
+  flex: 1 1 100%;
+}
+@media (max-width: 760px) {
+  .pulse-variant-dialog.overlay-backdrop {
+    padding: 10px;
+  }
+  .pulse-variant-dialog .modal-card {
+    max-height: calc(100dvh - 20px);
+  }
+  .pulse-variant-layout {
+    grid-template-columns: 1fr;
+  }
+  .pulse-variant-preview {
+    border-left: 0;
+    border-top: 1px solid var(--border, #383840);
+  }
+  .pulse-variant-dialog .modal-actions {
+    flex-wrap: wrap;
+  }
+  .pulse-variant-dialog .modal-actions p {
+    flex-basis: 100%;
+  }
+}
+
+.pulse-variant-dialog input,
+.pulse-variant-dialog select {
+  color: #e4e4ea;
+  background: #27272c;
+  border: 1px solid #404048;
+  font: inherit;
+  font-size: 12px;
+  min-height: 30px;
+}
+.pulse-variant-dialog input[type="checkbox"] {
+  min-height: auto;
+  accent-color: #9591ce;
+}
+.pulse-variant-dialog .btn {
+  background: #2a2a30;
+  border-color: #44444e;
+  color: #d9d9e2;
+  font: inherit;
+  font-size: 12px;
+}
+.pulse-variant-dialog .btn.primary {
+  background: #7974b5;
+  border-color: #8f89ca;
+  color: #fff;
+}
+.pulse-variant-dialog .subpanel-title {
+  text-transform: none;
+  letter-spacing: 0;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}
+.pulse-variant-dialog .linkish {
+  background: transparent;
+  border: 0;
+  color: #c7c3ed;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}

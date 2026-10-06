@@ -4,10 +4,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { config } from '../config.js';
-import { closeDb, getDb } from './index.js';
+import { closeDb, getDb, registerDbMigrations } from './index.js';
 
 test('receipt migration preserves legacy IDs, payloads and failures without guessing ownership', () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'receipt-migration-'));
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'receipt-migration-'),
+  );
   config.dataDir = directory;
   config.dbPath = path.join(directory, 'test.db');
   try {
@@ -24,17 +26,69 @@ test('receipt migration preserves legacy IDs, payloads and failures without gues
       INSERT INTO run_metrics VALUES('run','remote-id','metric-id','created','{"name":"created"}','created',NULL,2);`);
     closeDb();
     const migrated = getDb();
-    const rows = migrated.prepare('SELECT * FROM run_metrics ORDER BY item_index').all() as any[];
-    assert.deepEqual(rows.map((row) => row.item_index), [0, 1]);
+    const rows = migrated
+      .prepare('SELECT * FROM run_metrics ORDER BY item_index')
+      .all() as any[];
+    assert.deepEqual(
+      rows.map((row) => row.item_index),
+      [0, 1],
+    );
     assert.equal(rows[0].definition_id, null);
     assert.equal(rows[0].error, 'problem');
     assert.equal(rows[1].definition_id, 'remote-id');
     assert.equal(rows[1].metric_id, 'metric-id');
     assert.equal(rows[1].payload_json, '{"name":"created"}');
     assert.equal(rows[1].creation_status, 'created');
-    assert.equal((migrated.prepare('SELECT site_id FROM runs').get() as any).site_id, null);
+    assert.equal(
+      (migrated.prepare('SELECT site_id FROM runs').get() as any).site_id,
+      null,
+    );
   } finally {
     closeDb();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('feature migration failure rolls back schema and data and retains its pre-migration backup', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'feature-rollback-'));
+  config.dataDir = directory;
+  config.dbPath = path.join(directory, 'test.db');
+  try {
+    const db = getDb();
+    db.prepare('INSERT INTO settings VALUES(?,?)').run('keep', 'original');
+    assert.throws(
+      () =>
+        registerDbMigrations('fixture', [
+          {
+            version: 1,
+            migrate(database) {
+              database.exec(
+                "CREATE TABLE fixture_partial(id TEXT); UPDATE settings SET value='changed' WHERE key='keep'",
+              );
+              throw new Error('Migration interrupted');
+            },
+          },
+        ]),
+      /Migration interrupted/,
+    );
+    assert.equal(
+      db.prepare("SELECT value FROM settings WHERE key='keep'").pluck().get(),
+      'original',
+    );
+    assert.equal(
+      db
+        .prepare("SELECT name FROM sqlite_master WHERE name='fixture_partial'")
+        .get(),
+      undefined,
+    );
+    assert.equal(
+      db.prepare("SELECT key FROM _migrations WHERE key='fixture:001'").get(),
+      undefined,
+    );
+    assert.ok(fs.existsSync(`${config.dbPath}.before-fixture-001.sqlite`));
+  } finally {
+    closeDb();
+    registerDbMigrations('fixture', []);
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });

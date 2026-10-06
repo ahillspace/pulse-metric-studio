@@ -110,6 +110,27 @@ export interface DimensionMemberCount {
   count: number;
 }
 
+export const FilterDimensionFieldSchema = z.object({
+  id: z.string().min(1),
+  name: z.string(),
+  label: z.string(),
+  table: z.string().optional(),
+  role: z.literal('dimension'),
+  dataType: z.literal('string'),
+  providerReference: z.unknown(),
+}).transform((field): FilterDimensionField => ({ ...field, providerReference: field.providerReference }));
+
+export const DimensionValuePageSchema: z.ZodType<DimensionValuePage> = z.object({
+  fieldId: z.string().min(1),
+  values: z.array(z.object({ key: z.string(), label: z.string(), value: z.string() })),
+  truncated: z.boolean(),
+});
+
+export const DimensionMemberCountSchema: z.ZodType<DimensionMemberCount> = z.object({
+  fieldId: z.string().min(1),
+  count: z.number().int().nonnegative(),
+});
+
 const nonBlankIdentifier = z.string().trim().min(1).max(256);
 const selectedValue = z.string().refine(
   (value) => Array.from(value).length <= DIMENSIONAL_FORK_LIMITS.valueCharacters,

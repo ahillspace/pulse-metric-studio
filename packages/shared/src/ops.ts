@@ -30,8 +30,6 @@ export const AddMetricOpSchema = z.object({
     'GRANULARITY_BY_DAY', 'GRANULARITY_BY_WEEK', 'GRANULARITY_BY_MONTH',
     'GRANULARITY_BY_QUARTER', 'GRANULARITY_BY_YEAR',
   ]).optional(),
-  // OVER_TIME = flowing time series; LATEST = latest point-in-time snapshot
-  temporality: z.enum(['OVER_TIME', 'LATEST']).optional(),
   reason: z.string().max(300).optional(),
 });
 

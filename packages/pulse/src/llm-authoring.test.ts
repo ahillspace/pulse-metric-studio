@@ -1,7 +1,7 @@
+import { LlmProviderError,type LlmCompletionTracker,type LlmProvider } from '@pulse-metric-studio/core';
+import type { LlmHealthReasonCode } from '@pulse-metric-studio/shared';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { LlmProviderError, type LlmCompletionTracker, type LlmProvider } from '@pulse-metric-studio/core';
-import type { LlmHealthReasonCode } from '@pulse-metric-studio/shared';
 import { authorOps } from './llm-authoring.js';
 
 test('Pulse does not send infrastructure failures through the JSON repair loop', async () => {
@@ -114,6 +114,38 @@ test('Pulse prompt exposes friendly field names so the model can reason about an
   assert.match(prompt, /Calculation_123456789/);
 });
 
+test('Pulse authoring instructions select business value without arbitrary metric or slicer limits', async () => {
+  const { provider, systemPrompt } = capturingProvider();
+  await authorOps(provider, { catalog: calcCatalog(), chat: [], userMessage: 'Build metrics' });
+  assert.match(systemPrompt(), /Include all metrics and slicers that provide business value/i);
+  assert.match(systemPrompt(), /distinct counts.*significant business value/i);
+  assert.doesNotMatch(systemPrompt(), /Prefer 3-8|3-6 meaningful slicers/);
+});
+
+test('Pulse authoring separates month-to-date metrics from minimum granularity', async () => {
+  const { provider, systemPrompt } = capturingProvider();
+  await authorOps(provider, { catalog: calcCatalog(), chat: [], userMessage: 'Build metrics' });
+  assert.match(systemPrompt(), /Preserve the current minimum time granularity/i);
+  assert.match(systemPrompt(), /explicitly requests.*name or description explicitly states that daily data is unavailable/i);
+  assert.match(systemPrompt(), /month-to-date.*does not change.*minimum/i);
+  assert.doesNotMatch(systemPrompt(), /coarsest sensible display grain|coarser grain for slow-moving data/);
+});
+
+test('Pulse sends transcript-sized requests and prior proposal context without silent truncation', async () => {
+  const { provider, userPrompt } = capturingProvider();
+  const transcript = `Meeting start ${'public synthetic meeting note '.repeat(20000)} final-decision`;
+  await authorOps(provider, {
+    catalog: calcCatalog(), userMessage: transcript,
+    chat: [{ role: 'user', content: transcript }, { role: 'assistant', content: 'Suggested', proposalContext: '[{"op":"ADD_METRIC","fieldId":"Sales"}]' }],
+    selection: { instructions: 'context '.repeat(1000), lastValue: 'kept-at-end' },
+  });
+  const prompt = userPrompt();
+  assert.ok(prompt.includes(`REQUEST: ${transcript}`));
+  assert.ok(prompt.includes(`user: ${transcript}`));
+  assert.match(prompt, /Previous proposed changes.*ADD_METRIC/);
+  assert.match(prompt, /kept-at-end/);
+});
+
 test('Pulse prompt falls back to the formula when a calc field has no author caption', async () => {
   const { provider, userPrompt } = capturingProvider();
   const catalog = calcCatalog({
@@ -192,4 +224,23 @@ test('Pulse commits a single success after a successful repair round-trip', asyn
   });
   assert.equal(calls(), 2);
   assert.deepEqual(commits, [{ kind: 'success' }]);
+});
+
+
+test('assistant operation parsing strips data mode and timeframe decisions', async () => {
+  const { provider } = trackingProvider([JSON.stringify({ assistantMessage: 'Metrics prepared', ops: [
+    { op: 'ADD_METRIC', fieldId: 'Calculation_123456789', temporality: 'LATEST', measurement_period: { range: 'RANGE_LAST_COMPLETE', granularity: 'GRANULARITY_BY_YEAR' } },
+  ] })]);
+  const result = await authorOps(provider, { catalog: calcCatalog(), chat: [], userMessage: 'Build metrics' });
+  assert.equal('temporality' in result.ops[0], false);
+  assert.equal('measurement_period' in result.ops[0], false);
+});
+
+test('assistant prompt reserves timeframe and data mode to the app', async () => {
+  const { provider, systemPrompt } = capturingProvider();
+  await authorOps(provider, { catalog: calcCatalog(), chat: [], userMessage: 'Build metrics' });
+  assert.match(systemPrompt(), /Timeframe and data mode are app-owned/);
+  assert.match(systemPrompt(), /month-to-date and OVER_TIME/);
+  assert.match(systemPrompt(), /minimum time granularity DAY by default/);
+  assert.doesNotMatch(systemPrompt(), /LATEST only for snapshot/);
 });

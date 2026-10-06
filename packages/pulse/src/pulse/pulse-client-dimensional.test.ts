@@ -1,20 +1,21 @@
+import type { TableauSession } from '@pulse-metric-studio/core';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { afterEach, test } from 'node:test';
-import type { TableauSession } from '@pulse-metric-studio/core';
+import { afterEach,test } from 'node:test';
 import {
-  batchCreateGroupSubscriptions,
-  batchCreateUserSubscriptions,
-  batchGetFollowerCounts,
-  forkMetricToTimeframe,
-  getOrCreateDimensionalMetric,
-  getPulseDefinition,
-  getPulseMetric,
-  listDefinitionsInventory,
-  normalizeFollowerCountEnvelope,
-  normalizeSubscriptionEnvelope,
-  queryPulseDimensionDistinctCount,
-  queryPulseDimensionValues,
+batchCreateGroupSubscriptions,
+batchCreateUserSubscriptions,
+batchGetFollowerCounts,
+forkMetricToTimeframe,
+getOrCreateDimensionalMetric,
+getPulseDefinition,
+getPulseMetric,
+listDefinitionsInventory,
+listSubscriptionsForMetric,
+normalizeFollowerCountEnvelope,
+normalizeSubscriptionEnvelope,
+queryPulseDimensionDistinctCount,
+queryPulseDimensionValues,
 } from './pulse-client.js';
 
 const originalFetch = globalThis.fetch;
@@ -219,11 +220,13 @@ test('follower-count normalization supports both provider record aliases', () =>
 
 test('follower counts batch every metric ID beyond the provider limit', async () => {
   const requestBatches: string[][] = [];
-  globalThis.fetch = async (_input, init) => {
-    const body = JSON.parse(String(init?.body)) as { metric_ids: string[] };
-    requestBatches.push(body.metric_ids);
+  globalThis.fetch = async (input, init) => {
+    assert.equal(init?.method ?? 'GET', 'GET');
+    assert.equal(init?.body, undefined);
+    const metricIds = new URL(String(input)).searchParams.get('metric_ids')!.split(',');
+    requestBatches.push(metricIds);
     return Response.json({
-      follower_counts: body.metric_ids.map((metricId) => ({ metric_id: metricId, follower_count: 1 })),
+      follower_counts: metricIds.map((metricId) => ({ metric_id: metricId, follower_count: 1 })),
     });
   };
   const metricIds = Array.from({ length: 405 }, (_, index) => `metric-${index}`);
@@ -368,4 +371,19 @@ test('VDS distinct query rejects rows outside the captured one-column string-or-
       rowLimit: 1_000,
     }), /unsupported row shape/);
   }
+});
+
+
+test('follower inventory reads every subscription page and rejects repeated continuation', async () => {
+  let calls=0;
+  globalThis.fetch=async input=>{
+    const url=new URL(String(input));calls++;
+    return Response.json(url.searchParams.has('page_token')
+      ? {subscriptions:[{id:'second',follower:{group_id:'group'}}]}
+      : {subscriptions:[{id:'first',follower:{user_id:'user'}}],next_page_token:'more'});
+  };
+  const subscriptions=await listSubscriptionsForMetric(session,'metric');
+  assert.equal(subscriptions.length,2);assert.equal(calls,2);
+  globalThis.fetch=async()=>Response.json({subscriptions:[{id:'first',follower:{user_id:'user'}}],next_page_token:'repeat'});
+  await assert.rejects(()=>listSubscriptionsForMetric(session,'metric'),/continuation/i);
 });

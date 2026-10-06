@@ -5,6 +5,72 @@ import { config } from '../config.js';
 export type Db = Database.Database;
 
 let db: Db | null = null;
+export interface FeatureDbMigration {
+  version: number;
+  migrate(database: Db): void;
+}
+const featureMigrations = new Map<string, readonly FeatureDbMigration[]>();
+
+/** Register product-owned SQL without making database infrastructure import a product. */
+export function registerDbMigrations(
+  namespace: string,
+  migrations: readonly FeatureDbMigration[],
+): void {
+  if (!/^[a-z][a-z0-9-]+$/.test(namespace) || namespace === 'migration')
+    throw new Error('Invalid migration namespace.');
+  featureMigrations.set(namespace, migrations);
+  if (db) applyFeatureMigrations(db, namespace, migrations);
+}
+
+function assertSupportedMigrations(
+  database: Db,
+  namespace: string,
+  versions: ReadonlySet<number>,
+): void {
+  if (
+    !database
+      .prepare("SELECT 1 FROM sqlite_master WHERE name = '_migrations'")
+      .get()
+  )
+    return;
+  const rows = database
+    .prepare('SELECT key FROM _migrations WHERE key LIKE ?')
+    .all(`${namespace}:%`) as Array<{ key: string }>;
+  for (const row of rows) {
+    if (!versions.has(Number(row.key.slice(namespace.length + 1)))) {
+      throw new Error(
+        `This database contains an unsupported ${namespace} schema version. Open it with the newer app.`,
+      );
+    }
+  }
+}
+
+function applyFeatureMigrations(
+  database: Db,
+  namespace: string,
+  migrations: readonly FeatureDbMigration[],
+): void {
+  assertSupportedMigrations(
+    database,
+    namespace,
+    new Set(migrations.map((migration) => migration.version)),
+  );
+  for (const migration of migrations) {
+    const key = `${namespace}:${String(migration.version).padStart(3, '0')}`;
+    if (database.prepare('SELECT 1 FROM _migrations WHERE key = ?').get(key))
+      continue;
+    // VACUUM INTO includes committed WAL content and creates a consistent backup.
+    const backupPath = `${config.dbPath}.before-${key.replace(':', '-')}.sqlite`;
+    if (!fs.existsSync(backupPath))
+      database.prepare('VACUUM INTO ?').run(backupPath);
+    database.transaction(() => {
+      migration.migrate(database);
+      database
+        .prepare('INSERT INTO _migrations(key, applied_at) VALUES (?, ?)')
+        .run(key, new Date().toISOString());
+    })();
+  }
+}
 
 const MIGRATIONS: string[] = [
   // 001 — initial schema
@@ -110,24 +176,49 @@ export function getDb(): Db {
   if (db) return db;
   fs.mkdirSync(config.dataDir, { recursive: true });
   db = new Database(config.dbPath);
-  db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
+  try {
+    assertSupportedMigrations(
+      db,
+      'migration',
+      new Set(MIGRATIONS.map((_, index) => index + 1)),
+    );
+    for (const [namespace, migrations] of featureMigrations)
+      assertSupportedMigrations(
+        db,
+        namespace,
+        new Set(migrations.map((migration) => migration.version)),
+      );
+    db.pragma('journal_mode = WAL');
+    db.pragma('foreign_keys = ON');
 
-  db.exec('CREATE TABLE IF NOT EXISTS _migrations (key TEXT PRIMARY KEY, applied_at TEXT NOT NULL)');
-  const appliedRows = db.prepare('SELECT key FROM _migrations').all() as Array<{ key: string }>;
-  const appliedKeys = new Set(appliedRows.map((r) => r.key));
+    db.exec(
+      'CREATE TABLE IF NOT EXISTS _migrations (key TEXT PRIMARY KEY, applied_at TEXT NOT NULL)',
+    );
+    const appliedRows = db
+      .prepare('SELECT key FROM _migrations')
+      .all() as Array<{ key: string }>;
+    const appliedKeys = new Set(appliedRows.map((r) => r.key));
 
-  MIGRATIONS.forEach((sql, i) => {
-    const key = `migration:${String(i + 1).padStart(3, '0')}`;
-    if (appliedKeys.has(key)) return;
-    const tx = db!.transaction(() => {
-      db!.exec(sql);
-      db!.prepare('INSERT INTO _migrations (key, applied_at) VALUES (?, ?)').run(key, new Date().toISOString());
+    MIGRATIONS.forEach((sql, i) => {
+      const key = `migration:${String(i + 1).padStart(3, '0')}`;
+      if (appliedKeys.has(key)) return;
+      const tx = db!.transaction(() => {
+        db!.exec(sql);
+        db!
+          .prepare('INSERT INTO _migrations (key, applied_at) VALUES (?, ?)')
+          .run(key, new Date().toISOString());
+      });
+      tx();
     });
-    tx();
-  });
+    for (const [namespace, migrations] of featureMigrations)
+      applyFeatureMigrations(db, namespace, migrations);
 
-  return db;
+    return db;
+  } catch (error) {
+    db.close();
+    db = null;
+    throw error;
+  }
 }
 
 export function closeDb(): void {
@@ -138,10 +229,14 @@ export function closeDb(): void {
 // -- settings helpers ---------------------------------------------------------
 
 export function getSetting(db: Db, key: string): string | null {
-  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined;
+  const row = db
+    .prepare('SELECT value FROM settings WHERE key = ?')
+    .get(key) as { value: string } | undefined;
   return row?.value ?? null;
 }
 
 export function setSetting(db: Db, key: string, value: string): void {
-  db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value);
+  db.prepare(
+    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+  ).run(key, value);
 }

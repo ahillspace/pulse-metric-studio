@@ -25,3 +25,8 @@ src-tauri/gen/
 /.opencode/commands/opsx-*.md
 /.opencode/skills/openspec-*/
 /openspec/
+
+# Local qualification and packaging artifacts
+/.codex/
+/native-artifacts/
+/packages/server/.generated-entry.mjs

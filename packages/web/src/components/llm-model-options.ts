@@ -26,6 +26,6 @@ export function openCodeCatalogProfileId(
   existing: boolean,
   persistedProtocol: string | undefined,
   profileId: string,
-): string {
-  return existing && persistedProtocol === 'opencode' ? profileId : 'opencode';
+): string | null {
+  return existing && persistedProtocol === 'opencode' ? profileId : null;
 }

@@ -10,57 +10,6 @@ const FOCUSABLE_SELECTOR = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(', ');
 
-export function WorkbenchFrame({ topbar, sidebar, children }: { topbar: ReactNode; sidebar?: ReactNode; children: ReactNode }) {
-  return (
-    <div className="app-shell">
-      {topbar}
-      {sidebar ? (
-        <div className="shell-body">
-          {sidebar}
-          <main className="main-col">{children}</main>
-        </div>
-      ) : (
-        <main className="main-col">{children}</main>
-      )}
-    </div>
-  );
-}
-
-export function WorkbenchPanel({
-  section,
-  id,
-  kicker,
-  title,
-  actions,
-  children,
-}: {
-  section: string;
-  id: string;
-  kicker: string;
-  title: string;
-  actions?: ReactNode;
-  children?: ReactNode;
-}) {
-  return (
-    <section className="panel workbench-panel" id={id} data-workbench-section={section} aria-labelledby={`${id}-title`}>
-      <div className="panel-header">
-        <span className="panel-kicker">{kicker}</span>
-        <h2 className="panel-title" id={`${id}-title`}>{title}</h2>
-        {actions && <div className="panel-actions">{actions}</div>}
-      </div>
-      {children !== undefined && <div className="panel-body">{children}</div>}
-    </section>
-  );
-}
-
-export function DataTableFrame({ label, children }: { label: string; children: ReactNode }) {
-  return <div className="data-table-frame" role="region" aria-label={label}>{children}</div>;
-}
-
-export function EmptyState({ children }: { children: ReactNode }) {
-  return <div className="empty-note" role="status">{children}</div>;
-}
-
 export function WorkbenchModal({
   title,
   children,

@@ -1,4 +1,4 @@
-﻿export * from './config.js';
+export * from './config.js';
 export * from './cors.js';
 export * from './db/crypto.js';
 export * from './db/index.js';

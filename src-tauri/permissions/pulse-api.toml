@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "pulse-api"
+description = "Allows bounded Pulse API requests from the local main window."
+commands.allow = ["pulse_api_request"]

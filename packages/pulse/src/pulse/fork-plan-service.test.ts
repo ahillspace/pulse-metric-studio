@@ -1,23 +1,28 @@
-import assert from 'node:assert/strict';
-import { test } from 'node:test';
-import Fastify from 'fastify';
 import {
-  clearSession,
-  setSession,
-  TableauError,
-  type TableauSession,
+clearSession,closeDb,config,setSession,
+TableauError,
+type TableauSession
 } from '@pulse-metric-studio/core';
 import type { DatasourceCatalog } from '@pulse-metric-studio/shared';
+import Fastify from 'fastify';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { after,test } from 'node:test';
 import {
-  PulseForkPlanError,
-  PulseForkPlanService,
-  canonicalizeForkPlanRequest,
-  forkPlanHttpStatus,
-  type PulseForkPlanDependencies,
-  type PulseForkPlanRequestV1,
-  type PulseForkPlanSummary,
+canonicalizeForkPlanRequest,
+forkPlanHttpStatus,
+PulseForkPlanError,
+PulseForkPlanService,
+type PulseForkPlanDependencies,
+type PulseForkPlanSummary
 } from './fork-plan-service.js';
-import { executeLegacyPulseForks, registerPulseRoutes } from './routes.js';
+import { registerPulseRoutes } from './routes.js';
+
+const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pulse-fork-plan-'));
+config.dataDir = directory; config.dbPath = path.join(directory, 'test.db');
+after(() => { closeDb(); fs.rmSync(directory, { recursive: true, force: true }); });
 
 const session: TableauSession = {
   serverUrl: 'https://example.test',
@@ -216,7 +221,7 @@ test('fork route waits for in-flight work after auth termination and preserves c
   setSession(session, { connectionId: 'fork-settled-test', patSecret: 'test' });
   let settled = false;
   const response = app.inject({ method: 'POST', url: '/api/pulse/metrics/fork', payload: {
-    version: 1, sourceMetricIds: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'], timeframe: { key: 'LAST_MONTH' }, clauses: [],
+    context: { connectionId: 'fork-settled-test', serverUrl: session.serverUrl, siteId: session.siteId, datasourceLuid: 'datasource-1' }, version: 1, sourceMetricIds: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'], timeframe: { key: 'LAST_MONTH' }, clauses: [],
   } }).then((result) => { settled = true; return result; });
   try {
     await aDone;
@@ -393,105 +398,6 @@ test('validates and canonicalizes the combined request', () => {
   );
 });
 
-test('legacy date forking chunks 100 metrics, bounds execution, and preserves request order', async () => {
-  const forks = Array.from({ length: 100 }, (_, index) => ({
-    sourceMetricId: `metric-${String(100 - index).padStart(3, '0')}`,
-    timeframeKey: 'LAST_30_DAYS',
-  }));
-  const received: PulseForkPlanRequestV1[] = [];
-  let active = 0;
-  let maxActive = 0;
-
-  const response = await executeLegacyPulseForks(session, forks, {
-    forkMetrics: async (_session, input) => {
-      const request = input as PulseForkPlanRequestV1;
-      received.push(request);
-      active += 1;
-      maxActive = Math.max(maxActive, active);
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      active -= 1;
-      return {
-        attempted: request.sourceMetricIds.length,
-        created: request.sourceMetricIds.length,
-        existing: 0,
-        failed: 0,
-        pendingVisibility: 0,
-        results: [...request.sourceMetricIds].reverse().map((sourceMetricId) => ({
-          sourceMetricId,
-          status: 'visible' as const,
-          creationStatus: 'created' as const,
-          reconciliationStatus: 'visible' as const,
-          metricId: `fork-${sourceMetricId}`,
-          requestedSpecification: {},
-        })),
-      };
-    },
-  });
-
-  assert.deepEqual(received.map((request) => request.sourceMetricIds.length), [20, 20, 20, 20, 20]);
-  assert.equal(maxActive, 1);
-  assert.deepEqual(
-    response.outcomes.map((outcome) => outcome.sourceMetricId),
-    forks.map((fork) => fork.sourceMetricId),
-  );
-  assert.deepEqual(
-    response.outcomes.map((outcome) => outcome.derivedMetricId),
-    forks.map((fork) => `fork-${fork.sourceMetricId}`),
-  );
-});
-
-test('legacy date forking validates every group and chunk before provider calls', async () => {
-  let providerCalls = 0;
-  const service = {
-    forkMetrics: async (): Promise<PulseForkPlanSummary> => {
-      providerCalls += 1;
-      return { attempted: 0, created: 0, existing: 0, failed: 0, pendingVisibility: 0, results: [] };
-    },
-  };
-
-  await assert.rejects(
-    () => executeLegacyPulseForks(session, [
-      { sourceMetricId: 'metric-valid', timeframeKey: 'LAST_30_DAYS' },
-      { sourceMetricId: 'metric-invalid', timeframeKey: 'NOT_A_TIMEFRAME' },
-    ], service),
-    /Unknown or invalid timeframe/,
-  );
-  assert.equal(providerCalls, 0);
-
-  await assert.rejects(
-    () => executeLegacyPulseForks(session, [
-      ...Array.from({ length: 20 }, (_, index) => ({
-        sourceMetricId: `metric-${String(index).padStart(2, '0')}`,
-        timeframeKey: 'LAST_30_DAYS',
-      })),
-      { sourceMetricId: 'x'.repeat(257), timeframeKey: 'LAST_30_DAYS' },
-    ], service),
-    /must contain between 1 and 256 characters/,
-  );
-  assert.equal(providerCalls, 0);
-});
-
-test('legacy date forking no longer caps the metric count and chunks every source to the provider', async () => {
-  let providerCalls = 0;
-  await assert.doesNotReject(
-    () => executeLegacyPulseForks(
-      session,
-      Array.from({ length: 101 }, (_, index) => ({
-        sourceMetricId: `metric-${index}`,
-        timeframeKey: 'LAST_30_DAYS',
-      })),
-      {
-        forkMetrics: async () => {
-          providerCalls += 1;
-          return { attempted: 0, created: 0, existing: 0, failed: 0, pendingVisibility: 0, results: [] };
-        },
-      },
-    ),
-  );
-  // 101 same-timeframe sources chunk into ceil(101 / 20) = 6 provider calls.
-  assert.equal(providerCalls, 6);
-});
-
 test('combined route retains the canonical summary on a non-2xx response', async () => {
   const expected: PulseForkPlanSummary = {
     attempted: 1,
@@ -508,7 +414,7 @@ test('combined route retains the canonical summary on a non-2xx response', async
   };
   let received: unknown;
   const app = Fastify({ logger: false });
-  setSession(session);
+  setSession(session, { connectionId: 'fork-settled-test', patSecret: 'test' });
   registerPulseRoutes(app, {
     forkPlanService: {
       forkMetrics: async (_session, input) => {
@@ -518,7 +424,7 @@ test('combined route retains the canonical summary on a non-2xx response', async
     },
   });
   try {
-    const payload = { version: 1, sourceMetricIds: ['metric-1'], timeframe: { key: 'LAST_30_DAYS' }, clauses: [] };
+    const payload = { context: { connectionId: 'fork-settled-test', serverUrl: session.serverUrl, siteId: session.siteId, datasourceLuid: 'datasource-1' }, version: 1, sourceMetricIds: ['metric-1'], timeframe: { key: 'LAST_30_DAYS' }, clauses: [] };
     const response = await app.inject({ method: 'POST', url: '/api/pulse/metrics/fork', payload });
     assert.equal(response.statusCode, 422);
     assert.deepEqual(received, payload);
@@ -529,77 +435,26 @@ test('combined route retains the canonical summary on a non-2xx response', async
   }
 });
 
-test('legacy date-fork route groups requests through canonical ownership results', async () => {
-  const received: unknown[] = [];
-  const app = Fastify({ logger: false });
-  setSession(session);
-  registerPulseRoutes(app, {
-    forkPlanService: {
-      forkMetrics: async (_session, input) => {
-        received.push(input);
-        const request = input as {
-          sourceMetricIds: string[];
-          timeframe: { key: string };
-        };
-        const mismatch = request.timeframe.key === 'LAST_30_DAYS';
-        return {
-          attempted: request.sourceMetricIds.length,
-          created: mismatch ? request.sourceMetricIds.length : 0,
-          existing: mismatch ? 0 : request.sourceMetricIds.length,
-          failed: mismatch ? request.sourceMetricIds.length : 0,
-          pendingVisibility: mismatch ? 0 : request.sourceMetricIds.length,
-          results: request.sourceMetricIds.map((sourceMetricId) => ({
-            sourceMetricId,
-            status: mismatch ? 'ownership_mismatch' : 'pending_visibility',
-            creationStatus: mismatch ? 'created' : 'existing',
-            reconciliationStatus: mismatch ? 'ownership_mismatch' : 'pending_visibility',
-            metricId: mismatch ? `metric-wrong-owner-${sourceMetricId}` : `metric-pending-${sourceMetricId}`,
-            requestedSpecification: { measurement_period: { key: request.timeframe.key } },
-            ...(mismatch ? { error: 'Metric belongs to another definition.' } : {}),
-          })),
-        };
-      },
+
+
+test('canonical planner handles more than one hundred sources with bounded provider concurrency', async () => {
+  let active = 0;
+  let maximum = 0;
+  const service = new PulseForkPlanService(dependencies({
+    getOrCreate: async () => {
+      active++;
+      maximum = Math.max(maximum, active);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      active--;
+      return { metricId: 'bounded-result', created: true };
     },
+  }));
+  const result = await service.forkMetrics(session, {
+    version: 1,
+    sourceMetricIds: Array.from({ length: 125 }, (_, index) => `source-${index}`),
+    timeframe: { key: 'LAST_30_DAYS' }, clauses: [],
   });
-  try {
-    const response = await app.inject({
-      method: 'POST',
-      url: '/api/pulse/fork',
-      payload: {
-        forks: [
-          { sourceMetricId: 'metric-1', timeframeKey: 'LAST_30_DAYS' },
-          { sourceMetricId: 'metric-2', timeframeKey: 'LAST_7_DAYS' },
-          { sourceMetricId: 'metric-3', timeframeKey: 'LAST_30_DAYS' },
-        ],
-      },
-    });
-    assert.equal(response.statusCode, 200);
-    assert.deepEqual(received, [
-      {
-        version: 1,
-        sourceMetricIds: ['metric-1', 'metric-3'],
-        timeframe: { key: 'LAST_30_DAYS' },
-        clauses: [],
-      },
-      {
-        version: 1,
-        sourceMetricIds: ['metric-2'],
-        timeframe: { key: 'LAST_7_DAYS' },
-        clauses: [],
-      },
-    ]);
-    const outcomes = response.json().outcomes as Array<Record<string, unknown>>;
-    assert.equal(outcomes[0]?.status, 'ownership_mismatch');
-    assert.equal(outcomes[0]?.creationStatus, 'created');
-    assert.deepEqual(outcomes[0]?.requestedSpecification, {
-      measurement_period: { key: 'LAST_30_DAYS' },
-    });
-    assert.equal(outcomes[1]?.status, 'pending_visibility');
-    assert.equal(outcomes[1]?.creationStatus, 'existing');
-    assert.equal(outcomes[2]?.sourceMetricId, 'metric-3');
-    assert.equal(outcomes[2]?.status, 'ownership_mismatch');
-  } finally {
-    clearSession();
-    await app.close();
-  }
+  assert.equal(result.attempted, 125);
+  assert.equal(result.created, 125);
+  assert.ok(maximum <= 5);
 });

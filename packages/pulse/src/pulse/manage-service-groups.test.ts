@@ -1,7 +1,7 @@
-import assert from 'node:assert/strict';
-import { afterEach, test } from 'node:test';
 import type { TableauSession } from '@pulse-metric-studio/core';
-import { listUserGroupIds } from './manage-service.js';
+import assert from 'node:assert/strict';
+import { afterEach,test } from 'node:test';
+import { listUserGroupIds } from '../application/subscriptions.js';
 
 const originalFetch = globalThis.fetch;
 const session: TableauSession = {

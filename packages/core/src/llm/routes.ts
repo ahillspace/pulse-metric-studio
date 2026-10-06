@@ -20,6 +20,7 @@ export interface LlmProviderService {
   status(): Promise<LlmStatusResponse>;
   listProfiles(): Promise<LlmProfilePublic[]>;
   listModels(profileId: string): Promise<LlmModelCatalogResponse>;
+  listSetupModels(command?: string): Promise<LlmModelCatalogResponse>;
   saveProfile(input: LlmProfileWrite): Promise<LlmProfilePublic>;
   deleteProfile(id: string): Promise<void>;
   setActive(id: string): Promise<string>;
@@ -35,6 +36,11 @@ export function registerLlmRoutes(
 
   app.get('/api/llm/status', async () => service.status());
   app.get('/api/llm/profiles', async () => ({ profiles: await service.listProfiles() }));
+  app.get('/api/llm/setup/opencode/models', async (request) => {
+    const { command } = request.query as { command?: unknown };
+    if (command !== undefined && (typeof command !== 'string' || command.length > 4096 || /[\r\n\0]/.test(command))) throw app.httpErrors.badRequest('Invalid OpenCode command.');
+    return service.listSetupModels(command as string | undefined);
+  });
 
   app.get('/api/llm/profiles/:id/models', async (request) => {
     const id = String((request.params as { id?: string }).id ?? '');

@@ -60,3 +60,18 @@ test('unsupported runtimes fail with the supported SQLite runtime floor', () => 
 test('packaged SQLite check cannot fall back to a working repository dependency', () => {
   assert.throws(() => verifyPackagedSqlite(process.execPath, path.join(root, 'scripts')), /Packaged Node\/SQLite compatibility check failed/);
 });
+
+
+test('packaged desktop permits local IPC only and preserves product identity', () => {
+  const config = JSON.parse(fs.readFileSync(path.join(root, 'src-tauri/tauri.conf.json'), 'utf8'));
+  const capability = JSON.parse(fs.readFileSync(path.join(root, 'src-tauri/capabilities/default.json'), 'utf8'));
+  assert.equal(config.identifier, 'com.ahillspace.pulsemetricstudio');
+  assert.equal(config.bundle.publisher, 'ahillspace');
+  assert.equal(config.bundle.macOS.minimumSystemVersion, '11.0');
+  assert.match(config.app.security.csp, /connect-src ipc: http:\/\/ipc.localhost/);
+  assert.equal(capability.local, true);
+  assert.equal(capability.remote, undefined);
+  assert.ok(capability.permissions.includes('pulse-api'));
+  assert.ok(capability.permissions.includes('credential-broker'));
+  assert.deepEqual(capability.permissions, ['core:event:allow-listen', 'core:event:allow-unlisten', 'credential-broker', 'pulse-api', { identifier: 'opener:allow-open-url', allow: [{ url: 'https://*' }, { url: 'http://*' }] }]);
+});

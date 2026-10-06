@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import Fastify from 'fastify';
+import { registerLlmRoutes } from './routes.js';
 import type { LlmProfileWrite } from '@pulse-metric-studio/shared';
 import {
   LlmModelCatalogError,
@@ -34,6 +36,54 @@ function provider(id: string, complete: () => Promise<'ok'> = async () => 'ok'):
     },
   };
 }
+
+test('clean installation profiles route offers no synthetic broken providers', async () => {
+  const registry = new ProviderRegistry({ store: memoryProfiles([]), stateStore: memoryState(null), environment: {} });
+  const app = Fastify();
+  registerLlmRoutes(app, { service: registry });
+  try {
+    const response = await app.inject('/api/llm/profiles');
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.json(), { profiles: [] });
+  } finally { await app.close(); }
+});
+
+test('clean setup discovers OpenCode models without creating a profile', async () => {
+  const registry = new ProviderRegistry({ store: memoryProfiles([]), stateStore: memoryState(null), environment: {}, opencodeModelLister: async () => [{ id: 'example/model', label: 'Example model' }] });
+  const app = Fastify();
+  registerLlmRoutes(app, { service: registry });
+  try {
+    const response = await app.inject('/api/llm/setup/opencode/models');
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().models[0].id, 'example/model');
+    assert.deepEqual(await registry.listProfiles(), []);
+  } finally { await app.close(); }
+});
+
+test('saved profiles remain intact regardless of availability or empty environment', async () => {
+  const profiles = [storedProfile('opencode', 'opencode', 'saved/model'), storedProfile('company', 'openai-responses', 'company-model')];
+  const registry = new ProviderRegistry({ store: memoryProfiles(profiles), stateStore: memoryState('company'), environment: {} });
+  assert.deepEqual(await registry.listProfiles(), profiles.map(toPublicProfile));
+});
+
+test('explicit environment profiles remain available and saved profiles take precedence', async () => {
+  const saved = storedProfile('opencode', 'opencode', 'saved/model');
+  const registry = new ProviderRegistry({ store: memoryProfiles([saved]), stateStore: memoryState('opencode'), environment: { OPENCODE_MODEL: 'environment/model', OPENAI_COMPAT_MODEL: 'api-model', OPENAI_COMPAT_BASE_URL: 'https://api.example.test/v1' } });
+  const profiles = await registry.listProfiles();
+  assert.equal(profiles.length, 2);
+  assert.deepEqual(profiles.find(profile => profile.id === 'opencode'), toPublicProfile(saved));
+  assert.equal(profiles.find(profile => profile.id === 'openai-compat')?.model, 'api-model');
+});
+
+test('OpenCode executable location alone is a setup preference, not a configured provider', async () => {
+  let command = '';
+  const registry = new ProviderRegistry({ store: memoryProfiles([]), stateStore: memoryState(null), environment: { OPENCODE_BIN: 'custom-opencode' }, opencodeModelLister: async profile => { command = profile.command; return []; } });
+  assert.deepEqual(await registry.listProfiles(), []);
+  await registry.listSetupModels();
+  assert.equal(command, 'custom-opencode');
+  await registry.listSetupModels('other-opencode');
+  assert.equal(command, 'other-opencode');
+});
 
 test('stored automatic selection migrates to OpenCode and reports yellow readiness', async () => {
   const state = memoryState('auto');

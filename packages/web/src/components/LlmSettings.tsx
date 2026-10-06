@@ -1,3 +1,4 @@
+import { desktopFetch } from '../desktop-transport';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   LlmAuthMode,
@@ -9,10 +10,12 @@ import type {
 } from '@pulse-metric-studio/shared';
 import { WorkbenchModal } from './workbench';
 import { buildOpenCodeModelOptions, isCurrentOpenCodeModel, openCodeCatalogProfileId } from './llm-model-options';
-import { LLM_HEALTH_EVENT, type LlmHealthDetail } from '../llm-health-events';
+import { ProviderSetupChoices, newProviderId, providerChoice, type ProviderChoice } from './llm-provider-choices';
+import './llm-settings.css';
+import { LLM_HEALTH_EVENT } from '../llm-health-events';
 
 async function request<T>(url: string, method = 'GET', body?: unknown): Promise<T> {
-  const response = await fetch(url, { method, headers: body === undefined ? undefined : { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
+  const response = await desktopFetch(url, { method, headers: body === undefined ? undefined : { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
   const data = await response.json().catch(() => null);
   if (!response.ok) throw new Error(data?.error?.message ?? data?.message ?? (typeof data?.error === 'string' ? data.error : `Request failed (${response.status})`));
   return data as T;
@@ -22,6 +25,7 @@ const llmApi = {
   status: () => request<LlmStatusResponse>('/api/llm/status'),
   profiles: () => request<{ profiles: LlmProfilePublic[] }>('/api/llm/profiles'),
   models: (id: string) => request<LlmModelCatalogResponse>(`/api/llm/profiles/${encodeURIComponent(id)}/models`),
+  setupModels: (command: string) => request<LlmModelCatalogResponse>(`/api/llm/setup/opencode/models?command=${encodeURIComponent(command)}`),
   save: (id: string, profile: Record<string, unknown>) => request<LlmProfilePublic>(`/api/llm/profiles/${encodeURIComponent(id)}`, 'PUT', profile),
   remove: (id: string) => request<{ ok: true }>(`/api/llm/profiles/${encodeURIComponent(id)}`, 'DELETE'),
   test: (id: string) => request<LlmProviderStatus>(`/api/llm/profiles/${encodeURIComponent(id)}/test`, 'POST', {}),
@@ -56,36 +60,32 @@ export function LlmBadge() {
   const [form, setForm] = useState<ProfileForm>(emptyForm);
   const [formDirty, setFormDirty] = useState(false);
   const [editingExisting, setEditingExisting] = useState(false);
+  const [choosing, setChoosing] = useState(true);
   const editorInitialized = useRef(false);
+  const loadSequence = useRef(0);
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<{ tone: 'success' | 'error'; message: string } | null>(null);
-  // Set when a real chat send fails, so the dot reflects actual assistant health
-  // without polling. A successful send (or reloading status) clears it.
-  const [sendFailed, setSendFailed] = useState(false);
-
   const load = useCallback(async () => {
+    const sequence = ++loadSequence.current;
     try {
       const [nextStatus, nextProfiles] = await Promise.all([llmApi.status(), llmApi.profiles()]);
+      if (sequence !== loadSequence.current) return;
       setStatus(nextStatus);
       setProfiles(nextProfiles.profiles);
-    } catch { setStatus(null); }
+    } catch { if (sequence === loadSequence.current) setStatus(null); }
   }, []);
 
   // Status is fetched once on mount, then only when there is a reason for it to
   // have changed: the settings modal opens, a provider is saved/tested/selected,
   // or an assistant send resolves. No interval polling.
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void load(); return () => { loadSequence.current++; }; }, [load]);
   useEffect(() => {
     const show = () => setOpen(true);
     window.addEventListener('open-llm-settings', show);
     return () => window.removeEventListener('open-llm-settings', show);
   }, []);
   useEffect(() => {
-    const onHealth = (event: Event) => {
-      const ok = (event as CustomEvent<LlmHealthDetail>).detail?.ok;
-      if (ok) { setSendFailed(false); void load(); }
-      else setSendFailed(true);
-    };
+    const onHealth = () => { void load(); };
     window.addEventListener(LLM_HEALTH_EVENT, onHealth);
     return () => window.removeEventListener(LLM_HEALTH_EVENT, onHealth);
   }, [load]);
@@ -98,17 +98,15 @@ export function LlmBadge() {
     setForm(formFromProfile(profile));
     setFormDirty(false);
     setEditingExisting(true);
+    setChoosing(false);
   }, [open, profiles, status]);
 
   const activeLabel = status?.providers[status?.active ?? '']?.label ?? 'Assistant settings';
-  const baseReadiness = status?.readiness ?? {
+  const readiness = status?.readiness ?? {
     state: 'red' as const,
     message: 'AI readiness is unavailable.',
     lastSuccessfulAt: null,
   };
-  const readiness = sendFailed
-    ? { ...baseReadiness, state: 'red' as const, message: 'The last assistant request failed. Open settings to check the provider.' }
-    : baseReadiness;
   const readinessLabel = readiness.state === 'green'
     ? 'AI ready'
     : readiness.state === 'yellow'
@@ -121,7 +119,14 @@ export function LlmBadge() {
     setForm(profile ? formFromProfile(profile) : emptyForm);
     setFormDirty(false);
     setEditingExisting(Boolean(profile));
+    setChoosing(!profile);
     setFeedback(null);
+  };
+
+  const choose = (choice: ProviderChoice) => {
+    editorInitialized.current = true;
+    setForm({ ...emptyForm, id: newProviderId(choice.id, profiles), label: choice.label, protocol: choice.protocol, authMode: choice.authMode, baseUrl: choice.baseUrl, region: choice.id === 'bedrock' ? 'us-east-1' : '' });
+    setChoosing(false); setEditingExisting(false); setFormDirty(true); setFeedback(null);
   };
 
   const save = async () => {
@@ -166,6 +171,7 @@ export function LlmBadge() {
         title={readinessTooltip}
         aria-label={`${activeLabel}. ${readinessTooltip} Open assistant provider settings.`}
       >
+        <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true"><path d="M4 6h12M4 14h12M7 3v6m6 2v6" /></svg>
         <span className={`llm-readiness-dot ${readiness.state}`} aria-hidden="true" />
         <span>{activeLabel}</span>
         <span className="sr-only">{readinessLabel}</span>
@@ -175,10 +181,10 @@ export function LlmBadge() {
           <p className="section-hint">Configure OpenCode or an API provider, test its connection, then select it for Pulse Metric Studio.</p>
           <div className="llm-settings-layout">
             <div className="llm-profile-list">
-              {Object.values(status?.providers ?? {}).map((provider) => <button key={provider.id} className={`llm-profile-card ${status?.active === provider.id ? 'active' : ''}`} type="button" onClick={() => { const profile = profiles.find((entry) => entry.id === provider.id); if (profile) edit(profile); }}><strong>{provider.label}</strong><span className={`llm-health ${provider.healthy ? 'healthy' : provider.healthy === false ? 'unhealthy' : ''}`}>{provider.healthy ? 'Healthy' : provider.reason || 'Not tested'}{provider.resolvedModel ? ` | ${provider.resolvedModel}` : ''}</span></button>)}
-              <button className="btn" type="button" onClick={() => edit()}>Add provider profile</button>
+              {profiles.map(profile => { const provider = status?.providers[profile.id]; return <button key={profile.id} className={`llm-profile-card ${!choosing && form.id === profile.id ? 'active' : ''}`} type="button" onClick={() => edit(profile)}><strong>{profile.label}</strong><span>{providerChoice(profile.protocol).access}{status?.active === profile.id ? ' · In use' : ''}</span><span className={`llm-health ${provider?.healthy ? 'healthy' : provider?.healthy === false ? 'unhealthy' : ''}`}>{provider?.healthy ? 'Connected' : provider?.reason || 'Not tested'}</span></button>; })}
+              <button className="btn" type="button" onClick={() => edit()}>Add provider</button>
             </div>
-            <ProfileEditor form={form} setForm={(next) => { editorInitialized.current = true; setForm(next); setFormDirty(true); }} dirty={formDirty} existing={editingExisting} busy={busy} status={form.id ? status?.providers[form.id] : undefined} onSave={save} onTest={testProfile} onSelect={() => void selectProvider(form.id)} onDelete={() => void deleteProfile()} />
+            {choosing ? <ProviderSetupChoices onChoose={choose} /> : <ProfileEditor key={editingExisting ? form.id : 'new'} form={form} setForm={(next) => { editorInitialized.current = true; setForm(next); setFormDirty(true); }} dirty={formDirty} existing={editingExisting} busy={busy} status={form.id ? status?.providers[form.id] : undefined} onSave={save} onTest={testProfile} onSelect={() => void selectProvider(form.id)} onDelete={() => void deleteProfile()} />}
           </div>
           {feedback && <div className={`llm-feedback ${feedback.tone}`} role="status">{feedback.message}</div>}
         </WorkbenchModal>
@@ -241,14 +247,15 @@ function ProfileEditor({
     setModelsLoading(true);
     setModelsError(null);
     try {
-      const catalog = await llmApi.models(openCodeCatalogProfileId(existing, form.persistedProtocol, form.id));
+      const profileId = openCodeCatalogProfileId(existing, form.persistedProtocol, form.id);
+      const catalog = await (profileId ? llmApi.models(profileId) : llmApi.setupModels(form.command));
       if (requestSequence === modelRequestSequence.current) setModelCatalog(catalog);
     } catch (error) {
       if (requestSequence === modelRequestSequence.current) setModelsError(error instanceof Error ? error.message : String(error));
     } finally {
       if (requestSequence === modelRequestSequence.current) setModelsLoading(false);
     }
-  }, [existing, form.id, form.persistedProtocol, opencode]);
+  }, [existing, form.id, form.persistedProtocol, form.command, opencode]);
 
   useEffect(() => {
     void loadModels();
@@ -279,10 +286,10 @@ function ProfileEditor({
 
   return (
     <div className="llm-profile-editor">
+      <h2 className="llm-editor-heading">{providerChoice(form.protocol).label}</h2>
+      <p className="section-hint">{providerChoice(form.protocol).description}</p>
       <div className="llm-form-grid">
-        <label>Profile ID<input value={form.id} disabled={existing} onChange={(event) => set('id', event.target.value)} placeholder="company-gateway" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" /></label>
         <label>Display name<input value={form.label} onChange={(event) => set('label', event.target.value)} placeholder="Company gateway" /></label>
-        <label>Protocol<select value={form.protocol} onChange={(event) => changeProtocol(event.target.value as LlmProtocol)}><option value="opencode">OpenCode CLI</option><option value="openai-chat">OpenAI Chat Completions</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic-messages">Anthropic Messages</option><option value="bedrock-converse">Amazon Bedrock Converse</option></select></label>
         {(http || bedrock) && <label className="full">Endpoint<input value={form.baseUrl} onChange={(event) => set('baseUrl', event.target.value)} placeholder="https://gateway.example.com/v1" /></label>}
         {opencode ? (
           <>
@@ -293,25 +300,29 @@ function ProfileEditor({
                 {modelOptions.map((option) => <option key={option.id} value={option.id} disabled={option.unavailable}>{option.label}</option>)}
               </select>
             </label>
-            <label>Command<input value={form.command} onChange={(event) => set('command', event.target.value)} placeholder="opencode" /></label>
             <div className="full llm-model-catalog-status" role="status">
               {modelsLoading ? 'Loading models from the local OpenCode catalog...' : modelsError ? `Models could not be loaded: ${modelsError}` : modelCatalog?.models.length ? `${modelCatalog.models.length} current model${modelCatalog.models.length === 1 ? '' : 's'} reported by OpenCode.` : 'OpenCode reported no current models.'}
               {!modelsLoading && <button className="btn small" type="button" onClick={() => void loadModels()}>Reload models</button>}
             </div>
           </>
         ) : <label>Model<input value={form.model} onChange={(event) => set('model', event.target.value)} placeholder="Provider model ID" /></label>}
-        {(http || bedrock) && (
-          <>
-            <label>Authentication<select value={form.authMode} onChange={(event) => changeAuth(event.target.value as LlmAuthMode)}>{bedrock && <option value="aws">AWS credentials</option>}<option value="bearer">Bearer token</option>{http && <option value="x-api-key">API key header</option>}{http && <option value="none">No authentication</option>}</select></label>
+        {(http || bedrock) && <>
             {authUsesSecret && <label>Key or token<input type="password" autoComplete="new-password" value={form.secret} disabled={form.clearSecret} onChange={(event) => setForm({ ...form, secret: event.target.value, clearSecret: false })} placeholder={form.credentialCommand.trim() ? 'Not needed - using the credential command' : existing ? 'Leave blank to keep saved secret' : 'Required by provider'} /></label>}
             {authUsesSecret && existing && form.hasSecret && !form.secret && !form.clearSecret && <p className="section-hint full">A key is saved{form.secretHint ? ` (ends ${form.secretHint})` : ''}. Leave the field blank to keep it, or type a new value to replace it.</p>}
+        </>}
+        {bedrock && <><label>AWS region<input value={form.region} onChange={(event) => set('region', event.target.value)} placeholder="us-east-1" /></label><label>AWS profile<input value={form.awsProfile} onChange={(event) => set('awsProfile', event.target.value)} placeholder="Optional profile" /></label></>}
+        <details className="full llm-advanced"><summary>Advanced settings</summary><div className="llm-form-grid">
+          <label>Profile ID<input value={form.id} disabled={existing} onChange={(event) => set('id', event.target.value)} placeholder="company-gateway" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" /></label>
+          <label>Protocol<select value={form.protocol} onChange={(event) => changeProtocol(event.target.value as LlmProtocol)}><option value="opencode">OpenCode CLI</option><option value="openai-chat">OpenAI Chat Completions</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic-messages">Anthropic Messages</option><option value="bedrock-converse">Amazon Bedrock Converse</option></select></label>
+          {opencode && <label>Command<input value={form.command} onChange={(event) => set('command', event.target.value)} placeholder="opencode" /></label>}
+          {(http || bedrock) && <>
+            <label>Authentication<select value={form.authMode} onChange={(event) => changeAuth(event.target.value as LlmAuthMode)}>{bedrock && <option value="aws">AWS credentials</option>}<option value="bearer">Bearer token</option>{http && <option value="x-api-key">API key header</option>}{http && <option value="none">No authentication</option>}</select></label>
             {authUsesSecret && <label className="full">Credential command (optional)<input value={form.credentialCommand} onChange={(event) => set('credentialCommand', event.target.value)} placeholder="e.g. a CLI that prints a fresh token" /><span className="section-hint">Run for each request; its output is used as the key or token. Use this for gateways that mint short-lived tokens. Leave blank to use a static key.</span></label>}
             {showHeaders && <><label className="full">Safe custom headers<textarea rows={3} value={form.headersText} onChange={(event) => setForm({ ...form, headersText: event.target.value, headersDirty: true, clearHeaders: false })} /></label><label className="full llm-clear-secret"><input type="checkbox" checked={form.clearHeaders} onChange={(event) => setForm({ ...form, clearHeaders: event.target.checked, headersDirty: false })} /> Clear all saved custom headers</label></>}
             <label className="full llm-clear-secret"><input type="checkbox" checked={form.allowPrivateNetwork} onChange={(event) => set('allowPrivateNetwork', event.target.checked)} /> Allow this profile to reach an approved private company gateway</label>
-          </>
-        )}
-        {bedrock && <><label>AWS region<input value={form.region} onChange={(event) => set('region', event.target.value)} placeholder="us-east-1" /></label><label>AWS profile<input value={form.awsProfile} onChange={(event) => set('awsProfile', event.target.value)} placeholder="Optional profile" /></label></>}
+          </>}
         {existing && authUsesSecret && <label className="full llm-clear-secret"><input type="checkbox" checked={form.clearSecret} onChange={(event) => setForm({ ...form, clearSecret: event.target.checked, secret: event.target.checked ? '' : form.secret })} /> Clear the saved secret</label>}
+        </div></details>
       </div>
       <div className="llm-editor-actions">
         <button className="btn primary" type="button" disabled={busy || !canSave} onClick={() => void onSave()}>Save profile</button>
