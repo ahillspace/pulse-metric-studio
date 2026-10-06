@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { linkNativeStageDependencies } from "./native-stage-dependencies.mjs";
 import {
   assertMacRuntime,
   MACOS_COMPATIBILITY_VERSION,
@@ -59,11 +60,7 @@ for (const name of [
       ].includes(path.basename(source)),
   });
 }
-fs.symlinkSync(
-  path.join(root, "node_modules"),
-  path.join(stage, "node_modules"),
-  process.platform === "win32" ? "junction" : "dir",
-);
+linkNativeStageDependencies(root, stage);
 const configFile = path.join(stage, "src-tauri/tauri.conf.json");
 const config = JSON.parse(fs.readFileSync(configFile, "utf8"));
 if (validation) {
