@@ -102,18 +102,15 @@ fn unix_timestamp() -> String {
         .unwrap_or_else(|_| "?".into())
 }
 
-fn node_major_version(version: &str) -> Option<u32> {
-    version
-        .trim()
-        .trim_start_matches('v')
-        .split('.')
-        .next()?
-        .parse()
-        .ok()
+fn node_version(version: &str) -> Option<(u32, u32)> {
+    let mut parts = version.trim().trim_start_matches('v').split('.');
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
 }
 
+// 22.15 is the first Node 22 release with --use-system-ca, which the server needs
+// to trust corporate gateways whose certificates chain to the OS trust store.
 fn supported_node_runtime(version: &str) -> bool {
-    node_major_version(version).is_some_and(|major| major >= 22)
+    node_version(version).is_some_and(|version| version >= (22, 15))
 }
 
 fn bundled_node_candidates(app: &AppHandle) -> Vec<PathBuf> {
@@ -196,10 +193,10 @@ fn resolve_node_runtime(app: &AppHandle) -> Result<PathBuf, String> {
     }
 
     if old_versions.is_empty() {
-        Err("Node.js 22 or newer is unavailable. Reinstall the desktop app or set PULSE_METRIC_STUDIO_NODE_RUNTIME.".to_string())
+        Err("Node.js 22.15 or newer is unavailable. Reinstall the desktop app or set PULSE_METRIC_STUDIO_NODE_RUNTIME.".to_string())
     } else {
         Err(format!(
-            "Node.js 22 or newer is required. Unsupported runtimes: {}",
+            "Node.js 22.15 or newer is required. Unsupported runtimes: {}",
             old_versions.join(", ")
         ))
     }
@@ -293,6 +290,7 @@ fn main() {
 
             let mut server_command = Command::new(&node);
             server_command
+                .arg("--use-system-ca")
                 .arg(strip_verbatim_prefix(&entry))
                 .env("PORT", port.to_string())
                 .env("HOST", "127.0.0.1")
@@ -554,10 +552,13 @@ mod tests {
         assert_eq!(slug("Pulse Metric Studio"), "pulse-metric-studio");
     }
     #[test]
-    fn node_major_versions_are_parsed() {
-        assert_eq!(node_major_version("v22.23.2\n"), Some(22));
-        assert_eq!(node_major_version("not-node"), None);
+    fn node_versions_are_parsed() {
+        assert_eq!(node_version("v22.23.2\n"), Some((22, 23)));
+        assert_eq!(node_version("not-node"), None);
         assert!(!supported_node_runtime("v20.20.2"));
+        assert!(!supported_node_runtime("v22.14.0"));
+        assert!(supported_node_runtime("v22.15.0"));
+        assert!(supported_node_runtime("v24.0.0"));
         assert!(supported_node_runtime("v22.23.2"));
     }
     #[test]
