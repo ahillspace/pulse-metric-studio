@@ -1,5 +1,5 @@
 import { PNG } from 'pngjs';
-import { postJson, type TableauSession } from '@pulse-metric-studio/core';
+import { postJson, TableauError, type TableauSession } from '@pulse-metric-studio/core';
 import type { PulseDefinition, PulseExactMetric } from './pulse-client.js';
 import { metricSpecification } from './reconciliation.js';
 
@@ -8,8 +8,24 @@ const MAX_PNG_BYTES = 4 * 1024 * 1024;
 const MAX_IMAGE_RESPONSE_BYTES = 6 * 1024 * 1024;
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 export class PulsePreviewDataError extends Error {
-  constructor(public readonly code: 'pulse_preview_unavailable' | 'pulse_preview_invalid_response' | 'pulse_preview_too_large', message: string) {
+  constructor(
+    public readonly code: 'pulse_preview_unavailable' | 'pulse_preview_invalid_response' | 'pulse_preview_too_large',
+    message: string,
+    public readonly insightError?: { code?: string; message?: string },
+  ) {
     super(message);
+  }
+}
+export class PulsePreviewProviderError extends Error {
+  constructor(public readonly stage: 'insights' | 'image', public readonly providerError: TableauError) {
+    super(providerError.message, { cause: providerError });
+  }
+}
+async function previewRequest<T>(stage: 'insights' | 'image', request: () => Promise<T>): Promise<T> {
+  try { return await request(); }
+  catch (error) {
+    if (error instanceof TableauError) throw new PulsePreviewProviderError(stage, error);
+    throw error;
   }
 }
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -42,6 +58,13 @@ export function previewInsightInput(definition: PulseDefinition, metric: PulseEx
 
 export function previewCardInput(definition: PulseDefinition, metric: PulseExactMetric, bundle: unknown) {
   const response = record(bundle) && bundle.bundle_response;
+  if (record(response) && record(response.error)) {
+    const error = response.error;
+    throw new PulsePreviewDataError('pulse_preview_unavailable', 'Tableau could not generate insights for this metric.', {
+      ...(typeof error.code === 'string' || typeof error.code === 'number' ? { code: String(error.code) } : {}),
+      ...(typeof error.message === 'string' ? { message: error.message } : {}),
+    });
+  }
   if (!record(response) || response.error || !record(response.result))
     return unavailable('Tableau could not generate insights for this metric.');
   const groups = response.result.insight_groups;
@@ -134,17 +157,17 @@ function boundedRequest(value: unknown): string {
   return json;
 }
 export async function generateMetricPreview(session: TableauSession, definition: PulseDefinition, metric: PulseExactMetric, metricId: string, definitionId: string): Promise<string> {
-  const bundle = await postJson<unknown>(session, '/api/-/pulse/insights/springboard',
+  const bundle = await previewRequest('insights', () => postJson<unknown>(session, '/api/-/pulse/insights/springboard',
     boundedRequest(previewInsightInput(definition, metric, metricId, definitionId)), {
       contentType: 'application/vnd.tableau.pulse.insightsservice.v1.GenerateInsightBundleSpringboardRequest+json',
       accept: 'application/vnd.tableau.pulse.insightsservice.v1.GenerateInsightBundleSpringboardResponse+json',
       maxResponseBytes: MAX_BUNDLE_BYTES,
-    });
-  const image = await postJson<unknown>(session, '/api/-/pulse/images/metricCard',
+    }));
+  const image = await previewRequest('image', () => postJson<unknown>(session, '/api/-/pulse/images/metricCard',
     boundedRequest(previewCardInput(definition, metric, bundle)), {
       contentType: 'application/vnd.tableau.imageservice.v1.GenerateMetricCardImageRequest+json',
       accept: 'application/vnd.tableau.imageservice.v1.GenerateMetricCardImageResponse+json',
       maxResponseBytes: MAX_IMAGE_RESPONSE_BYTES,
-    });
+    }));
   return previewPngDataUrl(image);
 }

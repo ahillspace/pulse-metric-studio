@@ -116,3 +116,41 @@ test('preview validates requests and surfaces Tableau permission failures', asyn
   provider({ '/api/-/pulse/metrics/metric': () => Response.json({}, { status: 401 }) });
   assert.equal((await preview()).statusCode, 401);
 });
+
+test('preview preserves bounded provider diagnostics and removes credentials', async () => {
+  provider({ '/api/-/pulse/insights/springboard': () => Response.json({
+    error: { code: 'INVALID_ARGUMENT', message: 'Unsupported request option.', token: 'private-session-token', personalAccessTokenSecret: 'test-pat' },
+  }, { status: 400, headers: { validation_code: '400001', tableau_service_name: 'insights' } }) });
+  const response = await preview();
+  assert.equal(response.statusCode, 502);
+  assert.equal(response.json().details.stage, 'insights');
+  assert.equal(response.json().details.status, 400);
+  assert.match(response.json().message, /400001/);
+  assert.match(response.json().message, /Unsupported request option/);
+  assert.doesNotMatch(response.body, /private-session-token|test-pat/);
+  assert.ok(response.json().details.message.length <= 500);
+});
+
+test('preview diagnostics identify the image stage and redact an unlabelled session token', async () => {
+  provider({ '/api/-/pulse/images/metricCard': () => new Response(`Invalid image input for private-session-token`, { status: 400 }) });
+  const response = await preview();
+  assert.equal(response.statusCode, 502);
+  assert.equal(response.json().details.stage, 'image');
+  assert.match(response.json().message, /Invalid image input/);
+  assert.doesNotMatch(response.body, /private-session-token/);
+});
+
+test('successful HTTP response with an insight error retains its safe provider diagnostic', async () => {
+  const requests = provider({ '/api/-/pulse/insights/springboard': () => Response.json({
+    bundle_response: { error: { code: 'NO_DATA', message: 'No rows available. token=private-session-token; personalAccessTokenSecret=test-pat', debug: 'must-not-expose' } },
+  }, { status: 201 }) });
+  const response = await preview();
+  assert.equal(response.statusCode, 422);
+  assert.equal(response.json().code, 'pulse_preview_unavailable');
+  assert.equal(response.json().details.stage, 'insights');
+  assert.equal(response.json().details.code, 'NO_DATA');
+  assert.match(response.json().message, /No rows available/);
+  assert.doesNotMatch(response.body, /private-session-token|test-pat|must-not-expose/);
+  assert.ok(response.json().details.message.length <= 500);
+  assert.equal(requests.length, 3);
+});
