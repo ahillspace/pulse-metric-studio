@@ -47,3 +47,5 @@
 .pulse-publication-group-action strong { font-size:13px; }
 .pulse-publication-group-action p { color:var(--muted,#a3a3b0); font-size:12px; margin:4px 0 0; }
 .pulse-publication-group-action .warning-banner { flex-basis:100%; }
+.pulse-confirm-list { margin: 8px 0 12px; padding-left: 18px; max-height: 180px; overflow-y: auto; font-size: 13px; }
+.pulse-confirm-list li { overflow-wrap: anywhere; }

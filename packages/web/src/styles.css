@@ -137,7 +137,7 @@ select option { background: var(--panel); color: var(--text); }
   border-radius: var(--radius-md);
   color: var(--text-dim);
   font-size: 13px;
-  transition: all 120ms ease;
+  transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease;
   text-align: left;
 }
 .nav-item:hover { color: var(--text); background: rgba(255, 255, 255, 0.03); }
@@ -310,7 +310,7 @@ select option { background: var(--panel); color: var(--text); }
   border-radius: var(--radius-sm);
   padding: 6px 13px;
   font-size: 12.5px;
-  transition: all 120ms ease;
+  transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease;
 }
 .btn:hover:not(:disabled) { border-color: var(--cyan-dim); color: var(--cyan); }
 .btn.primary {
@@ -341,7 +341,7 @@ select option { background: var(--panel); color: var(--text); }
   font-size: 12px;
   background: rgba(255, 255, 255, 0.02);
   color: var(--text-dim);
-  transition: all 120ms ease;
+  transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease;
   user-select: none;
 }
 .pill:hover { border-color: var(--cyan-dim); color: var(--text); }
@@ -779,3 +779,8 @@ tr.flash-apply td { animation: flashRow 900ms ease-out; }
   .dimension-fork-controls { grid-template-columns: 1fr; }
   .dimension-fork-submit-row { align-items: stretch; flex-direction: column; }
 }
+
+/* ============ busy labels ============ */
+.busy-label { display: inline-grid; }
+.busy-label > span { grid-area: 1 / 1; text-align: center; }
+.busy-label > [aria-hidden="true"] { visibility: hidden; }

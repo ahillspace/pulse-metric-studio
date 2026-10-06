@@ -11,7 +11,7 @@ import {
   type FollowTargetChoice,
 } from "../follow-target-actions";
 import { registryActionLabel } from "../registry-actions";
-import { Modal } from "./ui";
+import { BusyLabel, Modal } from "./ui";
 
 type FollowTarget = FollowTargetChoice;
 
@@ -211,7 +211,7 @@ export function FollowTargetModal({
             disabled={Boolean(busy) || selected.length === 0}
             onClick={() => void run("unfollow")}
           >
-            {busy === "unfollow" ? "Unfollowing..." : "Unfollow"}
+            <BusyLabel busy={busy === "unfollow"} idle="Unfollow" active="Unfollowing..." />
           </button>
           {retry && (
             <button
@@ -220,9 +220,7 @@ export function FollowTargetModal({
               disabled={Boolean(busy)}
               onClick={() => void run(retry.kind, retry.operations)}
             >
-              {busy === retry.kind
-                ? "Retrying..."
-                : `Retry ${retry.operations.length} failed`}
+              <BusyLabel busy={busy === retry.kind} idle={`Retry ${retry.operations.length} failed`} active="Retrying..." />
             </button>
           )}
           <button
@@ -231,7 +229,7 @@ export function FollowTargetModal({
             disabled={Boolean(busy) || selected.length === 0}
             onClick={() => void run("follow")}
           >
-            {busy === "follow" ? "Following..." : "Follow"}
+            <BusyLabel busy={busy === "follow"} idle="Follow" active="Following..." />
           </button>
         </>
       }

@@ -9,7 +9,7 @@ import {
   type InheritedDimensionFilter,
 } from "../components/DimensionalFork";
 import type { PulseFilterDimensionField } from "../dimensional-filter";
-import { Modal } from "../components/ui";
+import { BusyLabel, Modal } from "../components/ui";
 import {
   selectionState,
   setMetricSelection,
@@ -159,9 +159,7 @@ export function VariantDialog({
               ).then(onClose)
             }
           >
-            {busy
-              ? "Creating..."
-              : `Create ${selected.length} ${selected.length === 1 ? "variant" : "variants"}`}
+            <BusyLabel busy={busy} idle={`Create ${selected.length} ${selected.length === 1 ? "variant" : "variants"}`} active="Creating..." />
           </button>
         </>
       }

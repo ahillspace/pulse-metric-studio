@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useLayoutEffect } from "react";
 import { useActivity } from "./controller";
 import { Receipt } from "./Receipt";
+import { BusyLabel } from "../components/ui";
 import { Pagination } from "../components/ConfigEditor";
 import "./activity.css";
 
@@ -24,7 +25,7 @@ export function Activity() {
         <input type="search" aria-label="Find publication" placeholder="Search publications..."
           value={query} onChange={event => setQuery(event.target.value)} />
         <button className="btn small" disabled={loading} onClick={() => void load()}>
-          {loading ? "Refreshing..." : "Refresh"}
+          <BusyLabel busy={loading} idle="Refresh" active="Refreshing..." />
         </button>
       </div>
       {error && !(error === undoError && selected?.id === undoReceiptId) && !(error === readError && selected?.id === readReceiptId) && <p className="warning-banner" role="alert">{error}</p>}
