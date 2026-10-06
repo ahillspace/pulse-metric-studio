@@ -71,23 +71,24 @@ export function registerPulseRoutes(
     );
   });
 
-  app.get("/api/pulse/dimensions/:fieldId/count", async (req) => {
+  // Field IDs are field names and may contain "/" (for example
+  // "Country/Region"); the desktop transport rejects encoded separators in
+  // paths, so the field travels as a query parameter.
+  app.get("/api/pulse/dimensions/count", async (req) => {
     const session = requireSession();
-    const { fieldId } = req.params as { fieldId?: string };
     const query = (req.query ?? {}) as Record<string, unknown>;
     return pulseDimensionalForkService.countDimensionMembers(session, {
       sourceMetricIds: repeatedQueryValues(query.sourceMetricId),
-      fieldId: String(fieldId ?? ""),
+      fieldId: typeof query.fieldId === "string" ? query.fieldId : "",
     });
   });
 
-  app.get("/api/pulse/dimensions/:fieldId/values", async (req) => {
+  app.get("/api/pulse/dimensions/values", async (req) => {
     const session = requireSession();
-    const { fieldId } = req.params as { fieldId?: string };
     const query = (req.query ?? {}) as Record<string, unknown>;
     return pulseDimensionalForkService.listDimensionValues(session, {
       sourceMetricIds: repeatedQueryValues(query.sourceMetricId),
-      fieldId: String(fieldId ?? ""),
+      fieldId: typeof query.fieldId === "string" ? query.fieldId : "",
       search: typeof query.search === "string" ? query.search : undefined,
       all: query.all === "1" || query.all === "true",
     });

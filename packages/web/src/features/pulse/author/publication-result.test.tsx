@@ -24,8 +24,9 @@ test("publication result summarizes creation, preserves error code and message, 
   assert.doesNotMatch(html, /Metric details|Publication receipt/);
 });
 
-test("Pulse landing link uses the original site content URL and rejects non-web protocols", () => {
+test("Pulse landing link lowercases the site content URL and rejects non-web protocols", () => {
   assert.equal(pulseSiteUrl("https://tableau.example/", "sales & ops"), "https://tableau.example/pulse/site/sales%20%26%20ops");
+  assert.equal(pulseSiteUrl("https://prod-uswest-c.online.tableau.com/", "PaCe"), "https://prod-uswest-c.online.tableau.com/pulse/site/pace");
   assert.throws(() => pulseSiteUrl("file:///tmp/tableau", "sales"), /Unsupported/);
 });
 

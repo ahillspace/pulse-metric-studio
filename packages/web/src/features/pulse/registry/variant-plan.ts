@@ -4,6 +4,7 @@ import {
   type PulseForkPlanState,
   type PulseRegistryMetric,
 } from "../fork-plan";
+import { changedClauses, effectiveFilterLabels, type VariantField } from "./source-filters";
 
 export function variantPlanForSelection(
   metrics: PulseRegistryMetric[],
@@ -18,14 +19,36 @@ export function variantPlanForSelection(
     clauses: [],
   };
 }
+/** Clauses that differ from the selected sources' own filters. */
+function planChanges(
+  plan: PulseForkPlanState,
+  metrics: PulseRegistryMetric[],
+  fields: VariantField[],
+) {
+  const selected = new Set(plan.selectedMetricIds);
+  return changedClauses(
+    plan.clauses,
+    metrics.filter((metric) => selected.has(metric.metricId)),
+    fields,
+  );
+}
+export function variantHasChanges(
+  plan: PulseForkPlanState,
+  metrics: PulseRegistryMetric[],
+  fields: VariantField[],
+): boolean {
+  return Boolean(plan.timeframe || planChanges(plan, metrics, fields).length);
+}
 export function variantRequest(
   plan: PulseForkPlanState,
+  metrics: PulseRegistryMetric[] = [],
+  fields: VariantField[] = [],
 ): PulseVariantRequestV1 {
   return {
     version: 1,
     sourceMetricIds: [...plan.selectedMetricIds],
     ...(plan.timeframe ? { timeframe: { key: plan.timeframe.key } } : {}),
-    clauses: plan.clauses.map((clause) => ({
+    clauses: planChanges(plan, metrics, fields).map((clause) => ({
       fieldId: clause.fieldId,
       selection: {
         mode: "VALUES",
@@ -38,6 +61,7 @@ export function variantRequest(
 export function variantPreview(
   metrics: PulseRegistryMetric[],
   plan: PulseForkPlanState,
+  fields: VariantField[] = [],
 ) {
   const selected = new Set(plan.selectedMetricIds);
   return metrics
@@ -47,15 +71,6 @@ export function variantPreview(
       name: metric.name,
       sourceTimeframe: metric.timeframeLabel,
       timeframe: plan.timeframe?.label || metric.timeframeLabel,
-      filters: plan.clauses.map(
-        (clause) =>
-          `${clause.fieldLabel}: ${clause.exclude ? "excluding " : ""}${clause.values
-            .slice(0, 4)
-            .map((value) => value.label)
-            .join(
-              ", ",
-            )}${clause.values.length > 4 ? ` and ${clause.values.length - 4} more` : ""}`,
-      ),
-      retainsSourceFilters: Boolean(metric.filters?.length),
+      filters: effectiveFilterLabels(metric, plan.clauses, fields),
     }));
 }

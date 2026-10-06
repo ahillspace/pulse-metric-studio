@@ -1,7 +1,36 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { activeEditor, contextMatches, useAuthor } from "../author/controller";
 import { ProposalReview } from "../author/ProposalReview";
 import { useConnection } from "../connections/controller";
+
+const GENERATE_DRAFT_REQUEST =
+  "Identify the persona most likely to use this datasource and design a Pulse draft for them, and set the digest audience to that persona. Include the metrics and slicers most useful to that persona, no more than 20 metrics, prioritized by business value, with meaningful names and sensible formats and sentiment. Start each metric name with a single emoji that best represents the metric, followed by a space. Include distinct counts of dimensions only when they provide significant business value. Newly built metrics use month-to-date and over-time data mode, controlled by the app. Do not choose or change their timeframe or data mode. Minimum time granularity defaults to DAY; choose a coarser minimum only when explicitly requested or the measure name or description states that daily data is unavailable. Preserve existing manual settings.";
+
+function elapsedLabel(seconds: number) {
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+function ProposalWaiting() {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    const started = Date.now();
+    const timer = window.setInterval(
+      () => setSeconds(Math.floor((Date.now() - started) / 1000)),
+      1000,
+    );
+    return () => window.clearInterval(timer);
+  }, []);
+  return (
+    <div role="status" className="waiting-note pulse-agent-waiting">
+      <span className="spinner" aria-hidden="true" />
+      <span>
+        Preparing proposed changes... {elapsedLabel(seconds)}
+        <small>Big drafts can take a few minutes.</small>
+      </span>
+    </div>
+  );
+}
 
 export function ChatPanel({ collapsed = false }: { collapsed?: boolean }) {
   const entry = useAuthor(activeEditor);
@@ -18,6 +47,16 @@ export function ChatPanel({ collapsed = false }: { collapsed?: boolean }) {
     <div className="pulse-agent-panel" id="assistant-panel">
       <div className="pulse-agent-heading">
         <h2 className="panel-title">Metric assistant</h2>
+        {entry && (
+          <button
+            className="btn small"
+            type="button"
+            disabled={entry.proposalBusy || !entry.document.chat.length}
+            onClick={() => useAuthor.getState().clearChat()}
+          >
+            Clear chat
+          </button>
+        )}
       </div>
       <div className="pulse-agent-body">
         {!entry && (
@@ -30,11 +69,7 @@ export function ChatPanel({ collapsed = false }: { collapsed?: boolean }) {
             Connect to Tableau to request suggestions.
           </p>
         )}
-        {entry &&
-          !entry.document.chat.some(
-            (message) => message.role === "assistant",
-          ) &&
-          !entry.proposal && (
+        {entry && (
             <div className="pulse-agent-draft">
               <button
                 className="btn primary small"
@@ -43,7 +78,7 @@ export function ChatPanel({ collapsed = false }: { collapsed?: boolean }) {
                   void useAuthor
                     .getState()
                     .requestProposal(
-                      "Design Pulse metrics for a business audience. Include all metrics and slicers that provide end-user business value, with meaningful names and sensible formats and sentiment. Start each metric name with a single emoji that best represents the metric, followed by a space. Include distinct counts of dimensions only when they provide significant business value. Newly built metrics use month-to-date and over-time data mode, controlled by the app. Do not choose or change their timeframe or data mode. Minimum time granularity defaults to DAY; choose a coarser minimum only when explicitly requested or the measure name or description states that daily data is unavailable. Preserve existing manual settings.",
+                      GENERATE_DRAFT_REQUEST,
                     )
                 }
               >
@@ -66,11 +101,7 @@ export function ChatPanel({ collapsed = false }: { collapsed?: boolean }) {
               {message.content}
             </div>
           ))}
-          {entry?.proposalBusy && (
-            <div role="status" className="waiting-note">
-              Preparing proposed changes...
-            </div>
-          )}
+          {entry?.proposalBusy && <ProposalWaiting />}
           {entry?.proposalError && (
             <div role="alert" className="warning-banner">
               {entry.proposalError}

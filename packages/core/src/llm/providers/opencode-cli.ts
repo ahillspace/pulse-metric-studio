@@ -7,12 +7,12 @@ import type { LlmModelOption } from '@pulse-metric-studio/shared';
 import { config } from '../../config.js';
 import type { StoredLlmProfile } from '../profiles.js';
 import type { CompleteOptions, CompleteResult, LlmProviderHealth } from '../types.js';
-import { LlmProviderError } from '../types.js';
+import { LLM_REQUEST_TIMEOUT_MS, LlmProviderError, timeoutDescription } from '../types.js';
 
 export interface OpencodeExecutable { file: string }
 export interface OpencodeRuntime {
   resolve(command: string): Promise<OpencodeExecutable | null>;
-  run(bin: OpencodeExecutable, args: string[], prompt: string, provider: string, model: string): Promise<string>;
+  run(bin: OpencodeExecutable, args: string[], prompt: string, provider: string, model: string, timeoutMs?: number): Promise<string>;
   listModels?(bin: OpencodeExecutable, args: string[]): Promise<string>;
 }
 const MAX_OPENCODE_MODEL_OUTPUT_BYTES = 1_000_000;
@@ -100,7 +100,7 @@ export class OpencodeCliProvider {
     }
     const prompt = renderPrompt(opts);
     const args = ['--pure', 'run', '--model', model];
-    const stdout = await this.runtime.run(bin, args, prompt, this.id, model);
+    const stdout = await this.runtime.run(bin, args, prompt, this.id, model, opts.timeoutMs ?? LLM_REQUEST_TIMEOUT_MS);
     return {
       text: stripAnsi(stdout),
       provider: this.id,
@@ -163,7 +163,7 @@ function where(command: string): Promise<string[]> {
   });
 }
 
-async function runOpenCode(bin: ResolveResult, args: string[], prompt: string, provider: string, model: string): Promise<string> {
+async function runOpenCode(bin: ResolveResult, args: string[], prompt: string, provider: string, model: string, timeoutMs = LLM_REQUEST_TIMEOUT_MS): Promise<string> {
   const isolatedCwd = path.join(config.dataDir, 'llm-workspace');
   fs.mkdirSync(isolatedCwd, { recursive: true });
   const childEnv = buildOpenCodeChildEnv(process.env);
@@ -198,8 +198,8 @@ async function runOpenCode(bin: ResolveResult, args: string[], prompt: string, p
     };
     const timer = setTimeout(() => {
       stopTree();
-      finish(new LlmProviderError({ code: 'provider_timeout', message: 'OpenCode timed out after 180 seconds.', provider, model, retryable: true }));
-    }, 180_000);
+      finish(new LlmProviderError({ code: 'provider_timeout', message: `OpenCode did not respond within ${timeoutDescription(timeoutMs)}.`, provider, model, retryable: true }));
+    }, timeoutMs);
     child.stdout.on('data', (data) => {
       stdout += String(data);
       if (Buffer.byteLength(stdout) > 2_000_000) {

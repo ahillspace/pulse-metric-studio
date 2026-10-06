@@ -1287,3 +1287,42 @@
 .pulse-result-errors li { padding: 10px 0; border-bottom: 1px solid var(--border); }
 .pulse-result-errors li > span { margin-left: 12px; color: var(--red); }
 .pulse-result-errors p { margin: 4px 0 0; }
+.pulse-agent-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.pulse-agent-waiting {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-style: normal;
+}
+.pulse-agent-waiting > span:last-child {
+  display: grid;
+  gap: 2px;
+  font-variant-numeric: tabular-nums;
+}
+.pulse-agent-waiting small {
+  color: var(--text-faint);
+}
+.pulse-agent-waiting .spinner {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin-top: 1px;
+  border: 2px solid var(--border);
+  border-top-color: var(--text-dim);
+  border-radius: 50%;
+  animation: pulseAgentSpin 0.8s linear infinite;
+}
+@keyframes pulseAgentSpin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pulse-agent-waiting .spinner { animation: none; }
+}
+.pulse-clause-origin {
+  color: var(--text-faint);
+}

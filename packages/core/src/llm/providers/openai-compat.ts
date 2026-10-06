@@ -1,7 +1,7 @@
 import { config } from '../../config.js';
 import type { StoredLlmProfile } from '../profiles.js';
 import type { CompleteOptions, CompleteResult, LlmMessage, LlmProviderHealth } from '../types.js';
-import { LlmProviderError } from '../types.js';
+import { LLM_REQUEST_TIMEOUT_MS, LlmProviderError, timeoutDescription } from '../types.js';
 import { assertSafeLlmEndpoint, UnsafeLlmEndpointError } from './network-policy.js';
 import { resolveProfileSecret } from './credential.js';
 import { readProviderErrorDetail, withProviderDetail } from './error-detail.js';
@@ -107,14 +107,14 @@ export class HttpLlmProvider {
         method: 'POST',
         headers,
         body: JSON.stringify(requestBody(protocol, this.profile.model, opts)),
-        signal: AbortSignal.timeout(180_000),
+        signal: AbortSignal.timeout(opts.timeoutMs ?? LLM_REQUEST_TIMEOUT_MS),
         redirect: 'error',
       });
     } catch (error) {
       const timeout = error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
       throw new LlmProviderError({
         code: timeout ? 'provider_timeout' : 'provider_unavailable',
-        message: timeout ? `${this.label} timed out.` : `${this.label} could not be reached.`,
+        message: timeout ? `${this.label} did not respond within ${timeoutDescription(opts.timeoutMs ?? LLM_REQUEST_TIMEOUT_MS)}.` : `${this.label} could not be reached.`,
         provider: this.id,
         model: this.profile.model,
         retryable: true,

@@ -91,6 +91,8 @@ interface AuthorState {
   requestProposal: (message: string) => Promise<void>;
   acceptProposal: () => Promise<void>;
   discardProposal: () => void;
+  /** Clears the conversation and any unreviewed proposal; metric settings are untouched. */
+  clearChat: () => void;
   reviewPublication: () => Promise<void>;
   closePreview: () => void;
   publishReviewed: () => Promise<void>;
@@ -678,6 +680,23 @@ export function createAuthorController(
       discardProposal() {
         const id = get().activeId;
         if (id) update(id, { proposal: null, proposalError: null });
+      },
+      clearChat() {
+        const entry = activeEditor(get());
+        if (!entry || entry.proposalBusy || !entry.document.chat.length) return;
+        const id = entry.record.id;
+        update(id, (current) => ({
+          proposal: null,
+          proposalBase: null,
+          proposalError: null,
+          proposalNotice: null,
+          document: { ...current.document, chat: [] },
+          sequence: current.sequence + 1,
+          saveStatus: current.saveStatus === "conflict" ? "conflict" : "pending",
+        }));
+        void get()
+          .flush(id)
+          .catch(() => {});
       },
       async reviewPublication() {
         const entry = activeEditor(get());

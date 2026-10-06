@@ -1,5 +1,5 @@
 import type { LlmMessage,LlmProvider } from '@pulse-metric-studio/core';
-import { extractJsonBlock,LlmProviderError } from '@pulse-metric-studio/core';
+import { extractJsonBlock,LLM_REQUEST_TIMEOUT_MS,LlmProviderError,timeoutDescription } from '@pulse-metric-studio/core';
 import type { CatalogField,DatasourceCatalog } from '@pulse-metric-studio/shared';
 import { OpsSchema } from '@pulse-metric-studio/shared';
 /**
@@ -10,6 +10,9 @@ import { OpsSchema } from '@pulse-metric-studio/shared';
 // exceeds a few thousand tokens; a truncated reply is never valid JSON.
 const AUTHORING_MAX_TOKENS = 16_384;
 const TRUNCATED_RESPONSE = 'the response reached the output token limit before the JSON was complete';
+// One deadline covers the first response and the repair; a repair that cannot
+// finish in the remaining time is not attempted.
+const MIN_REPAIR_BUDGET_MS = 30_000;
 const SYSTEM_PROMPT = `You are a metric configuration engine for Tableau Pulse, embedded in the pulse-metric-studio workbench.
 
 Tableau Pulse is a KPI dashboard built from metrics (aggregated measures trended over time) and slicers (dimensions used to filter/break down). Users are typically building concise, customer-ready, business-friendly dashboards for a published datasource.
@@ -166,12 +169,32 @@ function buildUserPrompt(input: AuthorInput): string {
     lines.push(`REQUEST: ${input.userMessage}`);
     return lines.join('\n');
 }
-export async function authorOps(provider: LlmProvider, input: AuthorInput) {
+export async function authorOps(provider: LlmProvider, input: AuthorInput, budgetMs = LLM_REQUEST_TIMEOUT_MS) {
+    try {
+        return await authorWithinDeadline(provider, input, Date.now() + budgetMs);
+    }
+    catch (error) {
+        if (error instanceof LlmProviderError && error.code === 'provider_timeout') {
+            throw new LlmProviderError({
+                code: 'provider_timeout',
+                message: `The assistant did not finish within ${timeoutDescription(budgetMs)}. Ask for fewer metrics at a time.`,
+                provider: error.provider,
+                model: error.model,
+                retryable: true,
+                reference: error.reference,
+                cause: error,
+            });
+        }
+        throw error;
+    }
+}
+async function authorWithinDeadline(provider: LlmProvider, input: AuthorInput, deadline: number) {
     const warnings = [];
     const messages: LlmMessage[] = [{ role: 'user', content: buildUserPrompt(input) }];
-    let attempt = await tryParse(provider, messages);
+    let attempt = await tryParse(provider, messages, deadline - Date.now());
+    let repaired = false;
     // Re-emitting the same oversized JSON would be truncated again.
-    if (!attempt.ok && attempt.error !== TRUNCATED_RESPONSE) {
+    if (!attempt.ok && attempt.error !== TRUNCATED_RESPONSE && deadline - Date.now() >= MIN_REPAIR_BUDGET_MS) {
         // One repair round-trip
         warnings.push(`First response failed validation; requested repair (${attempt.error}).`);
         messages.push({ role: 'assistant', content: attempt.rawText.slice(0, 8000) });
@@ -179,12 +202,15 @@ export async function authorOps(provider: LlmProvider, input: AuthorInput) {
             role: 'user',
             content: `Your previous output was invalid: ${attempt.error}\nRe-emit ONLY the corrected JSON object now.`,
         });
-        attempt = await tryParse(provider, messages);
+        attempt = await tryParse(provider, messages, deadline - Date.now());
+        repaired = true;
     }
     if (!attempt.ok) {
         const message = attempt.error === TRUNCATED_RESPONSE
             ? `The assistant could not finish the draft because ${TRUNCATED_RESPONSE}. Ask for fewer metrics at a time.`
-            : `The assistant could not produce a valid draft after one repair attempt: ${attempt.error}`;
+            : repaired
+                ? `The assistant could not produce a valid draft after one repair attempt: ${attempt.error}`
+                : `The assistant could not produce a valid draft and there was no time left to repair it: ${attempt.error}`;
         // Provider text alone must never mark success; only the full
         // parse + schema validation pipeline decides readiness.
         provider.tracking?.commitFailure('invalid_response', message);
@@ -204,12 +230,13 @@ export async function authorOps(provider: LlmProvider, input: AuthorInput) {
 type Attempt =
     | { ok: true; parsed: any; rawText: string; provider?: string; model?: string | null; warnings: string[] }
     | { ok: false; error: string; rawText: string };
-async function tryParse(provider: LlmProvider, messages: LlmMessage[]): Promise<Attempt> {
+async function tryParse(provider: LlmProvider, messages: LlmMessage[], timeoutMs: number): Promise<Attempt> {
     try {
         const result = await provider.complete({
             system: SYSTEM_PROMPT,
             messages,
             maxTokens: AUTHORING_MAX_TOKENS,
+            timeoutMs,
         });
         if (result.truncated) return { ok: false, error: TRUNCATED_RESPONSE, rawText: result.text };
         let parsed: any;

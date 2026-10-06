@@ -18,6 +18,7 @@ import {
   removeDimensionClause,
   upsertDimensionClause,
   type StagedDimensionClause,
+  type StagedDimensionValue,
 } from "../fork-plan";
 
 interface SourceMetric {
@@ -25,14 +26,24 @@ interface SourceMetric {
   label: string;
 }
 
+/** A filter every selected source already carries, resolved to an eligible field. */
+export interface InheritedDimensionFilter {
+  fieldId: string;
+  fieldLabel: string;
+  exclude: boolean;
+  values: StagedDimensionValue[];
+}
+
 interface DimensionalForkProps {
   sources: SourceMetric[];
   clauses: StagedDimensionClause[];
+  /** Source filters; editing one starts from its current values. */
+  inherited?: InheritedDimensionFilter[];
   onChange: (clauses: StagedDimensionClause[]) => void;
   onEditingState: (reason: string | null) => void;
   onCompatibilityResolved: (
     sourceContextKey: string,
-    eligibleFieldIds: string[],
+    eligibleFields: PulseFilterDimensionField[],
   ) => void;
 }
 
@@ -46,6 +57,7 @@ const VALUE_GRID_MAX = 1500;
 export function DimensionalFork({
   sources,
   clauses,
+  inherited = [],
   onChange,
   onCompatibilityResolved,
   onEditingState,
@@ -102,10 +114,7 @@ export function DimensionalFork({
       .then((response) => {
         if (!fieldsSeqRef.current.isLatest(token)) return;
         setFields(response.fields);
-        onCompatibilityResolved(
-          sourceContextKey,
-          response.fields.map((field) => field.id),
-        );
+        onCompatibilityResolved(sourceContextKey, response.fields);
       })
       .catch((error) => {
         if (fieldsSeqRef.current.isLatest(token))
@@ -136,7 +145,9 @@ export function DimensionalFork({
     // fieldId='' reset re-runs this effect clean.
     if (sourceChanged) return;
 
-    const existingClause = clauses.find((clause) => clause.fieldId === fieldId);
+    const existingClause =
+      clauses.find((clause) => clause.fieldId === fieldId) ??
+      inherited.find((filter) => filter.fieldId === fieldId);
     const stagedValues = existingClause?.values ?? [];
     setValuesLoading(true);
     void (async () => {
@@ -243,6 +254,17 @@ export function DimensionalFork({
   });
   const selectedValues = selectedProviderValues(knownValues, selectedKeys);
   const selectedField = fields.find((field) => field.id === fieldId);
+  // Including or excluding the only member of a dimension either changes
+  // nothing or empties the metric, so such a field cannot scope a variant.
+  const singleValue =
+    valueMode === "fetch-all" &&
+    !valuesLoading &&
+    memberCount === 1 &&
+    domain.length === 1
+      ? domain[0]!
+      : null;
+  const inheritedById = new Map(inherited.map((filter) => [filter.fieldId, filter]));
+  const stagedFieldIds = new Set(clauses.map((clause) => clause.fieldId));
 
   const toggleValue = (key: string) => {
     setSelectedKeys((current) => {
@@ -269,9 +291,11 @@ export function DimensionalFork({
                   allLoading ||
                   valueContext !== `${sourceContextKey}\u0000${fieldId}`)
               ? "Loading filter values..."
-              : fieldId && selectedValues.length === 0
-                ? "Choose values for the selected filter."
-                : null;
+              : fieldId && singleValue
+                ? `${selectedField?.label ?? "This field"} has only one value, so it cannot scope a variant.`
+                : fieldId && selectedValues.length === 0
+                  ? "Choose values for the selected filter."
+                  : null;
     onEditingState(reason);
     if (
       valueContext !== `${sourceContextKey}\u0000${fieldId}` ||
@@ -309,6 +333,7 @@ export function DimensionalFork({
     valueContext,
     sourceContextKey,
     clauses,
+    singleValue,
     onChange,
     onEditingState,
   ]);
@@ -379,8 +404,27 @@ export function DimensionalFork({
       <div className="subpanel-title" id="dimension-fork-title">
         Filters
       </div>
-      {clauses.length > 0 && (
+      {(clauses.length > 0 || inherited.length > 0) && (
         <div className="pulse-clause-list" aria-label="Selected filters">
+          {inherited
+            .filter((filter) => !stagedFieldIds.has(filter.fieldId))
+            .map((filter) => (
+              <div className="pulse-clause" key={filter.fieldId}>
+                <span>
+                  <strong>{filter.fieldLabel}</strong>:{" "}
+                  {dimensionClauseSummary(filter)}
+                  <small className="pulse-clause-origin"> · Scoped</small>
+                </span>
+                <button
+                  className="btn small"
+                  type="button"
+                  onClick={() => setFieldId(filter.fieldId)}
+                  aria-label={`Edit ${filter.fieldLabel} filter`}
+                >
+                  Edit
+                </button>
+              </div>
+            ))}
           {clauses.map((clause) => (
             <div
               className="pulse-clause"
@@ -406,13 +450,13 @@ export function DimensionalFork({
               <button
                 className="btn small"
                 type="button"
-                aria-label={`Remove ${clause.fieldLabel} filter`}
+                aria-label={`${inheritedById.has(clause.fieldId) ? "Revert" : "Remove"} ${clause.fieldLabel} filter`}
                 onClick={() => {
                   if (fieldId === clause.fieldId) setFieldId("");
                   onChange(removeDimensionClause(clauses, clause.fieldId));
                 }}
               >
-                Remove
+                {inheritedById.has(clause.fieldId) ? "Revert" : "Remove"}
               </button>
             </div>
           ))}
@@ -471,7 +515,14 @@ export function DimensionalFork({
             No filter fields are available for these metrics.
           </p>
         )}
-      {fieldId && (
+      {fieldId && singleValue && (
+        <p className="section-hint" role="status">
+          {selectedField?.label ?? "This field"} has one value (
+          <strong>{singleValue.label}</strong>), so filtering on it would not
+          change the metric.
+        </p>
+      )}
+      {fieldId && !singleValue && (
         <div className="dimension-value-picker">
           <div
             className="dimension-value-mode"
