@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { aggregationLabel } from "../metric-labels";
 import { Modal } from "../components/ui";
 import type { PulsePublishReceipt } from "@pulse-metric-studio/shared";
 import { contextMatches } from "../author/controller";
@@ -13,15 +14,6 @@ const followLabels = {
   unknown: "Unconfirmed",
   skipped: "Skipped",
   not_attempted: "Not sent",
-};
-const aggregationLabels: Record<string, string> = {
-  SUM: "Sum",
-  AVERAGE: "Average",
-  AVG: "Average",
-  MIN: "Minimum",
-  MAX: "Maximum",
-  COUNT_DISTINCT: "Distinct count",
-  USER: "Calculated value",
 };
 
 export function Receipt({
@@ -142,9 +134,7 @@ export function Receipt({
               <dl>
                 <dt>Calculation</dt>
                 <dd>
-                  {aggregationLabels[
-                    item.summary.aggregation.replace(/^AGGREGATION_/, "")
-                  ] ?? item.summary.aggregation}{" "}
+                  {aggregationLabel(item.summary.aggregation)}{" "}
                   of {item.summary.fieldLabel}
                 </dd>
                 <dt>Date field</dt>

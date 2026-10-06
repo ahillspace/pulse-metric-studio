@@ -24,6 +24,19 @@ test("publication result summarizes creation, preserves error code and message, 
   assert.doesNotMatch(html, /Metric details|Publication receipt/);
 });
 
+test("publication result lists each published metric with its calculation and a Pulse link", () => {
+  const result = receipt();
+  result.siteContentUrl = "sales";
+  result.items.push({ ...result.items[0], itemIndex: 1, name: "Profit", creationStatus: "not_created", diagnostic: { code: "400123", message: "The date field is unavailable." } });
+  result.items.push({ ...result.items[0], itemIndex: 2, name: "Removed", undoStatus: "deleted" });
+  const html = renderToStaticMarkup(<PublicationResult receipt={result} onClose={() => {}} onActivity={() => {}} />);
+  const list = html.slice(html.indexOf('aria-label="Published metrics"'));
+  assert.ok(list.includes(result.items[0].name));
+  assert.match(list, /Open in Pulse/);
+  assert.doesNotMatch(list, /Profit|Removed/);
+  assert.ok(html.includes(result.datasourceName));
+});
+
 test("Pulse landing link lowercases the site content URL and rejects non-web protocols", () => {
   assert.equal(pulseSiteUrl("https://tableau.example/", "sales & ops"), "https://tableau.example/pulse/site/sales%20%26%20ops");
   assert.equal(pulseSiteUrl("https://prod-uswest-c.online.tableau.com/", "PaCe"), "https://prod-uswest-c.online.tableau.com/pulse/site/pace");

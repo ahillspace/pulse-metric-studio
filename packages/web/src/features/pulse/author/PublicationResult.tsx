@@ -5,6 +5,7 @@ import { contextMatches } from "./controller";
 import { useConnection } from "../connections/controller";
 import { useActivity } from "../activity/controller";
 import { Modal } from "../components/ui";
+import { PublishedMetrics } from "./PublishedMetrics";
 
 export function PublicationResult({ receipt, onClose, onActivity }: {
   receipt: PulsePublishReceipt;
@@ -26,6 +27,15 @@ export function PublicationResult({ receipt, onClose, onActivity }: {
   const failures = receipt.items.filter((item) => item.creationStatus !== "created");
   const followProblems = [group, receipt.follow.membership, ...receipt.follow.subscriptions].filter((item) => ['failed', 'unknown', 'not_attempted'].includes(item.status));
   const undone = receipt.items.filter((item) => item.undoStatus === "deleted").length;
+  const published = receipt.items.filter((item) => item.creationStatus === "created" && item.undoStatus !== "deleted");
+  const live = connected && receipt.context && contentUrl !== undefined ? { context: receipt.context, siteContentUrl: contentUrl } : null;
+  const settled = (status: string) => status === "created" || status === "reused";
+  const digestFollowed = receipt.follow.requested && settled(group.status) && settled(receipt.follow.membership.status);
+  const outcomeCounts = [
+    [receipt.failedCount, "failed"],
+    [receipt.unknownCount, "unconfirmed"],
+    [receipt.unattemptedCount, "not sent"],
+  ].filter(([count]) => Number(count) > 0) as Array<[number, string]>;
   const errors = [linkError, activity.undoReceiptId === receipt.id ? activity.undoError : null, activity.groupReceiptId === receipt.id ? activity.groupError : null];
   if (confirmGroup) return <Modal title={`Delete "${audience}" group?`} onClose={busy ? undefined : () => setConfirmGroup(false)} actions={<>
     <button className="btn" disabled={busy} onClick={() => setConfirmGroup(false)}>Cancel</button>
@@ -40,7 +50,14 @@ export function PublicationResult({ receipt, onClose, onActivity }: {
     <button className="btn danger" disabled={!canUndo || !connected || busy} onClick={() => void activity.undo(receipt.id)}>{activity.undoBusy ? "Undoing..." : "Undo Publication"}</button>
     <button className="btn danger" disabled={!canDeleteGroup || !connected || busy} onClick={() => setConfirmGroup(true)}>{group.deletion?.status === "deleted" ? "Group deleted" : `Delete "${audience}" Group`}</button>
   </>}>
-    <p className="pulse-result-total" role="status">{receipt.createdCount} {receipt.createdCount === 1 ? "metric created" : "metrics created"}</p>
+    <header className="pulse-result-summary">
+      <p className="pulse-result-total" role="status">{receipt.createdCount} {receipt.createdCount === 1 ? "metric created" : "metrics created"}</p>
+      <p className="pulse-result-context">
+        {receipt.datasourceName}
+        {digestFollowed && <> · Followed by the {audience} digest group</>}
+      </p>
+      {outcomeCounts.length > 0 && <p className="pulse-result-outcomes">{outcomeCounts.map(([count, label]) => <span key={label}>{count} {label}</span>)}</p>}
+    </header>
     {undone > 0 && <p role="status">{undone} {undone === 1 ? "metric removed" : "metrics removed"} by undo.</p>}
     {receipt.items.filter((item) => item.undoStatus === "failed" || item.undoStatus === "unknown").map((item) => <p className="warning-banner" role="alert" key={`undo-${item.itemIndex}`}>
       <strong>{item.name}: </strong>{item.undoStatus === "unknown" ? "Undo is unconfirmed. " : "Undo failed. "}
@@ -60,5 +77,6 @@ export function PublicationResult({ receipt, onClose, onActivity }: {
       {group.deletion.status === "unknown" && " Check Tableau before retrying."}
     </p>}
     {errors.filter(Boolean).map((error, index) => <p className="warning-banner" role="alert" key={index}>{error}</p>)}
+    <PublishedMetrics items={published} live={live} onLinkError={setLinkError} />
   </Modal>;
 }
