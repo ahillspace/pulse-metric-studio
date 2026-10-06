@@ -6,6 +6,7 @@ import {
   PreparePulsePublishRequestSchema,
   PublishPulseDraftRequestSchema,
   PulseAuthorProposalRequestSchema,
+  PulseMetricPreviewRequestSchema,
   PulseListQuerySchema,
   PulseDraftListQuerySchema,
   SavePulseDraftRequestSchema,
@@ -25,6 +26,7 @@ import {
   PulsePublishService,
   type PublishDependencies,
 } from "../application/publish.js";
+import { previewPulseMetric } from "../application/metric-preview.js";
 import { PulseRepository } from "../persistence/repository.js";
 
 export interface PulseWorkflowDependencies {
@@ -76,6 +78,12 @@ export function registerPulseWorkflowRoutes(
       throw error;
     }
   };
+  app.post("/api/pulse/metrics/:metricId/preview", (req, reply) =>
+    respond(reply, () => previewPulseMetric(
+      parse(z.string().min(1).max(255), (req.params as { metricId: string }).metricId),
+      parse(PulseMetricPreviewRequestSchema, req.body),
+    )),
+  );
   app.get("/api/pulse/drafts", (req, reply) =>
     respond(reply, () =>
       repository.listDrafts(parse(PulseDraftListQuerySchema, req.query)),

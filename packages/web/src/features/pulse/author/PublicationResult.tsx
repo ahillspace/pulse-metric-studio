@@ -1,20 +1,10 @@
 import { useState } from "react";
-import { isTauri } from "@tauri-apps/api/core";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openTableauUrl, pulseSiteUrl } from "../shell/tableau-links";
 import type { PulsePublishReceipt } from "@pulse-metric-studio/shared";
 import { contextMatches } from "./controller";
 import { useConnection } from "../connections/controller";
 import { useActivity } from "../activity/controller";
 import { Modal } from "../components/ui";
-
-export function pulseSiteUrl(serverUrl: string, siteContentUrl: string) {
-  const url = new URL(serverUrl);
-  if (!['https:', 'http:'].includes(url.protocol)) throw new Error("Unsupported Tableau URL.");
-  url.pathname = `/pulse/site/${encodeURIComponent(siteContentUrl)}`;
-  url.search = "";
-  url.hash = "";
-  return url.href;
-}
 
 export function PublicationResult({ receipt, onClose, onActivity }: {
   receipt: PulsePublishReceipt;
@@ -44,8 +34,7 @@ export function PublicationResult({ receipt, onClose, onActivity }: {
   return <Modal title="Publication results" className="pulse-publication-result" onClose={busy ? undefined : onClose} actions={<>
     <button className="btn" disabled={!pulseUrl} onClick={() => {
       if (!pulseUrl) return;
-      if (isTauri()) void openUrl(pulseUrl).catch((error: unknown) => setLinkError(error instanceof Error ? error.message : "Could not open Tableau Pulse."));
-      else window.open(pulseUrl, "_blank", "noopener,noreferrer");
+      void openTableauUrl(pulseUrl).catch((error: unknown) => setLinkError(error instanceof Error ? error.message : "Could not open Tableau Pulse."));
     }}>View in Pulse</button>
     <button className="btn" onClick={onActivity}>View in Activity</button>
     <button className="btn danger" disabled={!canUndo || !connected || busy} onClick={() => void activity.undo(receipt.id)}>{activity.undoBusy ? "Undoing..." : "Undo Publication"}</button>

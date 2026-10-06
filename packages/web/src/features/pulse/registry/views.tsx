@@ -32,6 +32,8 @@ export function MetricRow({
   highlighted,
   onSelectionChange,
   onToggleTimeframeFamily,
+  onPreview,
+  previewed = false,
 }: {
   definition: DefinitionNode;
   variant: MetricVariant;
@@ -39,6 +41,8 @@ export function MetricRow({
   selectedMetricIds: string[];
   allMetrics: PulseRegistryMetric[];
   highlighted: boolean;
+  onPreview?: () => void;
+  previewed?: boolean;
   onSelectionChange: (checked: boolean) => void;
   onToggleTimeframeFamily: (metric: PulseRegistryMetric) => void;
 }) {
@@ -87,6 +91,21 @@ export function MetricRow({
       </button>
       {scoped && <span className="pulse-scope-label">Scoped</span>}
       <span className="pulse-metric-name">{metric.name}</span>
+      {onPreview && (
+        <button
+          className="btn small pulse-registry-icon"
+          type="button"
+          aria-label={`Preview ${metric.name}`}
+          title="Preview metric"
+          aria-pressed={previewed}
+          onClick={onPreview}
+        >
+          <svg viewBox="0 0 20 20" aria-hidden="true">
+            <path d="M2 10s3-6 8-6 8 6 8 6-3 6-8 6-8-6-8-6Z" />
+            <circle cx="10" cy="10" r="2.5" />
+          </svg>
+        </button>
+      )}
       <CopyIdButton metricId={variant.metricId} />
     </div>
   );

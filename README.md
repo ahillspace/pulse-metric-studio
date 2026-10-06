@@ -60,6 +60,8 @@ Create variants from selected metrics, with timeframe and filter changes beside 
 Deleting default metrics includes a review of the affected definitions and their dependent metrics.
 **Activity** keeps publication results available while disconnected and offers undo for eligible confirmed creations.
 Publication results also provide a separate action to delete a group created by that publication.
+In Metric Manager, preview a metric card using the connected Tableau account.
+Previews require Tableau Cloud metric image API support and available insight data.
 
 The backend owns validation, Tableau requests, and SQLite access.
 SQLite stores the latest authoring configuration and publication receipts.

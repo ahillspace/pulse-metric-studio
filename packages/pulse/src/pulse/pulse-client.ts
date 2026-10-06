@@ -79,20 +79,22 @@ export async function listDefinitions(session: TableauSession, maxPages = 200): 
   return (await listDefinitionsInventory(session, maxPages)).definitions;
 }
 
-export async function getPulseDefinition(session: TableauSession, definitionId: string): Promise<PulseDefinition> {
+export async function getPulseDefinition(session: TableauSession, definitionId: string, maxResponseBytes?: number): Promise<PulseDefinition> {
   const data = await getJson<unknown>(
     session,
     `${PULSE}/definitions/${encodeURIComponent(definitionId)}`,
+    undefined, undefined, maxResponseBytes,
   );
   const candidate = isRecord(data) && isRecord(data.definition) ? data.definition : data;
   if (!isRecord(candidate)) throw unsupportedContract('definition', data);
   return candidate as PulseDefinition;
 }
 
-export async function getPulseMetric(session: TableauSession, metricId: string): Promise<PulseExactMetric> {
+export async function getPulseMetric(session: TableauSession, metricId: string, maxResponseBytes?: number): Promise<PulseExactMetric> {
   const data = await getJson<unknown>(
     session,
     `${PULSE}/metrics/${encodeURIComponent(metricId)}`,
+    undefined, undefined, maxResponseBytes,
   );
   const candidate = isRecord(data) && isRecord(data.metric) ? data.metric : data;
   if (!isRecord(candidate)) throw unsupportedContract('metric', data);

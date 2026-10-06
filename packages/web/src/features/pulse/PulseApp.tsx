@@ -21,6 +21,7 @@ import { useNotices } from "./shell/notifications";
 import "./pulse-remediation.css";
 import "./workflows.css";
 import "./registry/variants.css";
+import "./registry/preview.css";
 
 type Area = "Connections" | "Author" | "Registry" | "Activity";
 const labels: Record<Area, string> = {
