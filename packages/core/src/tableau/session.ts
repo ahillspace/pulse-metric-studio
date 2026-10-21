@@ -133,8 +133,6 @@ export function isSessionCurrent(session: TableauSession): boolean {
     && context.siteId === session.siteId;
 }
 let activeCredential: { connectionId: string; patSecret: string } | null = null;
-/** Set when a request finds the stored token rejected. */
-export let lastAuthRejectionAt: number | null = null;
 
 export function normalizeServerUrl(input: string): string {
   const trimmed = input.trim().replace(/\/+$/, '');
@@ -311,11 +309,6 @@ export function clearSession(): void {
   sessionGeneration++;
   activeSession = null;
   activeCredential = null;
-}
-
-export function markAuthRejected(): void {
-  lastAuthRejectionAt = Date.now();
-  clearSession();
 }
 
 function requiredCredentialRef(value: string): string {

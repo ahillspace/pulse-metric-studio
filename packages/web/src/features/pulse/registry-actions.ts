@@ -16,6 +16,8 @@ export interface RegistryActionItem {
   metricId: string;
   metricLabel: string;
   targetLabel?: string;
+  targetId?: string;
+  targetKind?: "GROUP" | "USER";
   status: RegistryActionStatus;
   resultMetricId?: string;
   creationStatus?: PulseVariantResult["creationStatus"];
@@ -194,6 +196,8 @@ export function registryActionOutcome(
 }
 
 export interface RegistryTargetSummary {
+  targetId: string | undefined;
+  targetKind: "GROUP" | "USER" | undefined;
   targetLabel: string;
   total: number;
   created: number;
@@ -216,9 +220,12 @@ export function summarizeRegistryTargets(
   const byTarget = new Map<string, RegistryTargetSummary>();
   for (const item of items) {
     const targetLabel = item.targetLabel ?? "";
-    let summary = byTarget.get(targetLabel);
+    const targetKey = `${item.targetKind}\u0000${item.targetId}`;
+    let summary = byTarget.get(targetKey);
     if (!summary) {
       summary = {
+        targetId: item.targetId,
+        targetKind: item.targetKind,
         targetLabel,
         total: 0,
         created: 0,
@@ -227,7 +234,7 @@ export function summarizeRegistryTargets(
         notFollowed: 0,
         failed: 0,
       };
-      byTarget.set(targetLabel, summary);
+      byTarget.set(targetKey, summary);
     }
     summary.total += 1;
     if (item.status === "created") summary.created += 1;
@@ -240,7 +247,22 @@ export function summarizeRegistryTargets(
     else if (item.status === "not_attempted")
       summary.notAttempted = (summary.notAttempted ?? 0) + 1;
   }
-  return [...byTarget.values()];
+  const summaries = [...byTarget.values()];
+  const names = new Map<string, number>();
+  const kinds = new Map<string, number>();
+  for (const summary of summaries) {
+    names.set(summary.targetLabel, (names.get(summary.targetLabel) ?? 0) + 1);
+    const key = `${summary.targetKind}\u0000${summary.targetLabel}`;
+    kinds.set(key, (kinds.get(key) ?? 0) + 1);
+  }
+  return summaries.map((summary) => {
+    if ((names.get(summary.targetLabel) ?? 0) < 2) return summary;
+    const repeatedKind = (kinds.get(`${summary.targetKind}\u0000${summary.targetLabel}`) ?? 0) > 1;
+    return {
+      ...summary,
+      targetLabel: `${summary.targetKind === "GROUP" ? "Group" : "User"} ${summary.targetLabel}${repeatedKind ? ` (${summary.targetId})` : ""}`,
+    };
+  });
 }
 
 /**
@@ -274,19 +296,4 @@ export function registryTargetHeadline(
   if (summary.unknown) extra.push(`${summary.unknown} outcomes unknown`);
   if (summary.notAttempted) extra.push(`${summary.notAttempted} not sent`);
   return `${label} unfollowed ${metricWord(removed)}${extra.length ? ` (${extra.join(", ")})` : ""}`;
-}
-
-export async function mapWithConcurrency<T, R>(
-  values: T[],
-  concurrency: number,
-  operation: (value: T) => Promise<R>,
-): Promise<R[]> {
-  const results: R[] = [];
-  const size = Math.max(1, Math.floor(concurrency));
-  for (let index = 0; index < values.length; index += size) {
-    results.push(
-      ...(await Promise.all(values.slice(index, index + size).map(operation))),
-    );
-  }
-  return results;
 }

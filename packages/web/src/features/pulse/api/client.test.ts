@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pulseRequest, PulseApiError } from "./client";
+import { pulseDimensionalForkApi } from "../dimensional-fork-api";
 
 test("structured workflow errors retain status, message, code, and conflict details", async (t) => {
   const original = globalThis.fetch;
@@ -29,4 +30,31 @@ test("structured workflow errors retain status, message, code, and conflict deta
       },
     );
   }
+});
+
+test("dimension discovery sends complete large selections in POST bodies", async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; });
+  const sourceMetricIds = Array.from({ length: 1000 }, (_, index) =>
+    `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+  );
+  const requests: Array<{ path: string; body: unknown }> = [];
+  const fieldId = "Country/Region";
+  globalThis.fetch = async (input, init) => {
+    assert.equal(init?.method, "POST");
+    assert.equal(new Headers(init.headers).get("Content-Type"), "application/json");
+    const path = String(input);
+    requests.push({ path, body: JSON.parse(String(init.body)) });
+    return Response.json(path.endsWith("/count") ? { fieldId, count: 2 }
+      : path.endsWith("/values") ? { fieldId, values: [], truncated: false }
+        : { fields: [] });
+  };
+  await pulseDimensionalForkApi.fields(sourceMetricIds);
+  await pulseDimensionalForkApi.count(sourceMetricIds, fieldId);
+  await pulseDimensionalForkApi.values(sourceMetricIds, fieldId, "West", { all: true });
+  assert.deepEqual(requests, [
+    { path: "/api/pulse/dimensions", body: { sourceMetricIds } },
+    { path: "/api/pulse/dimensions/count", body: { sourceMetricIds, fieldId } },
+    { path: "/api/pulse/dimensions/values", body: { sourceMetricIds, fieldId, search: "West", all: true } },
+  ]);
 });

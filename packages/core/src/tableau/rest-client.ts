@@ -274,24 +274,3 @@ export async function deleteReq(session: TableauSession, path: string): Promise<
     throw new TableauError(`DELETE ${path} failed (${resp.status})`, resp.status, bodyText.slice(0, 500), classifyStatus(resp.status, bodyText));
   }
 }
-
-/** Paginate a Pulse-style API using page_token / next_page_token. */
-export async function paginateToken<T>(
-  session: TableauSession,
-  basePath: string,
-  pageSize: number,
-  extract: (page: any) => T[],
-  maxPages = 200,
-): Promise<T[]> {
-  const out: T[] = [];
-  let pageToken: string | null = null;
-  for (let page = 0; page < maxPages; page++) {
-    let p = `${basePath}?page_size=${pageSize}`;
-    if (pageToken) p += `&page_token=${encodeURIComponent(pageToken)}`;
-    const data = await getJson<any>(session, p);
-    out.push(...extract(data));
-    pageToken = data.next_page_token ?? null;
-    if (!pageToken) break;
-  }
-  return out;
-}

@@ -13,7 +13,6 @@ fingerprintValues,
 mergePulseStringFilter,
 } from './dimensional-fork-service.js';
 import type { PulseDefinition,PulseExactMetric } from './pulse-client.js';
-import { repeatedQueryValues } from './routes.js';
 import { PulseDimensionalForkService,dimensionalForkHttpStatus,type PulseDimensionalForkDependencies } from './test-support/legacy-dimensional-adapter.js';
 
 const session: TableauSession = {
@@ -128,7 +127,6 @@ test('canonical request preserves provider spelling while removing exact duplica
     selection: { mode: 'VALUES', values: ['   '] },
   }));
 });
-
 test('dimensional request rejects malformed and over-limit input', () => {
   const request = (sourceMetricIds: string[], values: string[]) => ({
     version: 1,
@@ -179,6 +177,34 @@ test('eligible dimensions intersect string fields with every allowed_dimensions 
     dataType: 'string',
     providerReference: { fieldName: 'Region' },
   });
+});
+
+test('dimension discovery bounds metric and definition reads and shares definition lookups', async () => {
+  let active = 0;
+  let maximum = 0;
+  const definitionCalls = new Map<string, number>();
+  const read = async () => {
+    active++;
+    maximum = Math.max(maximum, active);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    active--;
+  };
+  const service = new PulseDimensionalForkService(dependencies({
+    getMetric: async (_session, metricId) => {
+      await read();
+      return { id: metricId, definition_id: `d${Math.floor(Number(metricId.slice(1)) / 2)}`, specification: {} };
+    },
+    getDefinition: async (_session, definitionId) => {
+      definitionCalls.set(definitionId, (definitionCalls.get(definitionId) ?? 0) + 1);
+      await read();
+      return { metadata: { id: definitionId }, specification: { datasource: { id: 'ds-1' } }, extension_options: { allowed_dimensions: ['Region'] } };
+    },
+  }));
+  const result = await service.listEligibleDimensions(session, Array.from({ length: 24 }, (_, index) => `m${index}`));
+  assert.deepEqual(result.fields.map((field) => field.id), ['Region']);
+  assert.ok(maximum <= 5, `Expected at most five simultaneous reads, received ${maximum}.`);
+  assert.equal(definitionCalls.size, 12);
+  assert.ok([...definitionCalls.values()].every((count) => count === 1));
 });
 
 test('eligible dimensions reject incompatible source datasources', async () => {
@@ -562,10 +588,4 @@ test('fork HTTP status distinguishes success, mixed results, total provider fail
     selection: { mode: 'VALUES', values: ['West'] },
   });
   assert.equal(dimensionalForkHttpStatus(sourceFailure), 422);
-});
-
-test('route query parser retains repeated source metric identifiers', () => {
-  assert.deepEqual(repeatedQueryValues(['m1', 'm2']), ['m1', 'm2']);
-  assert.deepEqual(repeatedQueryValues('m1'), ['m1']);
-  assert.deepEqual(repeatedQueryValues(undefined), []);
 });

@@ -7,7 +7,7 @@ import {
   reconcileMetricSelection,
   selectionState,
   setMetricSelection,
-  timeframeScopeFamilyMetricIds,
+  timeframeScopeFamilies,
   timeframeScopeSignature,
   type PulseRegistryMetric,
 } from "../fork-plan";
@@ -98,6 +98,26 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
     () => new Map(allMetrics.map((metric) => [metric.metricId, metric])),
     [allMetrics],
   );
+  const selectedMetricIds = useMemo(
+    () => new Set(plan.selectedMetricIds),
+    [plan.selectedMetricIds],
+  );
+  const timeframeFamilies = useMemo(
+    () => timeframeScopeFamilies(allMetrics),
+    [allMetrics],
+  );
+  const familySelectionByMetricId = useMemo(() => {
+    const states = new Map<string, ReturnType<typeof selectionState>>();
+    for (const ids of timeframeFamilies.values()) {
+      const state = selectionState(selectedMetricIds, ids);
+      for (const id of ids) states.set(id, state);
+    }
+    return states;
+  }, [timeframeFamilies, selectedMetricIds]);
+  const createdMetricIds = useMemo(
+    () => new Set(registry.createdMetricIds),
+    [registry.createdMetricIds],
+  );
   const definitionById = useMemo(
     () =>
       new Map(
@@ -138,7 +158,7 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
     definition.metrics.map((metric) => metric.metricId),
   );
   const registrySelection = selectionState(
-    plan.selectedMetricIds,
+    selectedMetricIds,
     displayedIds,
   );
   const selectedSources = plan.selectedMetricIds
@@ -159,11 +179,8 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
       expanded.has(definition.definitionId),
     );
   const toggleFamily = (metric: PulseRegistryMetric) => {
-    const ids = timeframeScopeFamilyMetricIds(
-      allMetrics,
-      timeframeScopeSignature(metric),
-    );
-    const selected = selectionState(plan.selectedMetricIds, ids);
+    const ids = timeframeFamilies.get(timeframeScopeSignature(metric)) ?? [];
+    const selected = familySelectionByMetricId.get(metric.metricId)!;
     setPlan((current) => ({
       ...current,
       selectedMetricIds: setMetricSelection(
@@ -393,7 +410,7 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
                   <div className="def-head pulse-definition-head">
                     <SelectionCheckbox
                       label={`Select displayed metrics in ${definition.name}`}
-                      state={selectionState(plan.selectedMetricIds, childIds)}
+                      state={selectionState(selectedMetricIds, childIds)}
                       onChange={(checked) =>
                         setPlan((current) => ({
                           ...current,
@@ -459,12 +476,11 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
                       {variants.map((variant) => (
                         <MetricRow
                           key={variant.metricId}
-                          definition={definition}
                           variant={variant}
                           metric={metricById.get(variant.metricId)!}
-                          selectedMetricIds={plan.selectedMetricIds}
-                          allMetrics={allMetrics}
-                          highlighted={registry.createdMetricIds.includes(
+                          selected={selectedMetricIds.has(variant.metricId)}
+                          familySelection={familySelectionByMetricId.get(variant.metricId)!}
+                          highlighted={createdMetricIds.has(
                             variant.metricId,
                           )}
                           onSelectionChange={(checked) =>

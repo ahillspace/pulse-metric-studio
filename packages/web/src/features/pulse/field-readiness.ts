@@ -1,9 +1,5 @@
 import { validateTimeDimensionId, type DatasourceCatalog, type MetricSelection } from '@pulse-metric-studio/shared';
 
-export function eligibleTimeDimensionIds(catalog: Pick<DatasourceCatalog, 'timeDimensions'>): Set<string> {
-  return new Set(catalog.timeDimensions.map((field) => field.id));
-}
-
 export function metricHasEligibleTimeDimension(
   metric: Pick<MetricSelection, 'timeDimensionFieldId'>,
   catalog: Pick<DatasourceCatalog, 'timeDimensions'>,

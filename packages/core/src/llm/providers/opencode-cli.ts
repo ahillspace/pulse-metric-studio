@@ -130,7 +130,13 @@ async function resolveBin(command: string): Promise<ResolveResult | null> {
     pending = findBin(command);
     resolvedBins.set(command, pending);
   }
-  return pending;
+  let resolved: ResolveResult | null = null;
+  try {
+    resolved = await pending;
+    return resolved;
+  } finally {
+    if (!resolved && resolvedBins.get(command) === pending) resolvedBins.delete(command);
+  }
 }
 
 async function findBin(command: string): Promise<ResolveResult | null> {

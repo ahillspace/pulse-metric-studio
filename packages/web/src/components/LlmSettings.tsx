@@ -11,7 +11,6 @@ import type {
 import { WorkbenchModal } from './workbench';
 import { buildOpenCodeModelOptions, isCurrentOpenCodeModel, openCodeCatalogProfileId } from './llm-model-options';
 import { ProviderSetupChoices, newProviderId, providerAccess, providerChoice, providerDescription, straightenQuotes, type ProviderChoice } from './llm-provider-choices';
-import './llm-settings.css';
 import { LLM_HEALTH_EVENT } from '../llm-health-events';
 
 async function request<T>(url: string, method = 'GET', body?: unknown): Promise<T> {
@@ -191,10 +190,10 @@ export function LlmBadge() {
         <WorkbenchModal title="Assistant provider settings" onClose={() => setOpen(false)}>
           <p className="section-hint">Configure OpenCode or an API provider, test its connection, then select it for Pulse Metric Studio.</p>
           <div className="llm-settings-layout">
-            <div className="llm-profile-list">
+            <fieldset className="llm-profile-list" aria-label="Saved providers" disabled={busy}>
               {profiles.map(profile => { const provider = status?.providers[profile.id]; return <button key={profile.id} className={`llm-profile-card ${!choosing && form.id === profile.id ? 'active' : ''}`} type="button" onClick={() => edit(profile)}><strong>{profile.label}</strong><span>{providerAccess(profile.protocol, profile.authMode)}{status?.active === profile.id ? ' · In use' : ''}</span><span className={`llm-health ${provider?.healthy ? 'healthy' : provider?.healthy === false ? 'unhealthy' : ''}`}>{provider?.healthy ? 'Connected' : provider?.reason || 'Not tested'}</span></button>; })}
               <button className="btn" type="button" onClick={() => edit()}>Add provider</button>
-            </div>
+            </fieldset>
             {choosing ? <ProviderSetupChoices onChoose={choose} /> : <ProfileEditor key={editingExisting ? form.id : 'new'} form={form} setForm={(next) => { editorInitialized.current = true; setForm(next); setFormDirty(true); }} dirty={formDirty} existing={editingExisting} busy={busy} status={form.id ? status?.providers[form.id] : undefined} onSave={save} onTest={testProfile} onSelect={() => void selectProvider(form.id)} onDelete={() => void deleteProfile()} />}
           </div>
           {feedback && <div className={`llm-feedback ${feedback.tone}`} role="status">{feedback.message}</div>}
@@ -204,7 +203,7 @@ export function LlmBadge() {
   );
 }
 
-function ProfileEditor({
+export function ProfileEditor({
   form,
   setForm,
   dirty,
@@ -297,7 +296,7 @@ function ProfileEditor({
   });
 
   return (
-    <div className="llm-profile-editor">
+    <fieldset className="llm-profile-editor" aria-label="Provider settings" disabled={busy}>
       <h2 className="llm-editor-heading">{providerChoice(form.protocol).label}</h2>
       <p className="section-hint">{providerDescription(form.protocol, form.authMode)}</p>
       <div className="llm-form-grid">
@@ -344,6 +343,6 @@ function ProfileEditor({
         {existing && !confirmDelete && <button className="btn danger" type="button" disabled={busy || form.source !== 'saved'} onClick={() => setConfirmDelete(true)}>Delete profile</button>}
         {confirmDelete && <><span className="section-hint warn" role="alert">Delete this saved provider profile?</span><button className="btn" type="button" onClick={() => setConfirmDelete(false)}>Cancel delete</button><button className="btn danger" type="button" disabled={busy} onClick={() => { setConfirmDelete(false); onDelete(); }}>Confirm delete</button></>}
       </div>
-    </div>
+    </fieldset>
   );
 }

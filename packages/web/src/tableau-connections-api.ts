@@ -1,14 +1,9 @@
 import { invoke as tauriInvoke } from '@tauri-apps/api/core';
 import { desktopFetch } from './desktop-transport';
+import type { TableauSessionInfo } from './api/client';
+export type { TableauSessionInfo } from './api/client';
 export type CredentialStorageKind = 'os' | 'encrypted';
 export type CredentialPlatform = 'windows' | 'macos' | 'browser' | 'unsupported';
-
-export interface TableauSessionInfo {
-  serverUrl: string;
-  siteContentUrl: string;
-  siteId: string;
-  userId: string;
-}
 
 export interface ConnectionSummary {
   id: string;

@@ -8,8 +8,6 @@ import { useRegistry } from "./controller";
 import { followStateLabel } from "../follow-state";
 import {
   selectionState,
-  timeframeScopeSignature,
-  timeframeScopeFamilyMetricIds,
   type PulseRegistryMetric,
 } from "../fork-plan";
 import {
@@ -24,22 +22,20 @@ import {
 import { Modal } from "../components/ui";
 
 export function MetricRow({
-  definition,
   variant,
   metric,
-  selectedMetricIds,
-  allMetrics,
+  selected,
+  familySelection,
   highlighted,
   onSelectionChange,
   onToggleTimeframeFamily,
   onPreview,
   previewed = false,
 }: {
-  definition: DefinitionNode;
   variant: MetricVariant;
   metric: PulseRegistryMetric;
-  selectedMetricIds: string[];
-  allMetrics: PulseRegistryMetric[];
+  selected: boolean;
+  familySelection: ReturnType<typeof selectionState>;
   highlighted: boolean;
   onPreview?: () => void;
   previewed?: boolean;
@@ -47,9 +43,6 @@ export function MetricRow({
   onToggleTimeframeFamily: (metric: PulseRegistryMetric) => void;
 }) {
   const followState = useRegistry((state) => state.followState);
-  const signature = timeframeScopeSignature(metric);
-  const familyIds = timeframeScopeFamilyMetricIds(allMetrics, signature);
-  const familySelection = selectionState(selectedMetricIds, familyIds);
   const userFollow = Boolean(
     followState?.userFollowsByMetricId[variant.metricId],
   );
@@ -66,7 +59,7 @@ export function MetricRow({
         className="metric-source-checkbox"
         type="checkbox"
         aria-label={`Select ${metric.name} - ${variant.timeframeLabel}`}
-        checked={selectedMetricIds.includes(variant.metricId)}
+        checked={selected}
         onChange={(event) => onSelectionChange(event.target.checked)}
       />
       <span
@@ -83,7 +76,7 @@ export function MetricRow({
         title={(() => {
           const scope = scoped ? "identically filtered " : "unfiltered ";
           const verb = familySelection.checked ? "Clear" : "Select";
-          return `${verb} all ${familyIds.length} ${scope}${variant.timeframeLabel} metric${familyIds.length === 1 ? "" : "s"} across definitions`;
+          return `${verb} all ${familySelection.total} ${scope}${variant.timeframeLabel} metric${familySelection.total === 1 ? "" : "s"} across definitions`;
         })()}
         onClick={() => onToggleTimeframeFamily(metric)}
       >

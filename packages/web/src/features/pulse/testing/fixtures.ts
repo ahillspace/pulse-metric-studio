@@ -10,6 +10,7 @@ import {
 
 export const session = {
   connectionId: "connection",
+  sessionGeneration: 1,
   serverUrl: "https://tableau.example",
   siteId: "site",
   siteContentUrl: "sales",

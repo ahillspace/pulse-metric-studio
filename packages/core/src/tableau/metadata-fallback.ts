@@ -73,7 +73,7 @@ const TABLE_CALC_FUNCTIONS = [
 const tableCalcRe = new RegExp(`\\b(?:${TABLE_CALC_FUNCTIONS.join('|')})\\s*\\(`, 'i');
 
 export function isTableCalcFormula(formula: string | null | undefined): boolean {
-  return !!formula && tableCalcRe.test(formula);
+  return tableCalcRe.test(prepareFormulaForScan(formula, false));
 }
 
 // ── requiresUserAgg detection: an aggregation call OUTSIDE any {} LOD block ──
@@ -92,11 +92,11 @@ function stripCurlyBlocks(formula: string): string {
 
 export function requiresUserAggFromFormula(formula: string | null | undefined): boolean {
   if (!formula) return false;
-  return userAggRe.test(stripCurlyBlocks(formula));
+  return userAggRe.test(stripCurlyBlocks(prepareFormulaForScan(formula, false)));
 }
 
-// ── Formula reference scanning: strip string literals + comments before scan ──
-function prepareFormulaForRefScan(formula: string | null | undefined): string {
+// Preserve references for dependency scanning; mask them for function scanning.
+function prepareFormulaForScan(formula: string | null | undefined, preserveReferences: boolean): string {
   if (!formula) return '';
   let result = '';
   let i = 0;
@@ -107,7 +107,7 @@ function prepareFormulaForRefScan(formula: string | null | undefined): string {
       // Quotes and comment delimiters inside an identifier are ordinary characters.
       const close = formula.indexOf(']', i + 1);
       i = close < 0 ? formula.length : close + 1;
-      result += formula.slice(start, i);
+      result += preserveReferences ? formula.slice(start, i) : ' '.repeat(i - start);
       continue;
     }
     if (ch === "'" || ch === '"') {
@@ -235,7 +235,7 @@ export function classifyGraphqlNodes(nodes: GraphqlNode[]): VdsField[] {
   const analysis: Analysis[] = nodes
     .map((node) => {
       const isCalc = !!node.formula;
-      const prepped = isCalc ? prepareFormulaForRefScan(node.formula) : '';
+      const prepped = isCalc ? prepareFormulaForScan(node.formula, true) : '';
       const internalReason = getInternalFieldReason(node);
       return {
         node,

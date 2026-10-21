@@ -11,3 +11,4 @@
 .llm-advanced summary { cursor: pointer; color: var(--text-muted); margin-bottom: 12px; }
 .llm-profile-editor > .section-hint { margin-bottom: 16px; }
 @media (max-width: 640px) { .llm-choice-grid { grid-template-columns: 1fr; } }
+.llm-profile-list, .llm-profile-editor { border: 0; margin: 0; padding: 0; min-width: 0; }

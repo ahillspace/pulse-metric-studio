@@ -9,6 +9,7 @@ use std::io::Write;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -26,6 +27,50 @@ use credential_broker::{
 use uuid::Uuid;
 
 struct ServerHandle(Mutex<Option<Child>>);
+
+#[derive(Default)]
+struct ShutdownState {
+    requested: AtomicBool,
+    approved: AtomicBool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ShutdownAction {
+    Ready,
+    Complete,
+    Cancel,
+}
+
+#[tauri::command]
+fn pulse_shutdown(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, ShutdownState>,
+    action: ShutdownAction,
+) -> Result<(), String> {
+    if window.label() != "main"
+        || !is_pulse_identifier(&window.app_handle().config().identifier)
+    {
+        return Err("This window cannot close Pulse Metric Studio.".into());
+    }
+    match action {
+        ShutdownAction::Ready => {
+            if state.requested.load(Ordering::Acquire) {
+                window.emit("pulse-shutdown-requested", ())
+                    .map_err(|_| "The desktop shutdown listener is unavailable.".to_string())?;
+            }
+        }
+        ShutdownAction::Complete => {
+            if !state.requested.load(Ordering::Acquire) {
+                return Err("No desktop shutdown is pending.".into());
+            }
+            state.approved.store(true, Ordering::Release);
+            window.app_handle().exit(0);
+        }
+        ShutdownAction::Cancel => state.requested.store(false, Ordering::Release),
+    }
+    Ok(())
+}
 
 // Validation builds use separate OS data, WebView, and credential namespaces.
 fn is_pulse_identifier(identifier: &str) -> bool {
@@ -205,13 +250,21 @@ fn resolve_node_runtime(app: &AppHandle) -> Result<PathBuf, String> {
 fn main() {
     let app = tauri::Builder::default()
         .manage(ServerHandle(Mutex::new(None)))
+        .manage(ShutdownState::default())
         .invoke_handler(tauri::generate_handler![
             tableau_credential_capability,
             tableau_store_credential,
             tableau_replace_credential,
             tableau_delete_credential,
-            pulse_api_request
+            pulse_api_request,
+            pulse_shutdown
         ])
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                window.app_handle().exit(0);
+            }
+        })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -389,9 +442,18 @@ fn main() {
     };
 
     app.run(|app_handle, event| match event {
-        RunEvent::ExitRequested { .. } | RunEvent::Exit => {
-            stop_services(app_handle);
+        RunEvent::ExitRequested { api, .. } => {
+            let shutdown = app_handle.state::<ShutdownState>();
+            if shutdown.approved.load(Ordering::Acquire) {
+                stop_services(app_handle);
+            } else {
+                api.prevent_exit();
+                shutdown.requested.store(true, Ordering::Release);
+                show_main(app_handle);
+                let _ = app_handle.emit_to("main", "pulse-shutdown-requested", ());
+            }
         }
+        RunEvent::Exit => stop_services(app_handle),
         _ => {}
     });
 }
@@ -515,10 +577,7 @@ fn build_tray(app: &AppHandle, identity: &DesktopIdentity) -> tauri::Result<()> 
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_main(app),
-            "quit" => {
-                stop_services(app);
-                app.exit(0);
-            }
+            "quit" => app.exit(0),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {

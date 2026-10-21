@@ -52,7 +52,8 @@ async function req<T>(url: string, method = "GET", body?: unknown): Promise<T> {
 // -- tableau ------------------------------------------------------------------
 
 export interface TableauSessionInfo {
-  connectionId?: string;
+  connectionId: string;
+  sessionGeneration: number;
   serverUrl: string;
   siteContentUrl: string;
   siteId: string;
@@ -76,7 +77,8 @@ export const api = {
       hasStoredProfile?: boolean;
       session?: TableauSessionInfo;
     }>("/api/tableau/status"),
-  disconnect: () => req<{ ok: true }>("/api/tableau/disconnect", "POST"),
+  disconnect: (owner: Pick<TableauSessionInfo, "connectionId" | "sessionGeneration">) =>
+    req<{ ok: true }>("/api/tableau/disconnect", "POST", owner),
   connections: () =>
     req<{ connections: ConnectionSummary[] }>("/api/tableau/connections"),
   deleteConnection: (id: string) =>

@@ -6,34 +6,21 @@ import {
 import { z } from 'zod';
 import { pulseRequest } from './api/client';
 
-function sourceContextQuery(sourceMetricIds: string[]): URLSearchParams {
-  const query = new URLSearchParams();
-  for (const metricId of sourceMetricIds) query.append('sourceMetricId', metricId);
-  return query;
-}
-
 /** Dimension discovery is read-only. All variants use registryApi.fork. */
 export const pulseDimensionalForkApi = {
   fields: async (sourceMetricIds: string[]) => {
-    const query = sourceContextQuery(sourceMetricIds);
     return z.object({ fields: FilterDimensionFieldSchema.array() }).parse(
-      await pulseRequest(`/api/pulse/dimensions?${query}`),
+      await pulseRequest('/api/pulse/dimensions', 'POST', { sourceMetricIds }),
     );
   },
   count: async (sourceMetricIds: string[], fieldId: string) => {
-    const query = sourceContextQuery(sourceMetricIds);
-    query.set('fieldId', fieldId);
     return DimensionMemberCountSchema.parse(
-      await pulseRequest(`/api/pulse/dimensions/count?${query}`),
+      await pulseRequest('/api/pulse/dimensions/count', 'POST', { sourceMetricIds, fieldId }),
     );
   },
   values: async (sourceMetricIds: string[], fieldId: string, search: string, options: { all?: boolean } = {}) => {
-    const query = sourceContextQuery(sourceMetricIds);
-    query.set('fieldId', fieldId);
-    if (search) query.set('search', search);
-    if (options.all) query.set('all', '1');
     return DimensionValuePageSchema.parse(
-      await pulseRequest(`/api/pulse/dimensions/values?${query}`),
+      await pulseRequest('/api/pulse/dimensions/values', 'POST', { sourceMetricIds, fieldId, search, ...options }),
     );
   },
 };

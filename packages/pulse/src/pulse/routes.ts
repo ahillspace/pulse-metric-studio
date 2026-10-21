@@ -4,6 +4,7 @@ import {
   PulseVariantCommandSchema,
 } from "@pulse-metric-studio/shared";
 import type { FastifyInstance } from "fastify";
+import { z } from "zod";
 import { requirePulseOwner } from "../application/context.js";
 import { getExistingMetrics } from "../application/inventory.js";
 import {
@@ -18,12 +19,27 @@ import {
   registerPulseWorkflowRoutes,
   type PulseWorkflowDependencies,
 } from "../http/workflow-routes.js";
-import { pulseDimensionalForkService } from "./dimensional-fork-service.js";
+import {
+  PulseDimensionalForkError,
+  type PulseDimensionalForkService,
+  pulseDimensionalForkService,
+} from "./dimensional-fork-service.js";
 import {
   forkPlanHttpStatus,
   pulseForkPlanService,
   type PulseForkPlanService,
 } from "./fork-plan-service.js";
+
+const DimensionSourcesSchema = z.object({
+  sourceMetricIds: z.array(z.string().trim().min(1).max(512)).min(1),
+}).strict();
+const DimensionFieldSchema = DimensionSourcesSchema.extend({
+  fieldId: z.string().trim().min(1).max(512),
+});
+const DimensionValuesSchema = DimensionFieldSchema.extend({
+  search: z.string().max(256).optional(),
+  all: z.boolean().optional(),
+});
 
 function requireSession() {
   const s = getSession();
@@ -41,11 +57,14 @@ export function registerPulseRoutes(
   app: FastifyInstance,
   dependencies: PulseWorkflowDependencies & {
     forkPlanService?: Pick<PulseForkPlanService, "forkMetrics">;
+    dimensionalForkService?: Pick<PulseDimensionalForkService,
+      "listEligibleDimensions" | "countDimensionMembers" | "listDimensionValues">;
   } = {},
 ): void {
   registerPulseWorkflowRoutes(app, dependencies);
 
   const forkPlanService = dependencies.forkPlanService ?? pulseForkPlanService;
+  const dimensions = dependencies.dimensionalForkService ?? pulseDimensionalForkService;
 
   app.get("/api/pulse/status", async () => ({
     enabled: true,
@@ -62,31 +81,28 @@ export function registerPulseRoutes(
     return getExistingMetrics(session, datasourceLuid);
   });
 
-  app.get("/api/pulse/dimensions", async (req) => {
+  app.post("/api/pulse/dimensions", async (req) => {
     const session = requireSession();
-    const query = (req.query ?? {}) as Record<string, unknown>;
-    return pulseDimensionalForkService.listEligibleDimensions(
+    const body = DimensionSourcesSchema.safeParse(req.body);
+    if (!body.success) throw new PulseDimensionalForkError(body.error.message, 400);
+    return dimensions.listEligibleDimensions(
       session,
-      repeatedQueryValues(query.sourceMetricId),
+      body.data.sourceMetricIds,
     );
   });
 
-  // Field IDs are field names and may contain "/" (for example
-  // "Country/Region"); the desktop transport rejects encoded separators in
-  // paths, so the field travels as a query parameter.
-  app.get("/api/pulse/dimensions/count", async (req) => {
+  app.post("/api/pulse/dimensions/count", async (req) => {
     const session = requireSession();
-    const query = dimensionQuery(app, req.query);
-    return pulseDimensionalForkService.countDimensionMembers(session, {
-      sourceMetricIds: query.sourceMetricIds,
-      fieldId: query.fieldId,
-    });
+    const body = DimensionFieldSchema.safeParse(req.body);
+    if (!body.success) throw new PulseDimensionalForkError(body.error.message, 400);
+    return dimensions.countDimensionMembers(session, body.data);
   });
 
-  app.get("/api/pulse/dimensions/values", async (req) => {
+  app.post("/api/pulse/dimensions/values", async (req) => {
     const session = requireSession();
-    const query = dimensionQuery(app, req.query);
-    return pulseDimensionalForkService.listDimensionValues(session, query);
+    const body = DimensionValuesSchema.safeParse(req.body);
+    if (!body.success) throw new PulseDimensionalForkError(body.error.message, 400);
+    return dimensions.listDimensionValues(session, body.data);
   });
 
   app.post("/api/pulse/metrics/fork", async (req, reply) => {
@@ -181,29 +197,4 @@ export function registerPulseRoutes(
       throw app.httpErrors.badRequest("metricIds array required");
     return { details: await getFollowersDetail(session, body.metricIds) };
   });
-}
-
-const MAX_DIMENSION_SOURCE_METRICS = 500;
-const MAX_DIMENSION_ID_LENGTH = 512;
-const MAX_DIMENSION_SEARCH_LENGTH = 256;
-
-/** Bounded dimension query parameters; oversized input is rejected before any Tableau call. */
-export function dimensionQuery(app: FastifyInstance, raw: unknown) {
-  const query = (raw ?? {}) as Record<string, unknown>;
-  const sourceMetricIds = repeatedQueryValues(query.sourceMetricId);
-  const fieldId = typeof query.fieldId === "string" ? query.fieldId : "";
-  const search = typeof query.search === "string" ? query.search : undefined;
-  if (
-    sourceMetricIds.length > MAX_DIMENSION_SOURCE_METRICS ||
-    sourceMetricIds.some((id) => id.length > MAX_DIMENSION_ID_LENGTH) ||
-    fieldId.length > MAX_DIMENSION_ID_LENGTH ||
-    (search?.length ?? 0) > MAX_DIMENSION_SEARCH_LENGTH
-  )
-    throw app.httpErrors.badRequest("The dimension request is too large.");
-  return { sourceMetricIds, fieldId, search, all: query.all === "1" || query.all === "true" };
-}
-
-export function repeatedQueryValues(value: unknown): string[] {
-  if (Array.isArray(value)) return value.map((entry) => String(entry));
-  return value === undefined || value === null ? [] : [String(value)];
 }

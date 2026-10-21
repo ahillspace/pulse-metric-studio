@@ -72,6 +72,7 @@ interface AuthorState {
   entries: Record<string, DraftEditor>;
   activeId: string | null;
   loading: boolean;
+  closeStatus: "open" | "saving" | "ready";
   error: string | null;
   loadDrafts: (offset?: number, query?: string) => Promise<void>;
   openDraft: (id: string, reload?: boolean) => Promise<void>;
@@ -97,6 +98,8 @@ interface AuthorState {
   closePreview: () => void;
   publishReviewed: () => Promise<void>;
   closeReceipt: () => void;
+  prepareClose: (mode?: "save" | "discard") => Promise<void>;
+  cancelClose: () => void;
   dispose: () => void;
 }
 
@@ -174,6 +177,7 @@ export function createAuthorController(
   const proposalRequests = new Map<string, number>();
   let navigation = 0;
   let listRequest = 0;
+  let closeAttempt = 0;
   const store = create<AuthorState>((set, get) => {
     const update = (
       id: string,
@@ -228,6 +232,7 @@ export function createAuthorController(
       entries: {},
       activeId: null,
       loading: false,
+      closeStatus: "open",
       error: null,
       async loadDrafts(offset = get().draftOffset, query = get().draftQuery) {
         const request = ++listRequest;
@@ -270,6 +275,7 @@ export function createAuthorController(
         }
       },
       async openDraft(id, reload = false) {
+        if (get().closeStatus !== "open") return;
         const request = ++navigation;
         set({ loading: true, error: null });
         try {
@@ -312,6 +318,7 @@ export function createAuthorController(
         }
       },
       async selectDatasource(source) {
+        if (get().closeStatus !== "open") return;
         const owner = session();
         if (!owner?.connectionId) {
           set({
@@ -347,7 +354,7 @@ export function createAuthorController(
         }
       },
       async refreshCatalog(id = get().activeId ?? undefined, refresh = false) {
-        if (!id) return;
+        if (!id || get().closeStatus !== "open") return;
         const entry = get().entries[id];
         if (!entry || !contextMatches(entry.record.context, session())) return;
         const owner = session();
@@ -397,6 +404,7 @@ export function createAuthorController(
         }
       },
       edit(change) {
+        if (get().closeStatus !== "open") return;
         const entry = activeEditor(get());
         if (!entry) return;
         const document = structuredClone(entry.document);
@@ -411,7 +419,7 @@ export function createAuthorController(
       },
       updateMetric(id, patch) {
         const entry = activeEditor(get());
-        if (!entry?.document.metrics[id]) return;
+        if (!entry || !Object.hasOwn(entry.document.metrics, id)) return;
         get().edit((document) => {
           let metric = { ...document.metrics[id], ...patch };
           metric.locks = [
@@ -428,18 +436,18 @@ export function createAuthorController(
             metric.temporality === "LATEST"
           )
             metric.cumulative = false;
-          document.metrics[id] = metric;
+          document.metrics = { ...document.metrics, [id]: metric };
         });
       },
       toggleMetric(id) {
         const entry = activeEditor(get());
         if (!entry) return;
         get().edit((document) => {
-          const current = document.metrics[id];
+          const current = Object.hasOwn(document.metrics, id) ? document.metrics[id] : undefined;
           if (current) current.active = !current.active;
           else if (entry.catalog) {
             const metric = defaultPulseMetric(entry.catalog, id);
-            if (metric) document.metrics[id] = metric;
+            if (metric) document.metrics = { ...document.metrics, [id]: metric };
           }
         });
       },
@@ -447,17 +455,16 @@ export function createAuthorController(
         const entry = activeEditor(get());
         if (!entry) return;
         get().edit((document) => {
-          if (document.slicers[id])
+          if (Object.hasOwn(document.slicers, id))
             document.slicers[id].active = !document.slicers[id].active;
           else {
             const field = entry.catalog?.dimensions.find(
               (value) => value.id === id,
             );
             if (field)
-              document.slicers[id] = {
-                active: true,
-                fieldId: id,
-                fieldLabel: field.label,
+              document.slicers = {
+                ...document.slicers,
+                [id]: { active: true, fieldId: id, fieldLabel: field.label },
               };
           }
         });
@@ -475,6 +482,7 @@ export function createAuthorController(
           document.groupFollow = value;
         }),
       clearConfiguration: () => {
+        if (get().closeStatus !== "open") return;
         const entry = activeEditor(get());
         if (!entry) return;
         update(entry.record.id, {
@@ -548,6 +556,7 @@ export function createAuthorController(
         }
       },
       async removeDraft(id) {
+        if (get().closeStatus !== "open") return;
         try {
           if (get().entries[id]?.publishCommandId)
             throw new Error(
@@ -574,7 +583,7 @@ export function createAuthorController(
       },
       async requestProposal(message) {
         const entry = activeEditor(get());
-        if (!entry || entry.proposalBusy || !message.trim()) return;
+        if (!entry || get().closeStatus !== "open" || entry.proposalBusy || !message.trim()) return;
         const id = entry.record.id;
         const request = (proposalRequests.get(id) ?? 0) + 1;
         proposalRequests.set(id, request);
@@ -653,6 +662,7 @@ export function createAuthorController(
         }
       },
       async acceptProposal() {
+        if (get().closeStatus !== "open") return;
         const entry = activeEditor(get());
         if (!entry?.proposal || !entry.proposalBase) return;
         const id = entry.record.id;
@@ -682,6 +692,7 @@ export function createAuthorController(
         if (id) update(id, { proposal: null, proposalError: null });
       },
       clearChat() {
+        if (get().closeStatus !== "open") return;
         const entry = activeEditor(get());
         if (!entry || entry.proposalBusy || !entry.document.chat.length) return;
         const id = entry.record.id;
@@ -699,6 +710,7 @@ export function createAuthorController(
           .catch(() => {});
       },
       async reviewPublication() {
+        if (get().closeStatus !== "open") return;
         const entry = activeEditor(get());
         if (
           !entry ||
@@ -732,6 +744,7 @@ export function createAuthorController(
           update(id, { preview: null });
       },
       async publishReviewed() {
+        if (get().closeStatus !== "open") return;
         const entry = activeEditor(get());
         if (
           !entry?.preview ||
@@ -779,7 +792,40 @@ export function createAuthorController(
         const id = get().activeId;
         if (id) update(id, { receipt: null });
       },
+      async prepareClose(mode = "save") {
+        const attempt = ++closeAttempt;
+        set({ closeStatus: "saving" });
+        if (mode === "discard") {
+          set({ closeStatus: "ready" });
+          return;
+        }
+        try {
+          if (Object.values(get().entries).some((entry) => entry.proposalBusy || entry.catalogLoading)) {
+            await new Promise<void>((resolve) => {
+              const unsubscribe = store.subscribe((state) => {
+                if (attempt === closeAttempt && Object.values(state.entries).some((entry) => entry.proposalBusy || entry.catalogLoading)) return;
+                unsubscribe();
+                resolve();
+              });
+            });
+          }
+          if (attempt !== closeAttempt) throw new DOMException("Closing cancelled.", "AbortError");
+          const saved = await Promise.allSettled(Object.keys(get().entries).map((id) => get().flush(id)));
+          if (attempt !== closeAttempt) throw new DOMException("Closing cancelled.", "AbortError");
+          const failed = saved.find((result) => result.status === "rejected");
+          if (failed?.status === "rejected") throw failed.reason;
+          set({ closeStatus: "ready" });
+        } catch (error) {
+          if (attempt === closeAttempt) set({ closeStatus: "open" });
+          throw error;
+        }
+      },
+      cancelClose() {
+        closeAttempt += 1;
+        set({ closeStatus: "open" });
+      },
       dispose() {
+        get().cancelClose();
         for (const timer of timers.values()) clearTimeout(timer);
         timers.clear();
         navigation += 1;

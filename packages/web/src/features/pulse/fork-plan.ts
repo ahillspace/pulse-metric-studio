@@ -45,12 +45,6 @@ export interface PulseForkPlanState {
   clauses: StagedDimensionClause[];
 }
 
-export const EMPTY_PULSE_FORK_PLAN: PulseForkPlanState = {
-  selectedMetricIds: [],
-  timeframe: null,
-  clauses: [],
-};
-
 export function canonicalStrings(values: Iterable<string>): string[] {
   return [...new Set([...values].map((value) => String(value).trim()).filter(Boolean))]
     .sort(compareStrings);
@@ -78,12 +72,11 @@ export function setMetricSelection(
 }
 
 export function selectionState(
-  selectedMetricIds: Iterable<string>,
+  selectedMetricIds: ReadonlySet<string>,
   targetMetricIds: Iterable<string>,
 ): { checked: boolean; indeterminate: boolean; selected: number; total: number } {
-  const selected = new Set(canonicalStrings(selectedMetricIds));
   const targets = canonicalStrings(targetMetricIds);
-  const selectedCount = targets.filter((metricId) => selected.has(metricId)).length;
+  const selectedCount = targets.filter((metricId) => selectedMetricIds.has(metricId)).length;
   return {
     checked: targets.length > 0 && selectedCount === targets.length,
     indeterminate: selectedCount > 0 && selectedCount < targets.length,
@@ -131,21 +124,22 @@ export function timeframeScopeSignature(
 }
 
 /**
- * Metric ids that share BOTH the timeframe and the dimensional scope of the
- * given signature. This is the family a timeframe-label click selects: all
- * unfiltered metrics with that timeframe, or - when the clicked metric is a
- * dimension fork - only the identically-filtered forks, never the default
- * sibling that happens to share the timeframe.
+ * Index metric families once per inventory. Each timeframe-label click selects
+ * only metrics with the same timeframe and dimensional filters.
  */
-export function timeframeScopeFamilyMetricIds(
+export function timeframeScopeFamilies(
   metrics: PulseRegistryMetric[],
-  signature: string,
-): string[] {
-  return canonicalStrings(
-    metrics
-      .filter((metric) => timeframeScopeSignature(metric) === signature)
-      .map((metric) => metric.metricId),
-  );
+): Map<string, string[]> {
+  const families = new Map<string, string[]>();
+  for (const metric of metrics) {
+    const signature = timeframeScopeSignature(metric);
+    const family = families.get(signature);
+    if (family) family.push(metric.metricId);
+    else families.set(signature, [metric.metricId]);
+  }
+  for (const [signature, ids] of families)
+    families.set(signature, canonicalStrings(ids));
+  return families;
 }
 
 /**

@@ -43,6 +43,35 @@ test('requiresUserAgg ignores aggregations inside an LOD {} block', () => {
   assert.equal(requiresUserAggFromFormula('[Sales] * 2'), false);
 });
 
+test('function detection ignores comments, strings, and quoted field identifiers', () => {
+  for (const formula of [
+    '// WINDOW_SUM([Sales]) and SUM([Sales]) were removed\n[Sales] * 2',
+    '/* WINDOW_SUM([Sales]) and SUM([Sales]) */ [Sales] * 2',
+    'IF [Label] = "WINDOW_SUM( SUM(" THEN [Sales] END',
+    "IF [Label] = 'WINDOW_SUM( SUM(' THEN [Sales] END",
+    '[WINDOW_SUM(] + [SUM(]',
+  ]) {
+    assert.equal(isTableCalcFormula(formula), false, formula);
+    assert.equal(requiresUserAggFromFormula(formula), false, formula);
+  }
+  assert.equal(requiresUserAggFromFormula('IF [Label] = "{" THEN SUM([Sales]) END'), true);
+  assert.equal(requiresUserAggFromFormula('SUM([Sales]) // }'), true);
+  assert.equal(isTableCalcFormula('/* ignored */ WINDOW_SUM(SUM([Sales]))'), true);
+  assert.equal(requiresUserAggFromFormula('{ FIXED [SUM(] : SUM([Sales]) }'), false);
+});
+
+test('metadata catalog keeps row calculations with removed aggregate and table-calc comments', async () => {
+  const nodes = [
+    { name: 'Revenue', formula: '// SUM([Sales]) was removed\n[Sales] * 2' },
+    { name: 'Revenue twice', formula: '/* WINDOW_SUM([Sales]) was removed */ [Revenue] * 2' },
+  ].map((node) => ({ ...node, __typename: 'CalculatedField', fullyQualifiedName: `[${node.name}]`, role: 'MEASURE', dataType: 'REAL' }));
+  globalThis.fetch = async () => Response.json({ data: { publishedDatasources: [{ fieldsConnection: { nodes } }] } });
+  const catalog = await fetchFieldsViaMetadataGraphql(session(), 'ds', { luid: 'ds', name: 'DS' });
+  assert.deepEqual(catalog.excluded, []);
+  assert.equal(catalog.measures.length, 2);
+  assert.ok(catalog.measures.every((field) => field.requiresUserAgg === false));
+});
+
 test('blended reference needs a multi-part bracket chain', () => {
   assert.equal(detectBlendedRef('[Orders].[Sales]'), true);
   assert.equal(detectBlendedRef('[Sales] + [Profit]'), false);

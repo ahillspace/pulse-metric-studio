@@ -86,7 +86,9 @@ test('credential commands never inherit app-internal environment variables', asy
   process.env.PULSE_METRIC_STUDIO_TEST_SECRET = 'internal';
   try {
     assert.deepEqual(Object.keys(credentialCommandEnv()).filter((name) => name.startsWith('PULSE_METRIC_STUDIO_')), []);
-    assert.equal(credentialCommandEnv().PATH, process.env.PATH);
+    const pathName = Object.keys(process.env).find((name) => name.toUpperCase() === 'PATH');
+    assert.ok(pathName, 'The credential command inherits the executable search path.');
+    assert.equal(credentialCommandEnv()[pathName], process.env[pathName]);
     const printed = await runCredentialCommand(
       `"${process.execPath}" -e "process.stdout.write(Object.keys(process.env).filter((n) => n.startsWith('PULSE_METRIC_STUDIO_')).join(',') || 'none')"`,
     );

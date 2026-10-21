@@ -3,6 +3,26 @@ import React from 'react';
 import { test } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { ProviderSetupChoices, PROVIDER_CHOICES, newProviderId, providerAccess, providerChoice, providerDescription, straightenQuotes } from './llm-provider-choices';
+import { ProfileEditor } from './LlmSettings';
+
+test('provider mutations freeze every settings control until the saved response arrives', () => {
+  const props: Parameters<typeof ProfileEditor>[0] = {
+    form: {
+      id: 'gateway', label: 'Gateway', protocol: 'openai-chat', baseUrl: 'https://example.com', model: 'model', authMode: 'bearer',
+      secret: '', hasSecret: true, clearSecret: false, headersText: '{}', headersDirty: false, clearHeaders: false,
+      region: '', awsProfile: '', command: '', credentialCommand: '', hasCredentialCommand: false,
+      credentialCommandHint: null, clearCredentialCommand: false, secretHint: null, allowPrivateNetwork: false, source: 'saved',
+    },
+    setForm: () => {}, dirty: false, existing: true, busy: true,
+    onSave: async () => {}, onTest: async () => {}, onSelect: () => {}, onDelete: () => {},
+  };
+  const busy = renderToStaticMarkup(<ProfileEditor {...props} />);
+  assert.match(busy, /^<fieldset[^>]*aria-label="Provider settings"[^>]*disabled=""/);
+  for (const label of ['Display name', 'Endpoint', 'Model', 'Key or token', 'Safe custom headers', 'Protocol'])
+    assert.ok(busy.includes(label), label);
+  const idle = renderToStaticMarkup(<ProfileEditor {...props} busy={false} />);
+  assert.doesNotMatch(idle.match(/^<fieldset[^>]*>/)?.[0] ?? '', /disabled/);
+});
 
 test('clean-install setup renders choices without broken or configured profile claims', () => {
   const html = renderToStaticMarkup(<ProviderSetupChoices onChoose={() => undefined} />);

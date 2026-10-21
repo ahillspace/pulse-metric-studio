@@ -66,12 +66,16 @@ export function VariantDialog({
   const [compatibility, setCompatibility] = useState("");
   const [filterState, setFilterState] = useState<string | null>(null);
   const [fields, setFields] = useState<PulseFilterDimensionField[]>([]);
+  const selectedIds = useMemo(
+    () => new Set(plan.selectedMetricIds),
+    [plan.selectedMetricIds],
+  );
   const selected = useMemo(
     () =>
       metrics.filter((metric) =>
-        plan.selectedMetricIds.includes(metric.metricId),
+        selectedIds.has(metric.metricId),
       ),
-    [metrics, plan.selectedMetricIds],
+    [metrics, selectedIds],
   );
   const sources = useMemo(
     () =>
@@ -196,7 +200,7 @@ export function VariantDialog({
                   <SelectionCheckbox
                     label="Select matching source metrics"
                     state={selectionState(
-                      plan.selectedMetricIds,
+                      selectedIds,
                       visible.map((metric) => metric.metricId),
                     )}
                     onChange={(checked) =>
@@ -228,7 +232,7 @@ export function VariantDialog({
                     <label key={metric.metricId}>
                       <input
                         type="checkbox"
-                        checked={plan.selectedMetricIds.includes(
+                        checked={selectedIds.has(
                           metric.metricId,
                         )}
                         onChange={(event) =>

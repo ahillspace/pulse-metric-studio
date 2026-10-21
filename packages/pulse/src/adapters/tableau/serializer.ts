@@ -10,10 +10,6 @@ import { currentCatalogField,metricEligibilityIssue,reconcileMetricWithCatalog,v
  * as-is (no schema reshape).
  */
 
-export type UiAgg = 'SUM' | 'AVERAGE' | 'AVG' | 'MIN' | 'MAX' | 'COUNT_DISTINCT';
-export type UiNumberFormat = 'NUMBER' | 'CURRENCY' | 'PERCENT';
-export type UiSentiment = 'UP' | 'DOWN' | 'NONE';
-
 export interface SlicerSelection {
   active: boolean;
   fieldId: string;
@@ -165,33 +161,6 @@ function pulseFieldReference(rawId: string, tableQualifiers: ReadonlySet<string>
   return canonicalCatalogIdentifier({ id: rawId }, tableQualifiers);
 }
 
-// -- defaults -----------------------------------------------------------------
-
-export function defaultMetricSelection(catalog: DatasourceCatalog, fieldId: string): MetricSelection | null {
-  const field = catalog.measures.find((f) => f.id === fieldId);
-  if (!field) return null;
-  return {
-    active: true,
-    fieldId,
-    fieldLabel: field.label,
-    requiresUserAgg: field.requiresUserAgg,
-    aggregation: 'SUM',
-    cumulative: false,
-    format: 'NUMBER',
-    sentiment: 'NONE',
-    name: field.label,
-    description: '',
-    timeDimensionFieldId: catalog.timeDimensions[0]?.id ?? null,
-    minGranularity: '',
-    temporality: 'OVER_TIME',
-    locks: [],
-  };
-}
-
-export function defaultSlicerSelection(fieldId: string, label: string): SlicerSelection {
-  return { active: true, fieldId, fieldLabel: label };
-}
-
 function referenceIssues(input: BuildPayloadsInput): ValidationError[] {
   const issues: ValidationError[] = [];
   const qualifiers = tableQualifierSet(input.catalog);
@@ -226,8 +195,6 @@ function referenceIssues(input: BuildPayloadsInput): ValidationError[] {
 
 // -- validation ---------------------------------------------------------------
 
-const IDENTIFIER_RE = /(^|_)(id|uuid|guid|key|email|phone)($|_)|email/i;
-
 export function validateSelection(input: {
   metrics: Record<string, MetricSelection>;
   slicers: Record<string, SlicerSelection>;
@@ -248,9 +215,6 @@ export function validateSelection(input: {
       });
     }
     if (!(m.name || '').trim()) errors.push({ field: m.fieldId, message: `Metric based on "${m.fieldLabel}" needs a name.` });
-    if (!m.timeDimensionFieldId && !m.description.trim() && m.temporality === 'LATEST') {
-      // point-in-time metrics must not be running totals; enforced at build
-    }
   }
   return errors;
 }

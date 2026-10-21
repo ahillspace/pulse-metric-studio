@@ -22,7 +22,7 @@ interface ConnectionState {
   disconnect: () => Promise<void>;
   loadDatasources: () => Promise<void>;
   expireSession: () => void;
-  startAction: () => void;
+  startAction: () => boolean;
   finishAction: () => void;
 }
 
@@ -68,9 +68,13 @@ export function createConnectionController(
     },
     async disconnect() {
       const owner = get().session;
+      if (!owner || !get().startAction()) return;
       const request = generation;
       try {
-        await transport.disconnect();
+        await transport.disconnect({
+          connectionId: owner.connectionId,
+          sessionGeneration: owner.sessionGeneration,
+        });
         if (request !== generation || owner !== get().session) return;
         generation += 1;
         sourceRequest += 1;
@@ -87,7 +91,10 @@ export function createConnectionController(
             "Disconnected. Saved drafts and publication history remain available.",
           );
       } catch (error) {
-        set({ error: errorMessage(error) });
+        if (request === generation && owner === get().session)
+          set({ error: errorMessage(error) });
+      } finally {
+        get().finishAction();
       }
     },
     async loadDatasources() {
@@ -116,7 +123,11 @@ export function createConnectionController(
           "Your Tableau session ended. Reconnect to continue Tableau actions. Local drafts and history are still available.",
       });
     },
-    startAction: () => set({ connecting: true, error: null }),
+    startAction() {
+      if (get().connecting) return false;
+      set({ connecting: true, error: null });
+      return true;
+    },
     finishAction: () => set({ connecting: false }),
   }));
 }

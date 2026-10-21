@@ -99,17 +99,6 @@ export class LlmProviderError extends Error {
   }
 }
 
-export function isFallbackEligible(error: unknown): boolean {
-  if (!(error instanceof LlmProviderError)) return false;
-  if (error.code === 'provider_not_installed' || error.code === 'provider_not_configured') return true;
-  return error.retryable && [
-    'provider_quota',
-    'provider_timeout',
-    'provider_unavailable',
-    'provider_execution',
-  ].includes(error.code);
-}
-
 // Match complete quoted values, including escaped quotes, before bounding text.
 // This also covers provider JSON bodies and Tableau PAT/header field spellings.
 const PROVIDER_CREDENTIAL_FIELD = /(["']?(?:personal[_-]?access[_-]?token(?:[_-]?secret)?|(?:access|refresh)[_-]?token|pat(?:[_-]?secret)?|api[_-]?key|x[_-]api[_-]key|x[_-]tableau[_-]auth|authorization|token|secret|password)["']?\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|(?:bearer|basic)\s+[^\s,;]+|[^\s,;]+)/gi;

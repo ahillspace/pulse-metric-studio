@@ -473,32 +473,6 @@ tr.flash-apply td { animation: flashRow 900ms ease-out; }
 .publish-bar .section-hint { margin: 0; }
 .publish-create-wrap { display: inline-flex; }
 .toggle-control { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; cursor: pointer; color: var(--text-dim); }
-.toggle-switch {
-  position: relative;
-  width: 32px;
-  height: 18px;
-  border-radius: 999px;
-  background: #22344a;
-  transition: background 140ms ease;
-  flex-shrink: 0;
-}
-.toggle-switch.is-on { background: var(--cyan-dim); box-shadow: 0 0 10px rgba(69, 214, 230, 0.3); }
-.toggle-switch::after {
-  content: '';
-  position: absolute;
-  top: 2px; left: 2px;
-  width: 14px; height: 14px;
-  border-radius: 50%;
-  background: #fff;
-  transition: transform 140ms ease;
-}
-.toggle-switch.is-on::after { transform: translateX(14px); }
-.toggle-control input[type='checkbox'] { position: absolute; opacity: 0; pointer-events: none; }
-.toggle-control input[type='checkbox']:focus-visible + .toggle-switch {
-  outline: 2px solid var(--cyan);
-  outline-offset: 2px;
-}
-
 /* ============ overlays / modals / toasts ============ */
 .overlay-backdrop {
   position: fixed;
@@ -725,7 +699,7 @@ tr.flash-apply td { animation: flashRow 900ms ease-out; }
 /* ============ connect card ============ */
 .connect-wrap { min-height: calc(100vh - 46px); display: flex; align-items: center; justify-content: center; padding: 24px; }
 .connect-panel { width: min(620px, 100%); }
-.connect-grid { display: grid; gap: 10px; grid-template-columns: 1fr 1fr; }
+.connect-grid { display: grid; gap: 10px; grid-template-columns: 1fr 1fr; border: 0; margin: 0; padding: 0; min-width: 0; }
 .connect-grid .full { grid-column: 1 / -1; }
 .connect-grid label { display: flex; flex-direction: column; gap: 5px; color: var(--text-dim); font-size: 11.5px; }
 .connect-error {

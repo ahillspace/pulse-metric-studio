@@ -60,11 +60,10 @@ test("metric row displays a business name and preserves Copy ID without printing
   const metrics = flattenMetrics([definition]);
   const html = renderToStaticMarkup(
     <MetricRow
-      definition={definition}
       variant={definition.metrics[0]}
       metric={metrics[0]}
-      selectedMetricIds={[]}
-      allMetrics={metrics}
+      selected={false}
+      familySelection={{ checked: false, indeterminate: false, selected: 0, total: 1 }}
       highlighted={false}
       onSelectionChange={() => {}}
       onToggleTimeframeFamily={() => {}}
