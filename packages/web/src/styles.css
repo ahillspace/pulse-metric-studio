@@ -658,6 +658,9 @@ tr.flash-apply td { animation: flashRow 900ms ease-out; }
   font-size: 12px;
   margin-bottom: 10px;
 }
+.inventory-failures { list-style: none; margin: 6px 0 0; padding: 0; }
+.inventory-failures summary { cursor: pointer; }
+.inventory-failures ul { margin: 4px 0 2px; padding-left: 18px; color: var(--text-dim); overflow-wrap: anywhere; }
 
 /* ============ stat cards (session header) ============ */
 .stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }

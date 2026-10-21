@@ -22,6 +22,7 @@ import {
   previewSourceLabel,
 } from "../registry/views";
 import { VariantDialog } from "../registry/VariantDialog";
+import { InventoryFailures } from "../registry/InventoryFailures";
 import { FollowTargetModal } from "./FollowTargetModal";
 import { BusyLabel, Modal } from "./ui";
 import { createPreviewController } from "../registry/preview-controller";
@@ -364,13 +365,7 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
             can exist beyond this returned subset.
           </p>
         )}
-        {Boolean(existing?.failures.length) && (
-          <p className="warning-banner" role="status">
-            Inventory is partial. {existing!.failures.length} provider{" "}
-            {existing!.failures.length === 1 ? "request" : "requests"}
-            failed.
-          </p>
-        )}
+        {existing && <InventoryFailures inventory={existing} />}
         {registry.followState?.errors.length ? (
           <p className="warning-banner" role="status">
             Some follow information is unavailable. Unknown relationships are
