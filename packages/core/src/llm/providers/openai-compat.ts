@@ -77,6 +77,7 @@ export class HttpLlmProvider {
   }
 
   async complete(opts: CompleteOptions): Promise<CompleteResult> {
+    opts.signal?.throwIfAborted();
     if (!(await this.isConfigured())) {
       throw new LlmProviderError({
         code: 'provider_not_configured',
@@ -96,7 +97,9 @@ export class HttpLlmProvider {
       }
       throw error;
     }
-    const token = await resolveProfileSecret(this.profile, this.id, this.profile.model);
+    opts.signal?.throwIfAborted();
+    const token = await resolveProfileSecret(this.profile, this.id, this.profile.model, { signal: opts.signal });
+    opts.signal?.throwIfAborted();
     const headers: Record<string, string> = { 'Content-Type': 'application/json', ...this.profile.headers };
     if (this.profile.authMode === 'bearer') headers.Authorization = `Bearer ${token}`;
     if (this.profile.authMode === 'x-api-key') headers['x-api-key'] = token;
@@ -110,10 +113,13 @@ export class HttpLlmProvider {
         method: 'POST',
         headers,
         body: JSON.stringify(requestBody(protocol, this.profile.model, opts)),
-        signal: AbortSignal.timeout(opts.timeoutMs ?? LLM_REQUEST_TIMEOUT_MS),
+        signal: opts.signal
+          ? AbortSignal.any([opts.signal, AbortSignal.timeout(opts.timeoutMs ?? LLM_REQUEST_TIMEOUT_MS)])
+          : AbortSignal.timeout(opts.timeoutMs ?? LLM_REQUEST_TIMEOUT_MS),
         redirect: 'error',
       });
     } catch (error) {
+      opts.signal?.throwIfAborted();
       if (error instanceof UnsafeLlmEndpointError) {
         throw new LlmProviderError({ code: 'provider_execution', message: error.message, provider: this.id, model: this.profile.model });
       }

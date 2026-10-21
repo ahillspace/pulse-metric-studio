@@ -97,24 +97,7 @@ export class EncryptedLlmProfileStore implements LlmProfileStore {
   save(input: LlmProfileWrite): LlmProfilePublic {
     const profiles = this.list();
     const existing = profiles.find((profile) => profile.id === input.id);
-    const secret = input.clearSecret ? '' : input.secret ?? existing?.secret ?? '';
-    const headers = input.clearHeaders ? {} : input.headers === undefined ? existing?.headers ?? {} : input.headers;
-    const saved: StoredLlmProfile = {
-      id: input.id,
-      label: input.label,
-      protocol: input.protocol,
-      baseUrl: input.baseUrl ?? '',
-      model: input.model ?? '',
-      authMode: input.authMode ?? 'none',
-      secret,
-      headers,
-      region: input.region ?? '',
-      awsProfile: input.awsProfile ?? '',
-      command: input.command ?? '',
-      credentialCommand: input.clearCredentialCommand ? '' : input.credentialCommand ?? existing?.credentialCommand ?? '',
-      allowPrivateNetwork: input.allowPrivateNetwork ?? false,
-      source: 'saved',
-    };
+    const saved = resolveLlmProfile(input, existing);
     const next = profiles.filter((profile) => profile.id !== input.id);
     next.push(saved);
     setSetting(this.db(), PROFILES_KEY, encryptSecret(JSON.stringify(next)));
@@ -172,6 +155,33 @@ export class DbLlmRegistryStateStore implements LlmRegistryStateStore {
       return {};
     }
   }
+}
+
+/** Resolve omitted credentials within the same provider family and auth mode. */
+export function resolveLlmProfile(input: LlmProfileWrite, existing?: StoredLlmProfile): StoredLlmProfile {
+  const localAccount = input.protocol === 'codex-cli' || input.protocol === 'claude-code';
+  const cli = localAccount || input.protocol === 'opencode';
+  const authMode = localAccount ? 'local-account' : cli ? 'none' : input.authMode ?? 'none';
+  const openAiFamily = ['openai-chat', 'openai-responses'];
+  const sameFamily = existing && (existing.protocol === input.protocol || openAiFamily.includes(existing.protocol) && openAiFamily.includes(input.protocol));
+  const previous = sameFamily && existing.authMode === authMode ? existing : undefined;
+  const aws = input.protocol === 'bedrock-converse' && authMode === 'aws';
+  return {
+    id: input.id,
+    label: input.label,
+    protocol: input.protocol,
+    baseUrl: cli ? '' : input.baseUrl ?? '',
+    model: input.model?.trim() ?? '',
+    authMode,
+    secret: cli || aws || input.clearSecret ? '' : input.secret ?? previous?.secret ?? '',
+    headers: cli || aws || input.clearHeaders ? {} : input.headers ?? previous?.headers ?? {},
+    region: input.protocol === 'bedrock-converse' ? input.region ?? '' : '',
+    awsProfile: aws ? input.awsProfile ?? '' : '',
+    command: cli ? input.command ?? '' : '',
+    credentialCommand: cli || aws || input.clearCredentialCommand ? '' : input.credentialCommand ?? previous?.credentialCommand ?? '',
+    allowPrivateNetwork: cli ? false : input.allowPrivateNetwork ?? false,
+    source: 'saved',
+  };
 }
 
 export function toPublicProfile(profile: StoredLlmProfile): LlmProfilePublic {

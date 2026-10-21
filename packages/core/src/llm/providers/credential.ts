@@ -1,10 +1,9 @@
 import { spawn } from 'node:child_process';
-import { LlmProviderError, summarizeProcessError } from '../types.js';
-import { killProcessTree, OWN_PROCESS_GROUP } from './process-tree.js';
+import { LlmProviderError } from '../types.js';
+import { collectProcessOutput, OWN_PROCESS_GROUP, ProcessOutputError } from './process-tree.js';
 
 const CACHE_TTL_MS = 60_000;
 const STDOUT_LIMIT_BYTES = 1_000_000;
-const STDERR_LIMIT_BYTES = 8_000;
 const COMMAND_TIMEOUT_MS = 15_000;
 
 interface CacheEntry {
@@ -28,12 +27,24 @@ export function setCredentialCommandApprover(next: CommandApprover | null): void
   approvedCommands.clear();
 }
 
-async function assertApproved(command: string, provider: string, model: string): Promise<void> {
+async function assertApproved(command: string, provider: string, model: string, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
   if (!approver || approvedCommands.has(command)) return;
+  const approve = approver;
   let approved: boolean;
   try {
-    approved = await approver(command);
+    approved = await new Promise<boolean>((resolve, reject) => {
+      const cancelled = () => { signal?.removeEventListener('abort', cancelled); reject(signal!.reason); };
+      signal?.addEventListener('abort', cancelled, { once: true });
+      Promise.resolve().then(() => { signal?.throwIfAborted(); return approve(command); }).then(
+        result => { signal?.removeEventListener('abort', cancelled); resolve(result); },
+        error => { signal?.removeEventListener('abort', cancelled); reject(error); },
+      );
+      if (signal?.aborted) cancelled();
+    });
+    signal?.throwIfAborted();
   } catch (error) {
+    signal?.throwIfAborted();
     throw new LlmProviderError({
       code: 'provider_authentication',
       message: 'The credential command could not be approved because the desktop credential service is unavailable.',
@@ -57,17 +68,27 @@ export function clearCredentialCache(): void {
   cache.clear();
 }
 
+interface CredentialResolutionOptions {
+  runner?: (command: string) => Promise<string>;
+  now?: () => number;
+  signal?: AbortSignal;
+}
+
 export async function resolveCredentialCommand(
   command: string,
   provider: string,
   model: string,
-  runner: (command: string) => Promise<string> = runCredentialCommand,
-  now: () => number = Date.now,
+  options: CredentialResolutionOptions = {},
 ): Promise<string> {
+  const { signal, now = Date.now } = options;
+  signal?.throwIfAborted();
   const cached = cache.get(command);
   if (cached && cached.expiresAt > now()) return cached.value;
-  await assertApproved(command, provider, model);
+  await assertApproved(command, provider, model, signal);
+  signal?.throwIfAborted();
+  const runner = options.runner ?? ((value: string) => runCredentialCommand(value, COMMAND_TIMEOUT_MS, signal));
   const token = (await runner(command)).trim();
+  signal?.throwIfAborted();
   if (!token) {
     throw new LlmProviderError({
       code: 'provider_authentication',
@@ -84,11 +105,11 @@ export async function resolveProfileSecret(
   profile: { secret?: string; credentialCommand?: string },
   provider: string,
   model: string,
-  runner: (command: string) => Promise<string> = runCredentialCommand,
-  now: () => number = Date.now,
+  options: CredentialResolutionOptions = {},
 ): Promise<string> {
+  options.signal?.throwIfAborted();
   const command = profile.credentialCommand?.trim();
-  if (command) return resolveCredentialCommand(command, provider, model, runner, now);
+  if (command) return resolveCredentialCommand(command, provider, model, options);
   return (profile.secret ?? '').trim();
 }
 
@@ -102,91 +123,32 @@ export function credentialCommandEnv(source: NodeJS.ProcessEnv = process.env): N
   );
 }
 
-export function runCredentialCommand(command: string, timeoutMs = COMMAND_TIMEOUT_MS): Promise<string> {
-  return new Promise<string>((resolve, reject) => {
-    const child = spawn(command, {
-      shell: true,
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      detached: OWN_PROCESS_GROUP,
-      env: credentialCommandEnv(),
-    });
-    let settled = false;
-    let timedOut = false;
-    // Own timer instead of spawn's timeout: that only signals the shell, not what it started.
-    const timer = setTimeout(() => {
-      timedOut = true;
-      killProcessTree(child);
-      fail(new LlmProviderError({
-        code: 'provider_authentication',
-        message: 'The credential command timed out.',
-        provider: 'credential-command',
-        model: '',
-      }));
-    }, timeoutMs);
-    const stdoutChunks: Buffer[] = [];
-    const stderrChunks: Buffer[] = [];
-    let stdoutBytes = 0;
-    let stderrBytes = 0;
-
-    const fail = (error: LlmProviderError): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      reject(error);
-    };
-
-    child.stdout?.on('data', (chunk: Buffer) => {
-      stdoutBytes += chunk.byteLength;
-      if (stdoutBytes > STDOUT_LIMIT_BYTES) {
-        killProcessTree(child);
-        // SECURITY: never include stdout in an error message - it holds the token.
-        fail(new LlmProviderError({
-          code: 'provider_authentication',
-          message: 'The credential command produced too much output.',
-          provider: 'credential-command',
-          model: '',
-        }));
-        return;
-      }
-      stdoutChunks.push(chunk);
-    });
-
-    child.stderr?.on('data', (chunk: Buffer) => {
-      if (stderrBytes >= STDERR_LIMIT_BYTES) return;
-      stderrBytes += chunk.byteLength;
-      stderrChunks.push(chunk);
-    });
-
-    child.on('error', (error) => {
-      fail(new LlmProviderError({
-        code: 'provider_authentication',
-        message: 'The credential command could not run.',
-        provider: 'credential-command',
-        model: '',
-        cause: error,
-      }));
-    });
-
-    // 'close' (not 'exit') guarantees stdout has been fully consumed before we
-    // read the token; 'exit' can fire while stdio is still flushing, truncating it.
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      if (settled) return;
-      if (code === 0 && !timedOut) {
-        settled = true;
-        resolve(Buffer.concat(stdoutChunks).toString('utf8'));
-        return;
-      }
-      const stderr = Buffer.concat(stderrChunks).toString('utf8').slice(0, STDERR_LIMIT_BYTES);
-      // SECURITY: only stderr is surfaced here; stdout carries the token and is never included.
-      const detail = stderr.trim() ? ` ${summarizeProcessError(stderr)}` : '';
-      fail(new LlmProviderError({
-        code: 'provider_authentication',
-        message: `The credential command exited with code ${code ?? 'unknown'}.${detail}`,
-        provider: 'credential-command',
-        model: '',
-      }));
-    });
+export async function runCredentialCommand(command: string, timeoutMs = COMMAND_TIMEOUT_MS, signal?: AbortSignal): Promise<string> {
+  signal?.throwIfAborted();
+  const child = spawn(command, {
+    shell: true,
+    windowsHide: true,
+    stdio: 'pipe',
+    detached: OWN_PROCESS_GROUP,
+    env: credentialCommandEnv(),
+  });
+  let output;
+  try {
+    output = await collectProcessOutput(child, { input: '', timeoutMs, signal, maxBytes: STDOUT_LIMIT_BYTES });
+  } catch (error) {
+    signal?.throwIfAborted();
+    const message = error instanceof ProcessOutputError && error.kind === 'timeout'
+      ? 'The credential command timed out.'
+      : error instanceof ProcessOutputError && error.kind === 'output_limit'
+        ? 'The credential command produced too much output.'
+        : 'The credential command could not run.';
+    throw new LlmProviderError({ code: 'provider_authentication', message, provider: 'credential-command', model: '', cause: error });
+  }
+  if (output.code === 0) return output.stdout;
+  // Both streams can contain credentials, including tokens echoed in diagnostics.
+  throw new LlmProviderError({
+    code: 'provider_authentication',
+    message: `The credential command exited with code ${output.code ?? 'unknown'}.`,
+    provider: 'credential-command', model: '',
   });
 }

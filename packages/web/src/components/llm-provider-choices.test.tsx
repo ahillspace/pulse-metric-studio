@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import React from 'react';
 import { test } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { LLM_PROTOCOLS } from '@pulse-metric-studio/shared';
 import { ProviderSetupChoices, PROVIDER_CHOICES, newProviderId, providerAccess, providerChoice, providerDescription, straightenQuotes } from './llm-provider-choices';
-import { ProfileEditor } from './LlmSettings';
+import { ProfileEditor, changeProfileProtocol } from './LlmSettings';
 
 test('provider mutations freeze every settings control until the saved response arrives', () => {
   const props: Parameters<typeof ProfileEditor>[0] = {
@@ -14,7 +15,7 @@ test('provider mutations freeze every settings control until the saved response 
       credentialCommandHint: null, clearCredentialCommand: false, secretHint: null, allowPrivateNetwork: false, source: 'saved',
     },
     setForm: () => {}, dirty: false, existing: true, busy: true,
-    onSave: async () => {}, onTest: async () => {}, onSelect: () => {}, onDelete: () => {},
+    onCheck: async () => {}, onSave: async () => {}, onTest: async () => {}, onSelect: () => {}, onDelete: () => {},
   };
   const busy = renderToStaticMarkup(<ProfileEditor {...props} />);
   assert.match(busy, /^<fieldset[^>]*aria-label="Provider settings"[^>]*disabled=""/);
@@ -53,6 +54,94 @@ test('saved profiles describe the authentication they actually use', () => {
 });
 
 test('curly quotes from macOS text substitution are straightened', () => {
-  assert.deepEqual(JSON.parse(straightenQuotes('{“x-route”: “claude”}')), { 'x-route': 'claude' });
-  assert.equal(straightenQuotes('‘/Applications/devbar.app/Contents/MacOS/devbar’ auth claude'), "'/Applications/devbar.app/Contents/MacOS/devbar' auth claude");
+  assert.deepEqual(JSON.parse(straightenQuotes('{\u201cx-route\u201d: \u201cclaude\u201d}')), { 'x-route': 'claude' });
+  assert.equal(straightenQuotes('\u2018/Applications/devbar.app/Contents/MacOS/devbar\u2019 auth claude'), "'/Applications/devbar.app/Contents/MacOS/devbar' auth claude");
 });
+
+test('every supported protocol has an explicit provider description and account source', () => {
+  for (const protocol of LLM_PROTOCOLS) {
+    const choice = providerChoice(protocol);
+    assert.ok(choice, protocol);
+    assert.ok(choice.description.length > 20, protocol);
+  }
+  assert.equal(providerAccess('codex-cli', 'local-account'), 'Current Codex CLI account');
+  assert.equal(providerAccess('claude-code', 'local-account'), 'Current Claude Code account');
+  assert.match(providerDescription('claude-code', 'local-account'), /usage credits/);
+});
+
+test('protocol conversion preserves compatible API drafts and clears incompatible credential claims', () => {
+  const api: Parameters<typeof ProfileEditor>[0]['form'] = {
+    id: 'gateway', label: 'Gateway', protocol: 'openai-chat', baseUrl: 'https://gateway.example.test/v1',
+    model: 'explicit-model', authMode: 'x-api-key', secret: 'new-key', hasSecret: true, secretHint: '1234', clearSecret: false,
+    headersText: '{"x-route":"draft"}', headersDirty: true, clearHeaders: false,
+    region: '', awsProfile: '', command: '', credentialCommand: 'new-command', hasCredentialCommand: true,
+    credentialCommandHint: 'saved-command', clearCredentialCommand: false, allowPrivateNetwork: true, source: 'saved',
+  };
+  const responses = changeProfileProtocol(api, 'openai-responses', true);
+  assert.deepEqual(responses, { ...api, protocol: 'openai-responses' });
+  for (const protocol of ['codex-cli', 'claude-code', 'anthropic-messages'] as const) {
+    const changed = changeProfileProtocol(api, protocol, true);
+    assert.equal(changed.hasSecret, false);
+    assert.equal(changed.secret, '');
+    assert.equal(changed.secretHint, null);
+    assert.equal(changed.hasCredentialCommand, false);
+    assert.equal(changed.credentialCommand, '');
+    assert.equal(changed.credentialCommandHint, null);
+    assert.equal(changed.headersText, '{}');
+    assert.equal(changed.headersDirty, false);
+    assert.equal(changed.clearSecret, true);
+    assert.equal(changed.clearCredentialCommand, true);
+    assert.equal(changed.clearHeaders, true);
+    const back = changeProfileProtocol(changed, 'openai-chat', true);
+    assert.equal(back.clearSecret, true, 'returning to the original protocol does not restore a discarded credential');
+    assert.equal(back.hasSecret, false);
+  }
+});
+
+for (const protocol of ['codex-cli', 'claude-code'] as const) {
+  test(`${protocol} setup exposes its executable, manual model, and passive account check without API credentials`, () => {
+    const choice = providerChoice(protocol);
+    const props: Parameters<typeof ProfileEditor>[0] = {
+      form: {
+        id: choice.id, label: choice.label, protocol, baseUrl: '', model: 'selected-model', authMode: 'local-account',
+        secret: '', hasSecret: false, clearSecret: false, headersText: '{}', headersDirty: false, clearHeaders: false,
+        region: '', awsProfile: '', command: choice.command, credentialCommand: '', hasCredentialCommand: false,
+        credentialCommandHint: null, clearCredentialCommand: false, secretHint: null, allowPrivateNetwork: false, source: 'new',
+      },
+      setForm: () => {}, dirty: true, existing: false, busy: false,
+      onCheck: async () => {}, onSave: async () => {}, onTest: async () => {}, onSelect: () => {}, onDelete: () => {},
+    };
+    const html = renderToStaticMarkup(<ProfileEditor {...props} />);
+    assert.match(html, /Check setup/);
+    assert.match(html, /does not send a model request/);
+    assert.match(html, /Test connection sends a model request/);
+    assert.match(html, /CLI executable/);
+    assert.match(html, new RegExp(`${choice.command} (?:auth )?login`));
+    assert.match(html, /No supported model catalog/);
+    assert.doesNotMatch(html, /Key or token|Credential command|Safe custom headers|AWS region|Endpoint<input|Authentication<select/);
+    assert.doesNotMatch(html, /Loading models|reported no current models/);
+    assert.match(html, /<button[^>]*disabled=""[^>]*>Test connection/);
+    assert.match(html, /<button[^>]*>Save profile/);
+    const missing = renderToStaticMarkup(<ProfileEditor {...props} setupStatus={{
+      installed: false, configured: false, healthy: null, reasonCode: 'not_installed',
+      reason: 'Install the CLI, then check setup again.', resolvedModel: null,
+    }} />);
+    assert.match(missing, /CLI: Not found/);
+    assert.match(missing, /Account: Not configured/);
+    assert.match(missing, /Install the CLI/);
+    const configured = renderToStaticMarkup(<ProfileEditor {...props} busy={true} setupStatus={{
+      installed: true, configured: true, healthy: null, reasonCode: 'not_tested',
+      reason: 'Account detected. No model request was sent.', resolvedModel: null,
+    }} />);
+    assert.match(configured, /^<fieldset[^>]*disabled=""/);
+    assert.match(configured, /CLI: Installed/);
+    assert.match(configured, /Account: Configured in CLI/);
+    assert.match(configured, /Account detected. No model request was sent/);
+    assert.doesNotMatch(configured, />Connected</);
+    const edited = renderToStaticMarkup(<ProfileEditor {...props} existing={true} status={{
+      ...props.form, source: 'saved', headers: {}, installed: true, configured: true, available: true,
+      healthy: true, reasonCode: 'ready', reason: 'Old saved executable was verified.', resolvedModel: 'old-model',
+    }} />);
+    assert.doesNotMatch(edited, /Old saved executable was verified|Account: Configured in CLI/);
+  });
+}

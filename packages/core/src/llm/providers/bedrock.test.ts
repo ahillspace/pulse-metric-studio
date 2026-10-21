@@ -7,6 +7,29 @@ import { LlmProviderError } from '../types.js';
 
 const allowEndpoint = async () => undefined;
 
+test('Bedrock bearer and SDK requests honor caller cancellation', async () => {
+  for (const authMode of ['bearer', 'aws'] as const) {
+    const controller = new AbortController();
+    let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    const waitForCancellation = (signal?: AbortSignal | null): Promise<never> => new Promise((_resolve, reject) => {
+      started();
+      signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+    const provider = new BedrockProvider({
+      id: 'bedrock', label: 'Bedrock', protocol: 'bedrock-converse', baseUrl: '', model: 'test-model',
+      authMode, secret: 'test-secret', headers: {}, region: 'us-west-2', awsProfile: '', command: '', source: 'saved',
+    }, async (_input, init) => waitForCancellation(init?.signal), allowEndpoint);
+    provider.getHealth = async () => ({ installed: true, configured: true, healthy: null, reasonCode: 'not_tested', reason: null, resolvedModel: 'test-model' });
+    provider.client = () => ({ send: async (_command: unknown, options: { abortSignal?: AbortSignal }) => waitForCancellation(options.abortSignal) }) as unknown as ReturnType<BedrockProvider['client']>;
+    const pending = provider.complete({ messages: [], signal: controller.signal });
+    const rejected = assert.rejects(pending, { name: 'AbortError' });
+    await ready;
+    controller.abort();
+    await rejected;
+  }
+});
+
 test('Bedrock bearer profiles use the verified Converse HTTP contract', async () => {
   const profile: StoredLlmProfile = {
     id: 'bedrock-key', label: 'Bedrock API key', protocol: 'bedrock-converse', baseUrl: '',

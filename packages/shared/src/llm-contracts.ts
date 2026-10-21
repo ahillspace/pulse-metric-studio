@@ -2,6 +2,8 @@ import { z } from 'zod';
 
 export const LLM_PROTOCOLS = [
   'opencode',
+  'codex-cli',
+  'claude-code',
   'openai-chat',
   'openai-responses',
   'anthropic-messages',
@@ -9,7 +11,7 @@ export const LLM_PROTOCOLS = [
 ] as const;
 
 export type LlmProtocol = (typeof LLM_PROTOCOLS)[number];
-export type LlmAuthMode = 'none' | 'bearer' | 'x-api-key' | 'aws';
+export type LlmAuthMode = 'none' | 'local-account' | 'bearer' | 'x-api-key' | 'aws';
 export type LlmHealthReasonCode =
   | 'ready'
   | 'not_installed'
@@ -70,7 +72,7 @@ export const LlmProfileWriteSchema = z.object({
   protocol: z.enum(LLM_PROTOCOLS),
   baseUrl: z.string().trim().url().max(2000).optional().or(z.literal('')),
   model: z.string().trim().max(240).optional().default(''),
-  authMode: z.enum(['none', 'bearer', 'x-api-key', 'aws']).default('none'),
+  authMode: z.enum(['none', 'local-account', 'bearer', 'x-api-key', 'aws']).default('none'),
   secret: z.string().max(16000).optional(),
   clearSecret: z.boolean().optional().default(false),
   headers: HeadersSchema.optional(),
@@ -83,6 +85,17 @@ export const LlmProfileWriteSchema = z.object({
   credentialCommand: z.string().trim().max(4000).optional(),
   clearCredentialCommand: z.boolean().optional().default(false),
 }).superRefine((profile, ctx) => {
+  const localAccount = profile.protocol === 'codex-cli' || profile.protocol === 'claude-code';
+  if (localAccount) {
+    if (profile.authMode !== 'local-account') ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['authMode'], message: 'This provider requires a locally signed-in account.' });
+    if (profile.baseUrl || profile.secret || Object.keys(profile.headers ?? {}).length || profile.credentialCommand || profile.region || profile.awsProfile || profile.allowPrivateNetwork) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['protocol'], message: 'Local account profiles use only the command and model fields.' });
+    }
+    const executable = profile.protocol === 'codex-cli' ? 'codex' : 'claude';
+    if (profile.command && !isCliCommand(profile.command, executable)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['command'], message: `The command must resolve to a ${executable} executable.` });
+  } else if (profile.authMode === 'local-account') {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['authMode'], message: 'This protocol does not use a local account.' });
+  }
   if (['openai-chat', 'openai-responses', 'anthropic-messages'].includes(profile.protocol) && !profile.baseUrl) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['baseUrl'], message: 'Base URL is required for this protocol.' });
   }
@@ -119,7 +132,7 @@ export const LlmProfileWriteSchema = z.object({
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['baseUrl'], message: 'Endpoint URLs cannot contain query strings or fragments.' });
     }
   }
-  if (profile.protocol === 'opencode' && profile.command && !isOpenCodeCommand(profile.command)) {
+  if (profile.protocol === 'opencode' && profile.command && !isCliCommand(profile.command, 'opencode')) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['command'], message: 'The OpenCode command must resolve to an opencode executable.' });
   }
   if (profile.protocol === 'opencode' && profile.credentialCommand) {
@@ -185,8 +198,9 @@ export interface LlmModelOption {
 }
 
 export interface LlmModelCatalogResponse {
-  provider: 'opencode';
-  source: 'opencode-cli-cache';
+  provider: LlmProtocol;
+  source: 'provider' | 'manual';
+  selection: 'catalog' | 'manual';
   models: LlmModelOption[];
 }
 
@@ -202,8 +216,8 @@ export interface LlmErrorResponse {
   };
 }
 
-function isOpenCodeCommand(command: string): boolean {
+function isCliCommand(command: string, executable: string): boolean {
   const normalized = command.replace(/\\/g, '/');
   const basename = normalized.slice(normalized.lastIndexOf('/') + 1).toLowerCase();
-  return basename === 'opencode' || basename === 'opencode.exe';
+  return basename === executable || basename === `${executable}.exe`;
 }

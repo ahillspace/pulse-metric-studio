@@ -60,7 +60,8 @@ The one-command installer avoids it.
 ## Get started
 
 1. Create a Personal Access Token in Tableau Cloud (your account settings), then connect with your site URL, the token name, and its secret.
-2. Optionally set up an AI provider in Settings: OpenCode CLI, Amazon Bedrock, an OpenAI-compatible gateway, or Anthropic. Choose an explicit model and run **Test connection**.
+2. Optionally set up an AI provider in Settings: a local Codex or Claude Code account, OpenCode CLI, Amazon Bedrock, an OpenAI-compatible gateway, or the Anthropic API.
+   Choose an explicit model and run **Test connection**.
 3. Open **Author**, pick a published datasource, and either ask the assistant for a draft or add metrics yourself.
 4. Review the result and publish. **Activity** keeps the receipt, and **Metric Manager** takes it from there.
 
@@ -68,11 +69,41 @@ The one-command installer avoids it.
 
 - Tableau tokens are stored in macOS Keychain or Windows Credential Manager; the app database keeps only a reference.
 - AI provider keys are encrypted in the app database with a key that also lives in Keychain or Credential Manager.
+- Local Codex and Claude Code profiles use the account signed into the official CLI.
+  The CLI owns login, credential storage, and refresh; Pulse stores only the provider settings.
 - Drafts, settings, and publication receipts live in your user profile: `~/Library/Application Support/com.ahillspace.pulsemetricstudio/` on macOS, `%APPDATA%\com.ahillspace.pulsemetricstudio\` on Windows.
 - The app's backend only listens on `127.0.0.1` and accepts requests signed by its own window.
 - A provider can mint short-lived tokens with a credential command; the first time a new command runs, the app shows the exact command and asks you to allow it. Saved commands are never shown again in Settings, because their arguments can contain secrets.
 - The backend trusts your operating system's certificate store so that corporate TLS inspection works, which means any root certificate your system trusts can inspect Tableau and AI traffic.
 - Datasource metadata sent to the AI provider is limited to field names, captions, types, and calculated-field formulas, never row data.
+
+### Use a local account
+
+Install the official [Codex CLI](https://learn.chatgpt.com/docs/cli) or [Claude Code](https://code.claude.com/docs/en/setup) separately.
+Complete sign-in through the CLI's own terminal flow:
+
+```sh
+codex login
+```
+
+```sh
+claude auth login
+```
+
+In **Settings**, choose the corresponding local account provider and enter a model supported by your account.
+Use **Check setup** to check installation and sign-in without sending a model request.
+Use **Test connection** to verify the selected model; this consumes account usage.
+For account profiles, a successful test verifies that request.
+The readiness indicator stays yellow when the CLI does not expose a stable account identity between runs.
+If discovery cannot find your installation, provide the executable location.
+The app reports unsupported CLI capabilities instead of dropping required request restrictions.
+
+Multiple profiles for one CLI share its current signed-in account.
+Switch accounts through the CLI, then check setup again.
+Pulse does not automatically sign you in, sign you out, or select another provider after a failure.
+Usage and charges follow your vendor account settings, including any enabled extra credits.
+Subscription sign-in does not guarantee that every request uses included subscription allocation.
+See the [maintainer guide](docs/PULSE_MAINTAINER_GUIDE.md) for execution boundaries and qualification limits.
 
 ## Development
 

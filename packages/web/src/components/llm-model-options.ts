@@ -1,13 +1,13 @@
 import type { LlmModelOption } from '@pulse-metric-studio/shared';
 
-export interface OpenCodeModelSelectOption extends LlmModelOption {
+export interface ModelSelectOption extends LlmModelOption {
   unavailable: boolean;
 }
 
-export function buildOpenCodeModelOptions(
+export function buildModelOptions(
   catalog: LlmModelOption[],
   configuredModel: string,
-): OpenCodeModelSelectOption[] {
+): ModelSelectOption[] {
   const current = configuredModel.trim();
   const options = catalog.map((model) => ({ ...model, unavailable: false }));
   if (!current || options.some((option) => option.id === current)) return options;
@@ -17,15 +17,7 @@ export function buildOpenCodeModelOptions(
   ];
 }
 
-export function isCurrentOpenCodeModel(catalog: LlmModelOption[], configuredModel: string): boolean {
+export function isCurrentModel(catalog: LlmModelOption[], configuredModel: string): boolean {
   const current = configuredModel.trim();
   return Boolean(current && catalog.some((model) => model.id === current));
-}
-
-export function openCodeCatalogProfileId(
-  existing: boolean,
-  persistedProtocol: string | undefined,
-  profileId: string,
-): string | null {
-  return existing && persistedProtocol === 'opencode' ? profileId : null;
 }

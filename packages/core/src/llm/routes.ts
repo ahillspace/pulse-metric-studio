@@ -2,14 +2,15 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import '@fastify/sensible';
 import {
   LlmProfileWriteSchema,
+  type LlmProtocol,
   type LlmModelCatalogResponse,
   type LlmProfilePublic,
   type LlmProfileWrite,
   type LlmProviderStatus,
   type LlmStatusResponse,
 } from '@pulse-metric-studio/shared';
-import type { LlmProvider } from './types.js';
-import { getLlmRegistry } from './registry.js';
+import type { LlmProvider, LlmProviderHealth } from './types.js';
+import { getLlmRegistry, LlmModelCatalogError } from './registry.js';
 
 export type AuthorOpsFn = (
   provider: LlmProvider,
@@ -20,7 +21,9 @@ export interface LlmProviderService {
   status(): Promise<LlmStatusResponse>;
   listProfiles(): Promise<LlmProfilePublic[]>;
   listModels(profileId: string): Promise<LlmModelCatalogResponse>;
-  listSetupModels(command?: string): Promise<LlmModelCatalogResponse>;
+  listSetupModels(protocol?: LlmProtocol, command?: string): Promise<LlmModelCatalogResponse>;
+  setupStatus(protocol: LlmProtocol, command?: string): Promise<LlmProviderHealth>;
+  close?(): Promise<void>;
   saveProfile(input: LlmProfileWrite): Promise<LlmProfilePublic>;
   deleteProfile(id: string): Promise<void>;
   setActive(id: string): Promise<string>;
@@ -33,13 +36,22 @@ export function registerLlmRoutes(
   options: { authorOps?: AuthorOpsFn; service?: LlmProviderService } = {},
 ): void {
   const service = options.service ?? getLlmRegistry();
+  app.addHook('preClose', async () => { await service.close?.(); });
 
   app.get('/api/llm/status', async () => service.status());
   app.get('/api/llm/profiles', async () => ({ profiles: await service.listProfiles() }));
-  app.get('/api/llm/setup/opencode/models', async (request) => {
+  app.get('/api/llm/setup/:protocol/models', async (request) => {
+    const protocol = setupProtocol(request);
     const { command } = request.query as { command?: unknown };
-    if (command !== undefined && (typeof command !== 'string' || command.length > 4096 || /[\r\n\0]/.test(command))) throw app.httpErrors.badRequest('Invalid OpenCode command.');
-    return service.listSetupModels(command as string | undefined);
+    if (command !== undefined && (typeof command !== 'string' || command.length > 1000 || /[\r\n\0]/.test(command))) throw app.httpErrors.badRequest('Invalid CLI command.');
+    return service.listSetupModels(protocol, command as string | undefined);
+  });
+
+  app.get('/api/llm/setup/:protocol/status', async (request) => {
+    const protocol = setupProtocol(request);
+    const { command } = request.query as { command?: unknown };
+    if (command !== undefined && (typeof command !== 'string' || command.length > 1000 || /[\r\n\0]/.test(command))) throw app.httpErrors.badRequest('Invalid CLI command.');
+    return service.setupStatus(protocol, command as string | undefined);
   });
 
   app.get('/api/llm/profiles/:id/models', async (request) => {
@@ -97,6 +109,12 @@ export function registerLlmRoutes(
       });
     });
   }
+}
+
+function setupProtocol(request: FastifyRequest): LlmProtocol {
+  const value = (request.params as { protocol: string }).protocol;
+  if (value === 'opencode' || value === 'codex-cli' || value === 'claude-code') return value;
+  throw new LlmModelCatalogError('Setup checks require a local CLI protocol.');
 }
 
 function validationMessage(issues: Array<{ path: PropertyKey[]; message: string }>): string {

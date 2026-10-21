@@ -26,6 +26,20 @@ function publicProfile(id: string) {
   };
 }
 
+test('local account profiles accept explicit models and reject cloud credentials', () => {
+  for (const [protocol, command] of [['codex-cli', 'codex'], ['claude-code', 'claude']]) {
+    const profile = { id: 'local', label: 'Local account', protocol, command, model: 'explicit-model', authMode: 'local-account' };
+    assert.equal(LlmProfileWriteSchema.safeParse(profile).success, true);
+    for (const extra of [{ secret: 'api-key' }, { credentialCommand: 'mint-token' }, { headers: { 'x-route': 'cloud' } }, { region: 'us-east-1' }, { awsProfile: 'paid' }, { baseUrl: 'https://api.example.test' }, { allowPrivateNetwork: true }]) {
+      assert.equal(LlmProfileWriteSchema.safeParse({ ...profile, ...extra }).success, false);
+    }
+    assert.equal(LlmProfileWriteSchema.safeParse({ ...profile, model: '' }).success, false);
+    assert.equal(LlmProfileWriteSchema.safeParse({ ...profile, authMode: 'bearer' }).success, false);
+    assert.equal(LlmProfileWriteSchema.safeParse({ ...profile, command: 'other-cli' }).success, false);
+  }
+  assert.equal(LlmProfileWriteSchema.safeParse({ id: 'api', label: 'API', protocol: 'openai-chat', model: 'm', baseUrl: 'https://api.example.test', authMode: 'local-account' }).success, false);
+});
+
 test('LLM settings routes return masked profiles and never echo secrets', async () => {
   let saved: LlmProfileWrite | undefined;
   const service: LlmProviderService = {
@@ -37,8 +51,9 @@ test('LLM settings routes return masked profiles and never echo secrets', async 
       readiness: { state: 'red', providerId: 'opencode', message: 'Select a model.', lastSuccessfulAt: null },
     }),
     listProfiles: async () => [publicProfile('gateway')],
-    listModels: async (): Promise<LlmModelCatalogResponse> => ({ provider: 'opencode', source: 'opencode-cli-cache', models: [] }),
-    listSetupModels: async (): Promise<LlmModelCatalogResponse> => ({ provider: 'opencode', source: 'opencode-cli-cache', models: [] }),
+    listModels: async (): Promise<LlmModelCatalogResponse> => ({ provider: 'opencode', source: 'provider', selection: 'catalog', models: [] }),
+    listSetupModels: async (): Promise<LlmModelCatalogResponse> => ({ provider: 'opencode', source: 'provider', selection: 'catalog', models: [] }),
+    setupStatus: async () => ({ installed: true, configured: true, healthy: null, reasonCode: 'not_tested', reason: null, resolvedModel: null }),
     saveProfile: async (profile) => {
       saved = profile;
       return publicProfile(profile.id);
@@ -84,7 +99,7 @@ test('LLM model route returns the shared OpenCode model catalog', async () => {
       requestedId = id;
       return {
         provider: 'opencode',
-        source: 'opencode-cli-cache',
+        source: 'provider', selection: 'catalog',
         models: [{ id: 'opencode/big-pickle', label: 'Big Pickle' }],
       };
     },
@@ -99,7 +114,7 @@ test('LLM model route returns the shared OpenCode model catalog', async () => {
     assert.equal(requestedId, 'opencode');
     assert.deepEqual(response.json(), {
       provider: 'opencode',
-      source: 'opencode-cli-cache',
+      source: 'provider', selection: 'catalog',
       models: [{ id: 'opencode/big-pickle', label: 'Big Pickle' }],
     });
   } finally {

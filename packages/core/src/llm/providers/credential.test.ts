@@ -9,6 +9,44 @@ beforeEach(() => {
   clearCredentialCache();
 });
 
+test('credential command cancellation stops its process and preserves the cancellation reason', async () => {
+  const controller = new AbortController();
+  const pending = runCredentialCommand('node -e "setInterval(() => {}, 1000)"', 15_000, controller.signal);
+  const rejected = assert.rejects(pending, { name: 'AbortError' });
+  controller.abort();
+  await rejected;
+});
+
+test('credential command failures never expose token-bearing output from either stream', async () => {
+  const command = 'node -e "process.stdout.write(\'fixture-token\');process.stderr.write(\'Login failed for fixture-token\');process.exit(1)"';
+  await assert.rejects(runCredentialCommand(command), (error: unknown) => error instanceof Error
+    && /exited with code 1/.test(error.message) && !error.message.includes('fixture-token'));
+});
+
+test('cancelling native credential approval never starts the command afterward', async () => {
+  let finishApproval!: (approved: boolean) => void;
+  let approvalStarted!: () => void;
+  const started = new Promise<void>(resolve => { approvalStarted = resolve; });
+  setCredentialCommandApprover(async () => {
+    approvalStarted();
+    return new Promise(resolve => { finishApproval = resolve; });
+  });
+  const controller = new AbortController();
+  let calls = 0;
+  try {
+    const pending = resolveProfileSecret({ credentialCommand: 'mint' }, 'provider', 'model', {
+      runner: async () => { calls++; return 'token'; }, signal: controller.signal,
+    });
+    const rejected = assert.rejects(pending, { name: 'AbortError' });
+    await started;
+    controller.abort();
+    await rejected;
+    finishApproval(true);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(calls, 0);
+  } finally { setCredentialCommandApprover(null); }
+});
+
 test('credential command output is cached within the TTL so the runner runs once', async () => {
   let calls = 0;
   const runner = async () => {
@@ -16,8 +54,8 @@ test('credential command output is cached within the TTL so the runner runs once
     return 'MINTED-TOKEN\n';
   };
   const now = () => 1_000;
-  const first = await resolveCredentialCommand('mint', 'provider', 'model', runner, now);
-  const second = await resolveCredentialCommand('mint', 'provider', 'model', runner, now);
+  const first = await resolveCredentialCommand('mint', 'provider', 'model', { runner, now });
+  const second = await resolveCredentialCommand('mint', 'provider', 'model', { runner, now });
   assert.equal(first, 'MINTED-TOKEN');
   assert.equal(second, 'MINTED-TOKEN');
   assert.equal(calls, 1);
@@ -31,21 +69,21 @@ test('credential command re-runs after the cache entry expires', async () => {
   };
   let clock = 0;
   const now = () => clock;
-  assert.equal(await resolveCredentialCommand('mint', 'provider', 'model', runner, now), 'token-1');
+  assert.equal(await resolveCredentialCommand('mint', 'provider', 'model', { runner, now }), 'token-1');
   clock = 60_001;
-  assert.equal(await resolveCredentialCommand('mint', 'provider', 'model', runner, now), 'token-2');
+  assert.equal(await resolveCredentialCommand('mint', 'provider', 'model', { runner, now }), 'token-2');
   assert.equal(calls, 2);
 });
 
 test('credential command stdout is trimmed', async () => {
   const runner = async () => '  MINTED-TOKEN  \n';
-  assert.equal(await resolveCredentialCommand('mint', 'provider', 'model', runner), 'MINTED-TOKEN');
+  assert.equal(await resolveCredentialCommand('mint', 'provider', 'model', { runner }), 'MINTED-TOKEN');
 });
 
 test('empty credential command output is rejected as an authentication failure', async () => {
   const runner = async () => '   \n';
   await assert.rejects(
-    () => resolveCredentialCommand('mint', 'provider', 'model', runner),
+    () => resolveCredentialCommand('mint', 'provider', 'model', { runner }),
     (error: any) => error?.code === 'provider_authentication' && /produced no output/.test(error.message),
   );
 });
@@ -54,7 +92,7 @@ test('a runner rejection propagates from resolveCredentialCommand', async () => 
   const runner = async () => {
     throw new Error('boom');
   };
-  await assert.rejects(() => resolveCredentialCommand('mint', 'provider', 'model', runner), /boom/);
+  await assert.rejects(() => resolveCredentialCommand('mint', 'provider', 'model', { runner }), /boom/);
 });
 
 test('resolveProfileSecret prefers the credential command over a static secret', async () => {
@@ -63,7 +101,7 @@ test('resolveProfileSecret prefers the credential command over a static secret',
     { secret: 'static-secret', credentialCommand: 'mint' },
     'provider',
     'model',
-    runner,
+    { runner },
   );
   assert.equal(token, 'MINTED-TOKEN');
 });
@@ -76,7 +114,7 @@ test('resolveProfileSecret trims the static secret when no credential command is
     { secret: '  static-secret  ', credentialCommand: '' },
     'provider',
     'model',
-    runner,
+    { runner },
   );
   assert.equal(token, 'static-secret');
 });
@@ -125,18 +163,18 @@ test('desktop credential commands run only after native approval, asked once per
     return 'MINTED';
   };
   try {
-    await assert.rejects(resolveCredentialCommand('mint', 'provider', 'model', runner), /not allowed to run/);
+    await assert.rejects(resolveCredentialCommand('mint', 'provider', 'model', { runner }), /not allowed to run/);
     assert.equal(runs, 0);
     answer = true;
-    assert.equal(await resolveCredentialCommand('mint', 'provider', 'model', runner, () => 0), 'MINTED');
+    assert.equal(await resolveCredentialCommand('mint', 'provider', 'model', { runner, now: () => 0 }), 'MINTED');
     clearCredentialCache();
-    assert.equal(await resolveCredentialCommand('mint', 'provider', 'model', runner, () => 0), 'MINTED');
+    assert.equal(await resolveCredentialCommand('mint', 'provider', 'model', { runner, now: () => 0 }), 'MINTED');
     assert.deepEqual(asked, ['mint', 'mint']);
     assert.equal(runs, 2);
     setCredentialCommandApprover(async () => {
       throw new Error('broker down');
     });
-    await assert.rejects(resolveCredentialCommand('other', 'provider', 'model', runner), /could not be approved/);
+    await assert.rejects(resolveCredentialCommand('other', 'provider', 'model', { runner }), /could not be approved/);
   } finally {
     setCredentialCommandApprover(null);
   }

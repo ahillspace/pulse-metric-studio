@@ -84,7 +84,9 @@ export class BedrockProvider {
   }
 
   async complete(opts: CompleteOptions): Promise<CompleteResult> {
+    opts.signal?.throwIfAborted();
     const health = await this.getHealth();
+    opts.signal?.throwIfAborted();
     if (!health.configured) {
       throw new LlmProviderError({ code: 'provider_not_configured', message: health.reason ?? 'Amazon Bedrock is not configured.', provider: this.id, model: this.profile.model });
     }
@@ -103,7 +105,7 @@ export class BedrockProvider {
             content: [{ text: message.content }],
           })),
           inferenceConfig: { maxTokens: opts.maxTokens ?? 4096 },
-        }), { abortSignal: controller.signal });
+        }), { abortSignal: opts.signal ? AbortSignal.any([opts.signal, controller.signal]) : controller.signal });
       } finally {
         clearTimeout(timer);
       }
@@ -111,6 +113,7 @@ export class BedrockProvider {
       if (!text) throw new LlmProviderError({ code: 'invalid_provider_response', message: 'Amazon Bedrock returned no text content.', provider: this.id, model: this.profile.model });
       return { text, provider: this.id, model: this.profile.model, truncated: response.stopReason === 'max_tokens' };
     } catch (error) {
+      opts.signal?.throwIfAborted();
       if (error instanceof LlmProviderError) throw error;
       const failure = classifyBedrockError(error);
       throw new LlmProviderError({
@@ -135,7 +138,9 @@ export class BedrockProvider {
       }
       throw error;
     }
-    const token = await resolveProfileSecret(this.profile, this.id, this.profile.model);
+    opts.signal?.throwIfAborted();
+    const token = await resolveProfileSecret(this.profile, this.id, this.profile.model, { signal: opts.signal });
+    opts.signal?.throwIfAborted();
     let response: Response;
     try {
       // The default client re-checks every resolved address when it connects.
@@ -151,10 +156,13 @@ export class BedrockProvider {
           })),
           inferenceConfig: { maxTokens: opts.maxTokens ?? 4096 },
         }),
-        signal: AbortSignal.timeout(opts.timeoutMs ?? LLM_REQUEST_TIMEOUT_MS),
+        signal: opts.signal
+          ? AbortSignal.any([opts.signal, AbortSignal.timeout(opts.timeoutMs ?? LLM_REQUEST_TIMEOUT_MS)])
+          : AbortSignal.timeout(opts.timeoutMs ?? LLM_REQUEST_TIMEOUT_MS),
         redirect: 'error',
       });
     } catch (error) {
+      opts.signal?.throwIfAborted();
       if (error instanceof UnsafeLlmEndpointError) {
         throw new LlmProviderError({ code: 'provider_execution', message: error.message, provider: this.id, model: this.profile.model });
       }
