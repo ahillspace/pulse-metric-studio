@@ -24,7 +24,7 @@ export function describePulseDocumentChanges(
 ): PulseAuthorProposal['changes'] {
   const changes: PulseAuthorProposal['changes'] = [];
   for (const [fieldId, metric] of Object.entries(after.metrics)) {
-    const previous = before.metrics[fieldId];
+    const previous = Object.hasOwn(before.metrics, fieldId) ? before.metrics[fieldId] : undefined;
     for (const field of Object.keys(metricChangeLabels) as Array<keyof typeof metricChangeLabels>) {
       const value = metric[field];
       if (JSON.stringify(previous?.[field]) !== JSON.stringify(value))
@@ -35,12 +35,13 @@ export function describePulseDocumentChanges(
     }
   }
   for (const [fieldId, metric] of Object.entries(before.metrics))
-    if (!after.metrics[fieldId]) changes.push({ field: `${fieldId}.active`, message: `${metric.fieldLabel}: metric removed.` });
+    if (!Object.hasOwn(after.metrics, fieldId)) changes.push({ field: `${fieldId}.active`, message: `${metric.fieldLabel}: metric removed.` });
   for (const fieldId of new Set([...Object.keys(before.slicers), ...Object.keys(after.slicers)])) {
-    const previous = before.slicers[fieldId];
-    const next = after.slicers[fieldId];
-    if (Boolean(previous?.active) !== Boolean(next?.active))
-      changes.push({ field: `slicers.${fieldId}`, message: `${(next ?? previous).fieldLabel}: slicer ${next?.active ? 'selected' : 'removed'}.` });
+    const previous = Object.hasOwn(before.slicers, fieldId) ? before.slicers[fieldId] : undefined;
+    const next = Object.hasOwn(after.slicers, fieldId) ? after.slicers[fieldId] : undefined;
+    const slicer = next ?? previous;
+    if (slicer && Boolean(previous?.active) !== Boolean(next?.active))
+      changes.push({ field: `slicers.${fieldId}`, message: `${slicer.fieldLabel}: slicer ${next?.active ? 'selected' : 'removed'}.` });
   }
   if (before.digestAudience !== after.digestAudience)
     changes.push({ field: 'digestAudience', message: `Audience changed to ${after.digestAudience}.` });

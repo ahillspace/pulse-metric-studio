@@ -133,7 +133,7 @@ export function ConnectCard() {
   async function runConnectionAction(
     action: () => Promise<void>,
   ): Promise<void> {
-    useConnection.getState().startAction();
+    if (!useConnection.getState().startAction()) return;
     setLocalError(null);
     try {
       await action();
@@ -343,7 +343,7 @@ export function ConnectCard() {
           Use a Personal Access Token from your Tableau Cloud or Server account
           (Account settings &rarr; Personal access tokens).
         </p>
-        <div className="connect-grid">
+        <fieldset className="connect-grid" disabled={connecting}>
           <label className="full">
             Saved connection
             <select
@@ -543,7 +543,7 @@ export function ConnectCard() {
               )}
             </>
           )}
-        </div>
+        </fieldset>
       </div>
     </div>
   );

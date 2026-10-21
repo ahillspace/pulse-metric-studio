@@ -1,7 +1,8 @@
 import { useRegistry } from "./registry/controller";
 import { InventoryCounts } from "./registry/InventoryCounts";
 import { useEffect, useRef, useState } from "react";
-import { subscribeBackendUnavailable } from "../../desktop-lifecycle";
+import { invoke } from "@tauri-apps/api/core";
+import { subscribeDesktopLifecycle } from "../../desktop-lifecycle";
 import pulseIcon from "../../assets/pulse-icon.png";
 import { DigestSettings } from "./author/DigestSettings";
 import { ResizableAssistant } from "./shell/ResizableAssistant";
@@ -18,6 +19,7 @@ import { ConfigEditor } from "./components/ConfigEditor";
 import { PublishSection } from "./components/PublishSection";
 import { ExistingMetrics } from "./components/ExistingMetrics";
 import { useNotices } from "./shell/notifications";
+import { Modal } from "./components/ui";
 import "./pulse-remediation.css";
 import "./workflows.css";
 import "./registry/variants.css";
@@ -64,7 +66,11 @@ export default function PulseApp() {
     () => !window.matchMedia("(max-width: 820px)").matches,
   );
   const [backendError, setBackendError] = useState<string | null>(null);
-  const { session, checked, error, init, disconnect } = useConnection();
+  const { session, checked, error, connecting, init, disconnect } = useConnection();
+  const closeStatus = useAuthor((state) => state.closeStatus);
+  const closing = closeStatus !== "open";
+  const [closeError, setCloseError] = useState<string | null>(null);
+  const [reviewDiscard, setReviewDiscard] = useState(false);
   const entry = useAuthor(activeEditor);
   const notice = useNotices((state) => state.notice);
   useEffect(() => {
@@ -107,12 +113,27 @@ export default function PulseApp() {
     if (session) void useAuthor.getState().refreshCatalog();
   }, [session, checked]);
   useEffect(() => {
-    const unsubscribeBackend = subscribeBackendUnavailable(setBackendError);
+    const unsubscribeDesktop = subscribeDesktopLifecycle({
+      onUnavailable: setBackendError,
+      prepareClose: () => {
+        setCloseError(null);
+        setReviewDiscard(false);
+        return useAuthor.getState().prepareClose();
+      },
+      cancelClose: () => useAuthor.getState().cancelClose(),
+      hasUnsavedChanges: () => Object.values(useAuthor.getState().entries).some(
+        (editor) => editor.sequence !== editor.savedSequence || editor.proposalBusy,
+      ),
+      onCloseError: (error) => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        setCloseError(`The app stayed open because changes could not be saved. ${error instanceof Error ? error.message : String(error)}`);
+      },
+    });
     const expired = () => useConnection.getState().expireSession();
     window.addEventListener("pulse-session-expired", expired);
     return () => {
       window.removeEventListener("pulse-session-expired", expired);
-      unsubscribeBackend();
+      unsubscribeDesktop();
     };
   }, []);
   useEffect(() => {
@@ -202,6 +223,7 @@ export default function PulseApp() {
           {session && (
             <button
               className="pulse-disconnect"
+              disabled={connecting || closing}
               onClick={() => {
                 void disconnect();
                 setArea("Connections");
@@ -230,6 +252,26 @@ export default function PulseApp() {
             </button>
           )}
         </header>
+        {closing && (
+          <div className="warning-banner" role="status">
+            {closeStatus === "saving" ? "Finishing current changes and saving your drafts before closing." : "Closing Pulse Metric Studio."}
+            {closeStatus === "saving" && (
+              <button className="btn small" onClick={() => {
+                if (useAuthor.getState().closeStatus === "saving") useAuthor.getState().cancelClose();
+              }}>
+                Keep app open
+              </button>
+            )}
+          </div>
+        )}
+        {closeError && (
+          <div className="warning-banner" role="alert">
+            {closeError}
+            <button className="btn small" onClick={() => setReviewDiscard(true)}>
+              Review closing without saving
+            </button>
+          </div>
+        )}
         {backendError && (
           <div className="warning-banner" role="alert">
             {backendError}
@@ -251,7 +293,7 @@ export default function PulseApp() {
         <div className="pulse-workspace-content">
           <main className="pulse-main" aria-label={`${labels[area]} workspace`}>
             <fieldset
-              disabled={Boolean(backendError)}
+              disabled={Boolean(backendError) || closing}
               className="pulse-workspace-fields"
             >
               <div hidden={area !== "Connections"}>
@@ -282,7 +324,7 @@ export default function PulseApp() {
           </main>
           <ResizableAssistant open={hasAssistant && assistantOpen}>
             <fieldset
-              disabled={Boolean(backendError)}
+              disabled={Boolean(backendError) || closing}
               className="pulse-workspace-fields"
             >
               <ChatPanel collapsed={!hasAssistant || !assistantOpen} />
@@ -290,6 +332,31 @@ export default function PulseApp() {
           </ResizableAssistant>
         </div>
       </div>
+      {reviewDiscard && (
+        <Modal
+          title="Close without saving?"
+          onClose={() => setReviewDiscard(false)}
+          actions={<>
+            <button className="btn" onClick={() => setReviewDiscard(false)}>Keep editing</button>
+            <button className="btn danger" disabled={closing} onClick={async () => {
+              if (useAuthor.getState().closeStatus !== "open") return;
+              setReviewDiscard(false);
+              try {
+                await useAuthor.getState().prepareClose("discard");
+                await invoke("pulse_shutdown", { action: "complete" });
+              } catch (error) {
+                useAuthor.getState().cancelClose();
+                setCloseError(`The app could not close. ${error instanceof Error ? error.message : String(error)}`);
+              }
+            }}>Discard unsaved changes and close</button>
+          </>}
+        >
+          <p>Unsaved changes and unfinished assistant responses are lost when you close. Saved drafts and publication receipts remain available.</p>
+          <ul>{Object.values(useAuthor.getState().entries).filter((editor) =>
+            editor.sequence !== editor.savedSequence || editor.proposalBusy,
+          ).map((editor) => <li key={editor.record.id}>{editor.record.datasourceName}</li>)}</ul>
+        </Modal>
+      )}
       {notice && (
         <div className="toast-host">
           <div

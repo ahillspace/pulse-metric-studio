@@ -12,6 +12,7 @@ import {
   mergePulseProposal,
 } from './pulse-domain.js';
 import type { DatasourceCatalog } from './field-catalog.js';
+import { describePulseDocumentChanges } from './pulse-proposal.js';
 
 const catalog: DatasourceCatalog = {
   datasourceLuid: 'ds',
@@ -149,4 +150,39 @@ test('explicit minimum granularity remains editable through assistant operations
     { op: 'ADD_METRIC', fieldId: 'Sales', minGranularity: 'MONTH' },
   ], catalog);
   assert.equal(result.metrics.Sales!.minGranularity, 'MONTH');
+});
+
+test('proposal edits and merges treat inherited object names as datasource field IDs', () => {
+  for (const fieldId of ['constructor', 'toString', 'hasOwnProperty', '__proto__']) {
+    const fields = { ...catalog, measures: [{ ...catalog.measures[0]!, id: fieldId, name: fieldId }] };
+    const base = emptyPulseDocument();
+    const candidate = applyPulseProposal(base, [
+      { op: 'ADD_METRIC', fieldId, description: 'Added by assistant' },
+    ], fields);
+    assert.equal(Object.hasOwn(candidate.metrics, fieldId), true);
+    assert.equal(candidate.metrics[fieldId]!.description, 'Added by assistant');
+    assert.match(describePulseDocumentChanges(base, candidate, fields).find((change) => change.field === `${fieldId}.name`)!.message, /from \(none\) to Sales/);
+    const merged = mergePulseProposal(base, candidate, base).document;
+    assert.deepEqual(merged.metrics[fieldId], candidate.metrics[fieldId]);
+    const modified = applyPulseProposal(merged, [
+      { op: 'MODIFY_METRIC', fieldId, name: 'Updated metric' },
+    ], fields);
+    assert.equal(modified.metrics[fieldId]!.name, 'Updated metric');
+    const removed = applyPulseProposal(modified, [{ op: 'REMOVE_METRIC', fieldId }], fields);
+    assert.equal(removed.metrics[fieldId]!.active, false);
+    assert.deepEqual(applyPulseProposal(base, [{ op: 'REMOVE_METRIC', fieldId }], fields), base);
+    const dimensionCatalog = { ...fields, dimensions: [{ ...fields.measures[0]!, role: 'DIMENSION' as const }] };
+    const withSlicer = applyPulseProposal(base, [{ op: 'ADD_SLICER', fieldId }], dimensionCatalog);
+    assert.equal(Object.hasOwn(withSlicer.slicers, fieldId), true);
+    assert.equal(withSlicer.slicers[fieldId]!.active, true);
+    const withoutSlicer = applyPulseProposal(withSlicer, [{ op: 'REMOVE_SLICER', fieldId }], dimensionCatalog);
+    assert.equal(withoutSlicer.slicers[fieldId]!.active, false);
+    assert.equal(describePulseDocumentChanges(withSlicer, withoutSlicer)[0]!.message, 'Sales: slicer removed.');
+    assert.deepEqual(applyPulseProposal(base, [{ op: 'REMOVE_SLICER', fieldId }], dimensionCatalog), base);
+    const roundTrip = PulseWorkspaceDocumentV1Schema.parse(JSON.parse(JSON.stringify(candidate)));
+    assert.deepEqual(roundTrip, candidate);
+    assert.equal(Object.getPrototypeOf(roundTrip.metrics), Object.prototype);
+  }
+  for (const metrics of [[], null, new Map(), new Date(), 'invalid'])
+    assert.equal(PulseWorkspaceDocumentV1Schema.safeParse({ ...emptyPulseDocument(), metrics }).success, false);
 });

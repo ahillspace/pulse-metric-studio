@@ -1,5 +1,4 @@
 import {
-  TableauError,
   getFieldCatalog,
   invalidateFieldsCache,
   type TableauSession,
@@ -15,6 +14,7 @@ import {
   type FilterDimensionField,
 } from '@pulse-metric-studio/shared';
 import crypto from 'node:crypto';
+import { mapWithConcurrency } from '../application/registry-collections.js';
 import {
   getPulseDefinition,
   getPulseMetric,
@@ -31,6 +31,7 @@ import { metricDefinitionId, metricSpecification } from './reconciliation.js';
  * while anything larger reports `truncated`.
  */
 const FETCH_ALL_ROW_LIMIT = DIMENSIONAL_FORK_LIMITS.valueModeThreshold + 1;
+const PROVIDER_CONCURRENCY = 5;
 
 export class PulseDimensionalForkError extends Error {
   constructor(
@@ -206,11 +207,13 @@ export class PulseDimensionalForkService {
     session: TableauSession,
     sourceMetricIds: string[],
   ): Promise<ResolvedContext> {
-    const metrics = await Promise.all(
-      sourceMetricIds.map(async (metricId) => ({
+    const metrics = await mapWithConcurrency(
+      sourceMetricIds,
+      PROVIDER_CONCURRENCY,
+      async (metricId) => ({
         metricId,
         metric: await this.dependencies.getMetric(session, metricId),
-      })),
+      }),
     );
     const definitionPromises = new Map<string, Promise<PulseDefinition>>();
     const partial = metrics.map(({ metricId, metric }) => {
@@ -242,17 +245,18 @@ export class PulseDimensionalForkService {
           `Source metric ${metricId} has no exact specification.`,
           409,
         );
-      if (!definitionPromises.has(definitionId)) {
-        definitionPromises.set(
-          definitionId,
-          this.dependencies.getDefinition(session, definitionId),
-        );
-      }
       return { metricId, definitionId, specification };
     });
-    const sources = await Promise.all(
-      partial.map(async (source): Promise<ResolvedSource> => {
-        const definition = await definitionPromises.get(source.definitionId)!;
+    const sources = await mapWithConcurrency(
+      partial,
+      PROVIDER_CONCURRENCY,
+      async (source): Promise<ResolvedSource> => {
+        let definitionPromise = definitionPromises.get(source.definitionId);
+        if (!definitionPromise) {
+          definitionPromise = this.dependencies.getDefinition(session, source.definitionId);
+          definitionPromises.set(source.definitionId, definitionPromise);
+        }
+        const definition = await definitionPromise;
         const returnedDefinitionId = String(
           definition.metadata?.id ?? '',
         ).trim();
@@ -289,7 +293,7 @@ export class PulseDimensionalForkService {
             ),
           ),
         };
-      }),
+      },
     );
     const datasourceLuid = sources[0]!.datasourceLuid;
     if (sources.some((source) => source.datasourceLuid !== datasourceLuid)) {
@@ -439,13 +443,6 @@ function normalizeDistinctStringValues(rows: unknown[]): {
     values.push(value);
   }
   return { values: values.sort(compareCanonicalStrings), hadUnsupportedValue };
-}
-
-function rethrowAuth(error: unknown): void {
-  if (error instanceof TableauError && error.kind === 'auth') {
-    (error as TableauError & { statusCode?: number }).statusCode = 401;
-    throw error;
-  }
 }
 
 export const pulseDimensionalForkService = new PulseDimensionalForkService();

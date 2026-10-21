@@ -3,7 +3,7 @@ clearSession,closeDb,config,setSession,
 TableauError,
 type TableauSession
 } from '@pulse-metric-studio/core';
-import type { DatasourceCatalog } from '@pulse-metric-studio/shared';
+import { defaultPulseMetric, emptyPulseDocument, type DatasourceCatalog, type PulseDraftRecord } from '@pulse-metric-studio/shared';
 import Fastify from 'fastify';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -19,6 +19,7 @@ type PulseForkPlanDependencies,
 type PulseForkPlanSummary
 } from './fork-plan-service.js';
 import { registerPulseRoutes } from './routes.js';
+import { PulseDimensionalForkService } from './dimensional-fork-service.js';
 
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pulse-fork-plan-'));
 config.dataDir = directory; config.dbPath = path.join(directory, 'test.db');
@@ -457,4 +458,120 @@ test('canonical planner handles more than one hundred sources with bounded provi
   assert.equal(result.attempted, 125);
   assert.equal(result.created, 125);
   assert.ok(maximum <= 5);
+});
+
+test('dimension routes read every source from POST bodies and reject invalid input before provider calls', async () => {
+  let metricReads = 0;
+  const base = dependencies();
+  const service = new PulseDimensionalForkService({
+    ...base,
+    getMetric: async (owner, metricId) => { metricReads++; return base.getMetric(owner, metricId); },
+    queryCount: async () => 2,
+  });
+  const app = Fastify();
+  registerPulseRoutes(app, { dimensionalForkService: service });
+  setSession(session, { connectionId: 'dimension-post-test', patSecret: 'test' });
+  const sourceMetricIds = Array.from({ length: 1000 }, (_, index) =>
+    `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
+  );
+  try {
+    for (const [url, input] of [
+      ['/api/pulse/dimensions', {}],
+      ['/api/pulse/dimensions/count', { fieldId: 'field-region' }],
+      ['/api/pulse/dimensions/values', { fieldId: 'field-region', search: 'West', all: true }],
+    ] as const) {
+      const response = await app.inject({ method: 'POST', url, payload: { sourceMetricIds, ...input } });
+      assert.equal(response.statusCode, 200, response.body);
+      assert.equal((await app.inject({ method: 'GET', url })).statusCode, 404);
+    }
+    assert.equal(metricReads, 3000);
+    for (const payload of [{ sourceMetricIds: [] }, { sourceMetricIds: [null] }, { sourceMetricIds: ['x'.repeat(513)] }]) {
+      const response = await app.inject({ method: 'POST', url: '/api/pulse/dimensions', payload });
+      assert.equal(response.statusCode, 400, response.body);
+    }
+    const invalidValues = await app.inject({ method: 'POST', url: '/api/pulse/dimensions/values', payload: { sourceMetricIds: ['metric'], fieldId: 'field-region', search: 'x'.repeat(257) } });
+    assert.equal(invalidValues.statusCode, 400, invalidValues.body);
+    assert.equal(metricReads, 3000);
+  } finally { clearSession(); await app.close(); }
+});
+
+test('deletion accepts reordered metrics but rejects a changed metric specification', async () => {
+  let reversed = false;
+  let changed = false;
+  let deletes = 0;
+  const app = Fastify();
+  const context = { connectionId: 'delete-order-test', serverUrl: session.serverUrl, siteId: session.siteId, datasourceLuid: 'datasource-1' };
+  registerPulseRoutes(app, { deletion: {
+    inventory: async () => ({ totalScanned: 1, truncated: false, failures: [], definitions: [{
+      definitionId: 'definition', name: 'Sales', description: '', measure: 'Sales', aggregation: 'SUM', timeDimension: 'Date', inventoryStatus: 'complete',
+      metrics: (reversed ? ['b', 'a'] : ['a', 'b']).map(metricId => ({ metricId, name: metricId, measurementPeriod: {}, timeframeLabel: 'Custom', filters: [], comparison: {}, isDefault: false, isScoped: false, scopedState: 'variant', specification: { comparison: changed && metricId === 'a' ? 'changed' : 'original' } })),
+    }] }),
+    execute: async () => { deletes++; return { definitionsDeleted: 1, metricsDeleted: 0, failures: [], outcomes: [] }; },
+  } });
+  setSession(session, { connectionId: context.connectionId, patSecret: 'test' });
+  const selection = { context, definitionIds: ['definition'], metricIds: [] };
+  try {
+    const preview = await app.inject({ method: 'POST', url: '/api/pulse/registry/delete-preview', payload: selection });
+    assert.equal(preview.statusCode, 200, preview.body);
+    reversed = true;
+    const accepted = await app.inject({ method: 'POST', url: '/api/pulse/registry/delete', payload: { ...selection, previewFingerprint: preview.json().previewFingerprint } });
+    assert.equal(accepted.statusCode, 200, accepted.body);
+    changed = true;
+    const rejected = await app.inject({ method: 'POST', url: '/api/pulse/registry/delete', payload: { ...selection, previewFingerprint: preview.json().previewFingerprint } });
+    assert.equal(rejected.statusCode, 409, rejected.body);
+    assert.equal(rejected.json().code, 'delete_plan_changed');
+    assert.equal(deletes, 1);
+  } finally { clearSession(); await app.close(); }
+});
+
+test('draft and proposal routes preserve prototype-named fields through validated JSON documents', async () => {
+  const fields: DatasourceCatalog = {
+    ...catalog,
+    measures: ['__proto__', 'constructor'].map(id => ({ ...field(id, id), role: 'MEASURE', dataType: 'REAL' })),
+  };
+  const document = emptyPulseDocument();
+  document.metrics = Object.fromEntries([['__proto__', defaultPulseMetric(fields, '__proto__')!]]);
+  const app = Fastify();
+  app.post('/outside-workflow', async () => ({ ok: true }));
+  registerPulseRoutes(app, {
+    catalog: async () => fields,
+    propose: async () => ({ assistantMessage: 'Configured both fields', ops: [
+      { op: 'ADD_METRIC', fieldId: 'constructor', name: 'Constructor metric' },
+      { op: 'MODIFY_METRIC', fieldId: '__proto__', name: 'Prototype metric' },
+    ] }),
+  });
+  const context = { connectionId: 'prototype-route-test', serverUrl: session.serverUrl, siteId: session.siteId, datasourceLuid: fields.datasourceLuid };
+  setSession(session, { connectionId: context.connectionId, patSecret: 'test' });
+  try {
+    const created = await app.inject({ method: 'POST', url: '/api/pulse/drafts', payload: { context, datasourceName: 'Prototype fields', document } });
+    assert.equal(created.statusCode, 200, created.body);
+    const record = created.json<PulseDraftRecord>();
+    assert.equal(Object.hasOwn(record.document.metrics, '__proto__'), true);
+    record.document.metrics.__proto__!.description = 'Saved before the proposal';
+    const saved = await app.inject({ method: 'PUT', url: `/api/pulse/drafts/${record.id}`, payload: { expectedRevision: record.revision, document: record.document } });
+    assert.equal(saved.statusCode, 200, saved.body);
+    const current = saved.json<PulseDraftRecord>();
+    const proposed = await app.inject({ method: 'POST', url: `/api/pulse/drafts/${record.id}/proposals`, payload: { baseRevision: current.revision, document: current.document, message: 'Configure both fields' } });
+    assert.equal(proposed.statusCode, 200, proposed.body);
+    const candidate = proposed.json().candidateDocument;
+    assert.equal(Object.hasOwn(candidate.metrics, '__proto__'), true);
+    assert.equal(Object.hasOwn(candidate.metrics, 'constructor'), true);
+    assert.equal(candidate.metrics.__proto__.name, 'Prototype metric');
+    assert.equal(candidate.metrics.__proto__.description, 'Saved before the proposal');
+    assert.equal(candidate.metrics.constructor.name, 'Constructor metric');
+    const accepted = await app.inject({ method: 'PUT', url: `/api/pulse/drafts/${record.id}`, payload: { expectedRevision: current.revision, document: candidate } });
+    assert.equal(accepted.statusCode, 200, accepted.body);
+    assert.deepEqual(accepted.json().document.metrics, candidate.metrics);
+    const invalid = await app.inject({ method: 'PUT', url: `/api/pulse/drafts/${record.id}`, payload: { expectedRevision: accepted.json().revision, document: { ...candidate, metrics: [] } } });
+    assert.equal(invalid.statusCode, 400, invalid.body);
+    assert.equal(invalid.json().code, 'invalid_request');
+    const outside = await app.inject({ method: 'POST', url: '/outside-workflow', payload: { document: candidate } });
+    assert.equal(outside.statusCode, 400, outside.body);
+    assert.equal(outside.json().code, 'FST_ERR_CTP_INVALID_JSON_BODY');
+    const poisoned = structuredClone(candidate);
+    poisoned.metrics.constructor.prototype = { polluted: true };
+    const rejected = await app.inject({ method: 'PUT', url: `/api/pulse/drafts/${record.id}`, payload: { expectedRevision: accepted.json().revision, document: poisoned } });
+    assert.equal(rejected.statusCode, 400, rejected.body);
+    assert.equal(rejected.json().code, 'FST_ERR_CTP_INVALID_JSON_BODY');
+  } finally { clearSession(); await app.close(); }
 });

@@ -114,9 +114,19 @@ It is a destructive action against those definitions, including their Tableau de
 Group deletion is a separate receipt-owned operation for groups confirmed created by that publication.
 Author and Activity read the same updated receipt outcomes.
 
+Window close, tray Quit, and operating-system quit requests use the same desktop shutdown flow.
+The editor stops accepting changes, waits for current assistant and catalog updates, and saves every open draft before the native host stops the backend.
+The user can keep the app open while those changes finish.
+After saving finishes, the editor stays disabled until the native host exits.
+A failed save keeps the window and edits available.
+Closing without saving requires a separate confirmation that identifies the affected drafts.
+Browser development warns before navigating away with unsaved draft changes.
+
 ## Change Metric Manager behavior
 
 Inventory, variants, subscriptions, and deletion have separate named responsibilities.
+Dimension discovery, member counts, and value queries send validated POST bodies so large selections do not exceed desktop URL limits.
+Source metric and definition reads use bounded concurrency, and repeated definition reads share one request within the operation.
 Date and dimensional variants use the canonical variant endpoint.
 Deletion first asks the backend for a plan, then submits the exact selection and plan fingerprint.
 A bulk selection containing defaults opens an explicit review of the affected definitions and their metrics.
@@ -173,6 +183,8 @@ The installed OpenCode executable and managed configuration remain trusted depen
 Start with the user-visible receipt and its command ID.
 For request failures, retain the returned error code or reference and the app version.
 Server logs suppress authorization headers and omit request query strings from request serialization.
+Disconnect requests identify the connection and session generation they intend to close.
+A stale request cannot disconnect a newer activation, including a newer session for the same connection.
 Unhandled errors return a reference rather than raw internal exception details.
 
 Activity records publication history.

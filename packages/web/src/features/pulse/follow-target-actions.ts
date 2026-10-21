@@ -123,6 +123,8 @@ export function reconcileFollowTargetResults(
       metricId: operation.metricId,
       metricLabel:
         labels.metricLabels.get(operation.metricId) ?? operation.metricId,
+      targetId: operation.target.id,
+      targetKind: operation.target.kind,
       targetLabel:
         labels.targetLabels.get(
           targetLabelKey(operation.target.kind, operation.target.id),

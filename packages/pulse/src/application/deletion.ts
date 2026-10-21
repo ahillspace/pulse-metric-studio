@@ -4,6 +4,7 @@ import type {
   PreparePulseDeleteRequest,
   PulseDeletePlan,
 } from "@pulse-metric-studio/shared";
+import { compareCanonicalStrings } from "@pulse-metric-studio/shared";
 import { requirePulseOwner } from "./context.js";
 import { executeDeletes } from "./delete-execution.js";
 import { PulseApplicationError } from "./errors.js";
@@ -71,7 +72,12 @@ export class PulseDeletionService {
         definitionId,
         affectedMetricIds,
       });
-      relevant.push(definition);
+      relevant.push({
+        ...definition,
+        metrics: [...definition.metrics].sort((left, right) =>
+          compareCanonicalStrings(left.metricId, right.metricId),
+        ),
+      });
     }
     for (const metricId of metricIds) {
       const definition = inventory.definitions.find((entry) =>

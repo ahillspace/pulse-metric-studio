@@ -298,19 +298,22 @@ export function applyPulseProposal(
     }
     const field = currentCatalogField(catalog, op.fieldId);
     if (op.op === "REMOVE_METRIC") {
-      const metric = next.metrics[op.fieldId];
+      const metric = Object.hasOwn(next.metrics, op.fieldId) ? next.metrics[op.fieldId] : undefined;
       if (metric && metric.locks.length === 0) metric.active = false;
     } else if (op.op === "REMOVE_SLICER") {
-      if (next.slicers[op.fieldId]) next.slicers[op.fieldId]!.active = false;
+      if (Object.hasOwn(next.slicers, op.fieldId)) next.slicers[op.fieldId]!.active = false;
     } else if (op.op === "ADD_SLICER") {
       if (
         field &&
         catalog.dimensions.some((candidate) => candidate.id === field.id)
       )
-        next.slicers[field.id] = defaultSlicerSelection(field.id, field.label);
+        Object.defineProperty(next.slicers, field.id, {
+          value: defaultSlicerSelection(field.id, field.label),
+          enumerable: true, writable: true, configurable: true,
+        });
     } else if (field) {
       const base =
-        next.metrics[field.id] ??
+        (Object.hasOwn(next.metrics, field.id) ? next.metrics[field.id] : undefined) ??
         (op.op === "ADD_METRIC" ? defaultPulseMetric(catalog, field.id) : null);
       if (!base) continue;
       const applied = applyMetricOperation(
@@ -323,7 +326,10 @@ export function applyPulseProposal(
         !validateTimeDimensionId(catalog, applied.timeDimensionFieldId).eligible
       )
         continue;
-      next.metrics[field.id] = applied;
+      Object.defineProperty(next.metrics, field.id, {
+        value: applied,
+        enumerable: true, writable: true, configurable: true,
+      });
     }
   }
   return PulseWorkspaceDocumentV1Schema.parse(next);
@@ -342,8 +348,8 @@ export function mergePulseProposal(
     JSON.stringify(a) === JSON.stringify(b);
   for (const kind of ["metrics", "slicers"] as const) {
     for (const [id, suggested] of Object.entries(candidate[kind])) {
-      const before = base[kind][id];
-      const now = current[kind][id];
+      const before = Object.hasOwn(base[kind], id) ? base[kind][id] : undefined;
+      const now = Object.hasOwn(current[kind], id) ? current[kind][id] : undefined;
       if (equal(before, suggested)) continue;
       if (configurationCleared || (before && !now)) {
         skipped.push(`${kind}.${id}`);
@@ -351,7 +357,10 @@ export function mergePulseProposal(
       }
       if (!before) {
         if (!now)
-          Object.assign(document[kind], { [id]: structuredClone(suggested) });
+          Object.defineProperty(document[kind], id, {
+            value: structuredClone(suggested),
+            enumerable: true, writable: true, configurable: true,
+          });
         else if (!equal(now, suggested)) skipped.push(`${kind}.${id}`);
         continue;
       }

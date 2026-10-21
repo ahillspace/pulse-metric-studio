@@ -295,7 +295,17 @@ export function registerTableauRoutes(
     return { ok: true, credentialDisposition };
   });
 
-  app.post('/api/tableau/disconnect', async () => {
+  app.post('/api/tableau/disconnect', async (req) => {
+    const body = req.body as { connectionId?: unknown; sessionGeneration?: unknown } | null;
+    if (typeof body?.connectionId !== 'string' || !body.connectionId.trim()
+      || !Number.isSafeInteger(body.sessionGeneration) || Number(body.sessionGeneration) < 0) {
+      throw app.httpErrors.badRequest('connectionId and sessionGeneration are required to disconnect.');
+    }
+    const active = getSession();
+    const connectionId = active ? getSessionContext(active)?.connectionId : getStoredConnection()?.id;
+    if (body.connectionId !== connectionId || body.sessionGeneration !== getSessionGeneration()) {
+      throw app.httpErrors.conflict('The Tableau connection changed. The newer session was not disconnected.');
+    }
     clearSession();
     return { ok: true };
   });
@@ -602,8 +612,11 @@ function connectionLabel(serverUrl: string, siteContentUrl: string): string {
 }
 
 function publicSession(session: TableauSession) {
+  const context = getSessionContext(session);
+  if (!context) throw new Error('The Tableau session has no owning connection.');
   return {
-    connectionId: getSessionContext(session)?.connectionId,
+    connectionId: context.connectionId,
+    sessionGeneration: context.generation,
     serverUrl: session.serverUrl,
     siteContentUrl: session.siteContentUrl,
     siteId: session.siteId,

@@ -43,8 +43,15 @@ export const PulseSlicerDraftSchema = z.object({
   fieldLabel: z.string(),
 });
 export const PulseWorkspaceDocumentV1Schema = z.object({
-  metrics: z.record(PulseMetricDraftSchema),
-  slicers: z.record(PulseSlicerDraftSchema),
+  // Validate entries without z.record dropping a legitimate "__proto__" field ID.
+  metrics: z.preprocess(
+    (value) => value && Object.prototype.toString.call(value) === '[object Object]' ? new Map(Object.entries(value)) : null,
+    z.map(z.string(), PulseMetricDraftSchema).transform((entries) => Object.fromEntries(entries)),
+  ),
+  slicers: z.preprocess(
+    (value) => value && Object.prototype.toString.call(value) === '[object Object]' ? new Map(Object.entries(value)) : null,
+    z.map(z.string(), PulseSlicerDraftSchema).transform((entries) => Object.fromEntries(entries)),
+  ),
   digestAudience: z.string().max(PULSE_TEXT_LIMITS.audience),
   digestAudienceLocked: z.boolean(),
   groupFollow: z.boolean(),

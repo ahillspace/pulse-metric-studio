@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import type { StoredLlmProfile } from '../profiles.js';
 import {
   buildOpenCodeChildEnv,
@@ -10,6 +13,26 @@ import {
   parseOpenCodeVerboseModels,
   type OpencodeRuntime,
 } from './opencode-cli.js';
+
+test('OpenCode discovery retries an executable that was installed after a failed lookup', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pulse-opencode-install-'));
+  const executable = path.join(directory, process.platform === 'win32' ? 'opencode.exe' : 'opencode');
+  const originalAccess = fs.promises.access;
+  // Other installed copies must not make the missing-executable case pass.
+  fs.promises.access = async (candidate, mode) => {
+    if (String(candidate) !== executable) throw new Error('Not in this installation fixture');
+    return originalAccess(candidate, mode);
+  };
+  const profile: StoredLlmProfile = { id: 'opencode', label: 'OpenCode', protocol: 'opencode', baseUrl: '', model: 'provider/model', authMode: 'none', secret: '', headers: {}, region: '', awsProfile: '', command: executable, source: 'saved' };
+  try {
+    assert.equal((await new OpencodeCliProvider(profile).getHealth()).installed, false);
+    fs.writeFileSync(executable, '', { mode: 0o755 });
+    assert.equal((await new OpencodeCliProvider(profile).getHealth()).installed, true);
+  } finally {
+    fs.promises.access = originalAccess;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test('OpenCode sends prompts separately from shell-free process arguments and reports the resolved model', async () => {
   const profile: StoredLlmProfile = {

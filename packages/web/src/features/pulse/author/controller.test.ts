@@ -110,6 +110,132 @@ function fixture(
   return { store, records, transport };
 }
 
+test("closing saves every edited draft before autosave runs", async (t) => {
+  const { store, records } = fixture();
+  t.after(() => store.getState().dispose());
+  await store.getState().openDraft("a");
+  store.getState().setAudience("Audience A");
+  await store.getState().openDraft("b");
+  store.getState().setAudience("Audience B");
+  assert.equal(records.get("a")!.document.digestAudience, "");
+  assert.equal(records.get("b")!.document.digestAudience, "");
+
+  await store.getState().prepareClose();
+
+  assert.equal(records.get("a")!.document.digestAudience, "Audience A");
+  assert.equal(records.get("b")!.document.digestAudience, "Audience B");
+  assert.equal(store.getState().closeStatus, "ready");
+  store.getState().setAudience("Too late");
+  assert.equal(activeEditor(store.getState())!.document.digestAudience, "Audience B");
+});
+
+test("manual metric and slicer edits preserve field names that match object properties", async (t) => {
+  const { store, records } = fixture();
+  t.after(() => store.getState().dispose());
+  await store.getState().openDraft("a");
+  const metadata = catalog();
+  metadata.measures = ["constructor", "toString", "__proto__"].map((id) => ({ ...metadata.measures[0], id, name: id, label: id, caption: id }));
+  metadata.dimensions = [{ ...metadata.dimensions[0], id: "__proto__", name: "__proto__", label: "Prototype", caption: "Prototype" }];
+  store.setState((state) => ({ entries: { ...state.entries, a: { ...state.entries.a, catalog: metadata } } }));
+  store.getState().clearConfiguration();
+  for (const measure of metadata.measures) {
+    store.getState().toggleMetric(measure.id);
+    store.getState().updateMetric(measure.id, { name: `Metric ${measure.id}` });
+  }
+  store.getState().toggleSlicer("__proto__");
+  await store.getState().flush();
+
+  const saved = records.get("a")!.document;
+  for (const measure of metadata.measures) {
+    assert.equal(Object.hasOwn(saved.metrics, measure.id), true);
+    assert.equal(saved.metrics[measure.id].name, `Metric ${measure.id}`);
+    assert.equal(saved.metrics[measure.id].active, true);
+  }
+  assert.equal(Object.hasOwn(saved.slicers, "__proto__"), true);
+  assert.equal(saved.slicers.__proto__.active, true);
+  assert.equal(Object.getPrototypeOf(saved.metrics), Object.prototype);
+});
+
+test("closing waits for an assistant response and saves its conversation", async (t) => {
+  const pending = deferred<PulseAuthorProposal>();
+  const { store, records, transport } = fixture();
+  t.after(() => store.getState().dispose());
+  const proposal = await transport.propose("a", 1);
+  transport.propose = () => pending.promise;
+  await store.getState().openDraft("a");
+  const request = store.getState().requestProposal("Suggest an audience");
+  let closed = false;
+  const close = store.getState().prepareClose().then(() => { closed = true; });
+  await Promise.resolve();
+  assert.equal(closed, false);
+
+  pending.resolve(proposal);
+  await request;
+  await close;
+
+  assert.equal(records.get("a")!.document.chat.at(-1)?.content, "Suggested audience");
+  assert.equal(store.getState().entries.a.savedSequence, store.getState().entries.a.sequence);
+});
+
+test("a failed close save preserves edits and permits a later retry", async (t) => {
+  const { store, records, transport } = fixture();
+  t.after(() => store.getState().dispose());
+  await store.getState().openDraft("a");
+  store.getState().setAudience("Keep this audience");
+  const save = transport.saveDraft;
+  transport.saveDraft = async () => { throw new Error("Disk full"); };
+
+  await assert.rejects(store.getState().prepareClose(), /Disk full/);
+  assert.equal(store.getState().closeStatus, "open");
+  assert.equal(activeEditor(store.getState())!.document.digestAudience, "Keep this audience");
+  assert.equal(records.get("a")!.document.digestAudience, "");
+
+  transport.saveDraft = save;
+  await store.getState().prepareClose();
+  assert.equal(records.get("a")!.document.digestAudience, "Keep this audience");
+});
+
+test("cancelling close releases a pending assistant wait without approving a later close", async (t) => {
+  const pending = deferred<PulseAuthorProposal>();
+  const { store, transport } = fixture();
+  t.after(() => store.getState().dispose());
+  const proposal = await transport.propose("a", 1);
+  transport.propose = () => pending.promise;
+  await store.getState().openDraft("a");
+  const request = store.getState().requestProposal("Suggest an audience");
+  const cancelled = store.getState().prepareClose();
+  const rejected = assert.rejects(cancelled, /Closing cancelled/);
+  store.getState().cancelClose();
+  await rejected;
+  assert.equal(store.getState().closeStatus, "open");
+
+  const close = store.getState().prepareClose();
+  pending.resolve(proposal);
+  await request;
+  await close;
+  assert.equal(store.getState().closeStatus, "ready");
+});
+
+test("discarding after a failed close requires an explicit close mode", async (t) => {
+  let writes = 0;
+  const { store, records } = fixture({ saveDraft: async () => {
+    writes++;
+    throw new Error("Service unavailable");
+  } });
+  t.after(() => store.getState().dispose());
+  await store.getState().openDraft("a");
+  store.getState().setAudience("Unsaved audience");
+  await assert.rejects(store.getState().prepareClose(), /Service unavailable/);
+  assert.equal(store.getState().closeStatus, "open");
+
+  await store.getState().prepareClose("discard");
+
+  assert.equal(writes, 1);
+  assert.equal(store.getState().closeStatus, "ready");
+  assert.equal(records.get("a")!.document.digestAudience, "");
+  assert.equal(activeEditor(store.getState())!.document.digestAudience, "Unsaved audience");
+});
+
 test("assistant continues from current edits when local saving fails and preserves discarded conversation", async (t) => {
   let received: any;
   const { store } = fixture({

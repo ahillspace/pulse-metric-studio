@@ -25,7 +25,7 @@ import {
   selectionState,
   setMetricSelection,
   timeframeFamilyMetricIds,
-  timeframeScopeFamilyMetricIds,
+  timeframeScopeFamilies,
   timeframeScopeSignature,
   upsertDimensionClause,
   type PulseRegistryMetric,
@@ -83,14 +83,14 @@ const metrics: PulseRegistryMetric[] = [
 test('exact metric selection synchronizes parents, the registry, and inventory refreshes', () => {
   let selected = setMetricSelection([], ['m-2', 'm-1'], true);
   assert.deepEqual(selected, ['m-1', 'm-2']);
-  assert.deepEqual(selectionState(selected, ['m-1', 'm-2']), {
+  assert.deepEqual(selectionState(new Set(selected), ['m-1', 'm-2']), {
     checked: true,
     indeterminate: false,
     selected: 2,
     total: 2,
   });
   selected = setMetricSelection(selected, ['m-1'], false);
-  assert.equal(selectionState(selected, ['m-1', 'm-2']).indeterminate, true);
+  assert.equal(selectionState(new Set(selected), ['m-1', 'm-2']).indeterminate, true);
   assert.deepEqual(reconcileMetricSelection([...selected, 'removed'], ['m-2', 'm-3']), ['m-2']);
 });
 
@@ -113,9 +113,29 @@ test('timeframe-scope family excludes a dimension-forked sibling that shares the
     { metricId: 'def2', definitionId: 'd2', name: 'Profit', timeframeLabel: 'Last 30 days', measurementPeriod: { last_x_period: { period: 30 } } },
   ];
   // Clicking the unfiltered default selects unfiltered same-timeframe metrics across definitions - never the fork.
-  assert.deepEqual(timeframeScopeFamilyMetricIds(family, timeframeScopeSignature(family[0])), ['def', 'def2']);
+  const families = timeframeScopeFamilies(family);
+  assert.deepEqual(families.get(timeframeScopeSignature(family[0])), ['def', 'def2']);
   // Clicking the fork selects only identically-filtered forks (here, just itself).
-  assert.deepEqual(timeframeScopeFamilyMetricIds(family, timeframeScopeSignature(family[1])), ['fork']);
+  assert.deepEqual(families.get(timeframeScopeSignature(family[1])), ['fork']);
+});
+
+test('large inventories build timeframe families with bounded signature reads', () => {
+  let reads = 0;
+  const inventory = Array.from({ length: 2000 }, (_, index) => ({
+    metricId: `metric-${index}`, definitionId: `definition-${index}`, name: `Metric ${index}`,
+    timeframeLabel: 'Month to date',
+    get measurementPeriod() { reads++; return { range: 'CURRENT', granularity: 'MONTH' }; },
+    filters: [],
+  }));
+  const families = timeframeScopeFamilies(inventory);
+  assert.equal(families.size, 1);
+  assert.equal([...families.values()][0].length, 2000);
+  assert.ok(reads >= inventory.length);
+  assert.ok(reads <= inventory.length * 3, `Unexpected repeated inventory scans: ${reads} reads`);
+  const selected = new Set(['metric-1', 'metric-2']);
+  assert.deepEqual(selectionState(selected, [...families.values()][0]), {
+    checked: false, indeterminate: true, selected: 2, total: 2000,
+  });
 });
 
 test('dimension clause summary uses Tableau keeps/exclude language', () => {
@@ -134,23 +154,52 @@ test('preview source label prefers real names and never leads with a LUID', () =
 
 test('follow results summarize per target and treat already-followed as success', () => {
   const items: RegistryActionItem[] = [
-    { key: '1', metricId: 'm1', metricLabel: 'M1', targetLabel: 'Group Sales', status: 'created' },
-    { key: '2', metricId: 'm2', metricLabel: 'M2', targetLabel: 'Group Sales', status: 'existing' },
-    { key: '3', metricId: 'm3', metricLabel: 'M3', targetLabel: 'Group Sales', status: 'created' },
+    { key: '1', metricId: 'm1', metricLabel: 'M1', targetId: 'sales', targetKind: 'GROUP', targetLabel: 'Group Sales', status: 'created' },
+    { key: '2', metricId: 'm2', metricLabel: 'M2', targetId: 'sales', targetKind: 'GROUP', targetLabel: 'Group Sales', status: 'existing' },
+    { key: '3', metricId: 'm3', metricLabel: 'M3', targetId: 'sales', targetKind: 'GROUP', targetLabel: 'Group Sales', status: 'created' },
   ];
   const [summary] = summarizeRegistryTargets(items);
-  assert.deepEqual(summary, { targetLabel: 'Group Sales', total: 3, created: 2, existing: 1, removed: 0, notFollowed: 0, failed: 0 });
+  assert.deepEqual(summary, { targetId: 'sales', targetKind: 'GROUP', targetLabel: 'Group Sales', total: 3, created: 2, existing: 1, removed: 0, notFollowed: 0, failed: 0 });
   assert.equal(registryTargetHeadline('follow', summary), 'Group Sales now follows 3 of 3 metrics (1 already followed)');
   assert.equal(registryActionOutcome(items), 'success');
 });
 
 test('follow results surface failures as mixed without hiding successes', () => {
   const items: RegistryActionItem[] = [
-    { key: '1', metricId: 'm1', metricLabel: 'M1', targetLabel: 'Group Sales', status: 'created' },
-    { key: '2', metricId: 'm2', metricLabel: 'M2', targetLabel: 'Group Sales', status: 'failed' },
+    { key: '1', metricId: 'm1', metricLabel: 'M1', targetId: 'sales', targetKind: 'GROUP', targetLabel: 'Group Sales', status: 'created' },
+    { key: '2', metricId: 'm2', metricLabel: 'M2', targetId: 'sales', targetKind: 'GROUP', targetLabel: 'Group Sales', status: 'failed' },
   ];
   assert.equal(registryActionOutcome(items), 'mixed');
   assert.equal(registryTargetHeadline('follow', summarizeRegistryTargets(items)[0]), 'Group Sales now follows 1 of 2 metrics (1 failed)');
+});
+
+test('same-named users and groups keep separate subscription results and counts', () => {
+  const operations = buildFollowTargetOperations(
+    [{ id: 'm1' }, { id: 'm2' }],
+    [{ id: 'sales', kind: 'USER' }, { id: 'sales', kind: 'GROUP' }],
+  );
+  const results = operations.map((operation, index) => ({
+    metricId: operation.metricId, targetId: operation.target.id, targetKind: operation.target.kind,
+    ok: index !== 2, status: index === 2 ? 'failed' as const : 'followed' as const,
+  }));
+  const reconciled = reconcileFollowTargetResults('follow', operations, results, {
+    metricLabels: new Map(),
+    targetLabels: new Map([[targetLabelKey('USER', 'sales'), 'Sales'], [targetLabelKey('GROUP', 'sales'), 'Sales']]),
+  });
+  const summaries = summarizeRegistryTargets(reconciled.items);
+  assert.equal(summaries.length, 2);
+  assert.deepEqual(summaries.map(summary => registryTargetHeadline('follow', summary)), [
+    'User Sales now follows 1 of 2 metrics (1 failed)',
+    'Group Sales now follows 2 of 2 metrics',
+  ]);
+});
+
+test('same-named users retain distinct result identities', () => {
+  const summaries = summarizeRegistryTargets(['one', 'two'].map(targetId => ({
+    key: targetId, metricId: 'metric', metricLabel: 'Metric', targetId, targetKind: 'USER', targetLabel: 'Sales', status: 'created',
+  })));
+  assert.deepEqual(summaries.map(summary => summary.targetLabel), ['User Sales (one)', 'User Sales (two)']);
+  assert.ok(summaries.every(summary => summary.total === 1));
 });
 
 test('dimension clauses replace the same field and canonicalize values', () => {

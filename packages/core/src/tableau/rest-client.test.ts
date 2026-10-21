@@ -76,7 +76,7 @@ for (const action of ['switch', 'disconnect'] as const) {
     try {
       const request = tableauFetch(f.session, '/work');
       await until(() => f.pending.length === 1);
-      const response = await f.app.inject({ method: 'POST', url: action === 'switch' ? `/api/tableau/connections/${f.b.id}/activate` : '/api/tableau/disconnect' });
+      const response = await f.app.inject({ method: 'POST', url: action === 'switch' ? `/api/tableau/connections/${f.b.id}/activate` : '/api/tableau/disconnect', payload: { connectionId: sessions.getSessionContext(f.session)!.connectionId, sessionGeneration: sessions.getSessionGeneration() } });
       assert.equal(response.statusCode, 200);
       const current = sessions.getSession();
       const signins = f.signins;
@@ -131,7 +131,7 @@ test('disconnect while refresh is pending cannot install or retry the token', as
     const request = tableauFetch(f.session, '/work');
     await until(() => f.pending.length === 1); reject(f.pending[0]);
     await until(() => f.signinPending);
-    await f.app.inject({ method: 'POST', url: '/api/tableau/disconnect' });
+    await f.app.inject({ method: 'POST', url: '/api/tableau/disconnect', payload: { connectionId: sessions.getSessionContext(f.session)!.connectionId, sessionGeneration: sessions.getSessionGeneration() } });
     f.releaseSignin();
     await request.catch(() => null);
     assert.equal(sessions.getSession(), null);
@@ -147,7 +147,7 @@ test('disconnect while activation is pending prevents a late session install', a
     // Injection is lazy until its promise is observed.
     const result = activation.then((response) => response);
     await until(() => f.signinPending);
-    await f.app.inject({ method: 'POST', url: '/api/tableau/disconnect' });
+    await f.app.inject({ method: 'POST', url: '/api/tableau/disconnect', payload: { connectionId: sessions.getSessionContext(f.session)!.connectionId, sessionGeneration: sessions.getSessionGeneration() } });
     f.releaseSignin();
     assert.notEqual((await result).statusCode, 200);
     assert.equal(sessions.getSession(), null);
@@ -160,7 +160,7 @@ test('a stale request cannot start a new HTTP operation', async () => {
     const context = sessions.getSessionContext(f.session)!;
     assert.equal(Object.isFrozen(context), true);
     assert.equal(context.serverUrl, f.session.serverUrl);
-    await f.app.inject({ method: 'POST', url: '/api/tableau/disconnect' });
+    await f.app.inject({ method: 'POST', url: '/api/tableau/disconnect', payload: { connectionId: sessions.getSessionContext(f.session)!.connectionId, sessionGeneration: sessions.getSessionGeneration() } });
     await assert.rejects(tableauFetch(f.session, '/work'), /connection changed/);
     assert.equal(f.requests.length, 0);
   } finally { await f.close(); }
@@ -255,7 +255,7 @@ for (const action of ['disconnect', 'switch'] as const) {
       await new Promise((resolve) => setTimeout(resolve, 30));
       assert.equal(f.signins, 1);
       f.allowSignins();
-      const change = await f.app.inject({ method: 'POST', url: action === 'disconnect' ? '/api/tableau/disconnect' : `/api/tableau/connections/${f.b.id}/activate` });
+      const change = await f.app.inject({ method: 'POST', url: action === 'disconnect' ? '/api/tableau/disconnect' : `/api/tableau/connections/${f.b.id}/activate`, payload: { connectionId: sessions.getSessionContext(f.session)!.connectionId, sessionGeneration: sessions.getSessionGeneration() } });
       assert.equal(change.statusCode, 200);
       const current = sessions.getSession();
       f.releaseSignin();
@@ -282,4 +282,40 @@ test('failed shared cold restore can be retried', async () => {
     assert.equal((await f.app.inject({ method: 'GET', url: '/api/tableau/status' })).json().connected, true);
     assert.equal(f.signins, 2);
   } finally { f.releaseSignin(); await f.close(); }
+});
+
+test('delayed disconnect cannot clear another connection or a newer activation of the same connection', async () => {
+  const f = await fixture();
+  try {
+    const original = sessions.getSessionContext(f.session)!;
+    const disconnectA = { connectionId: original.connectionId, sessionGeneration: original.generation };
+    const activated = await f.app.inject({ method: 'POST', url: `/api/tableau/connections/${f.b.id}/activate` });
+    assert.equal(activated.statusCode, 200);
+    const firstB = activated.json().session;
+    assert.equal(typeof firstB.sessionGeneration, 'number');
+    const staleA = await f.app.inject({ method: 'POST', url: '/api/tableau/disconnect', payload: disconnectA });
+    assert.equal(staleA.statusCode, 409);
+    assert.equal(sessions.getSessionContext(sessions.getSession()!)?.connectionId, f.b.id);
+
+    const reactivated = await f.app.inject({ method: 'POST', url: `/api/tableau/connections/${f.b.id}/activate` });
+    assert.equal(reactivated.statusCode, 200);
+    const currentB = reactivated.json().session;
+    assert.notEqual(currentB.sessionGeneration, firstB.sessionGeneration);
+    const staleB = await f.app.inject({ method: 'POST', url: '/api/tableau/disconnect', payload: { connectionId: f.b.id, sessionGeneration: firstB.sessionGeneration } });
+    assert.equal(staleB.statusCode, 409);
+    assert.equal(sessions.getSessionContext(sessions.getSession()!)?.generation, currentB.sessionGeneration);
+    const disconnected = await f.app.inject({ method: 'POST', url: '/api/tableau/disconnect', payload: { connectionId: f.b.id, sessionGeneration: currentB.sessionGeneration } });
+    assert.equal(disconnected.statusCode, 200);
+    assert.equal(sessions.getSession(), null);
+  } finally { await f.close(); }
+});
+
+test('disconnect validates its expected owner before changing the session', async () => {
+  const f = await fixture();
+  try {
+    for (const payload of [undefined, {}, { connectionId: 'a', sessionGeneration: '1' }, { connectionId: '', sessionGeneration: 1 }]) {
+      assert.equal((await f.app.inject({ method: 'POST', url: '/api/tableau/disconnect', payload })).statusCode, 400);
+      assert.equal(sessions.getSession(), f.session);
+    }
+  } finally { await f.close(); }
 });
