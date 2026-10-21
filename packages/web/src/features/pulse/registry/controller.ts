@@ -37,6 +37,8 @@ interface RegistryState {
   deletePlan: PulseDeletePlan | null;
   deleteLoading: boolean;
   deleteError: string | null;
+  /** The last review stopped because Tableau did not return complete inventory. */
+  deleteOverridable: boolean;
   setContext: (
     context: PulseDraftContext | null,
     datasourceName?: string,
@@ -51,7 +53,10 @@ interface RegistryState {
   previewDelete: (
     metricIds: string[],
     definitionIds: string[],
+    allowIncompleteInventory?: boolean,
   ) => Promise<void>;
+  /** Reviews the last selection again as a deletion by ID. */
+  reviewDeleteAnyway: () => Promise<void>;
   cancelDelete: () => void;
   executeDelete: () => Promise<void>;
   dismissResults: () => void;
@@ -80,6 +85,15 @@ export function createRegistryController(
   let inventoryRequest = 0;
   let deleteRequest = 0;
   let deleteBatches: PulseDeletePlan[] = [];
+  let deleteSelection: { metricIds: string[]; definitionIds: string[] } | null =
+    null;
+  const INCOMPLETE_INVENTORY_CODES = [
+    "delete_inventory_incomplete",
+    "delete_metric_unavailable",
+  ];
+  const overridable = (error: unknown) =>
+    error instanceof PulseApiError &&
+    INCOMPLETE_INVENTORY_CODES.includes(error.code ?? "");
   return create<RegistryState>((set, get) => {
     const capture = () => ({ context: get().context, generation });
     const current = (scope: ReturnType<typeof capture>) =>
@@ -108,6 +122,7 @@ export function createRegistryController(
       deletePlan: null,
       deleteLoading: false,
       deleteError: null,
+      deleteOverridable: false,
       setContext(context, datasourceName = "") {
         if (key(context) === key(get().context)) {
           if (datasourceName !== get().datasourceName) set({ datasourceName });
@@ -117,6 +132,7 @@ export function createRegistryController(
         inventoryRequest += 1;
         deleteRequest += 1;
         deleteBatches = [];
+        deleteSelection = null;
         const saved = cache.get(key(context));
         set({
           context,
@@ -132,6 +148,7 @@ export function createRegistryController(
           deletePlan: null,
           deleteLoading: false,
           deleteError: null,
+          deleteOverridable: false,
         });
       },
       async ensureLoaded() {
@@ -264,12 +281,22 @@ export function createRegistryController(
           if (current(scope)) set({ busy: null });
         }
       },
-      async previewDelete(metricIds, definitionIds) {
+      async previewDelete(
+        metricIds,
+        definitionIds,
+        allowIncompleteInventory = false,
+      ) {
         const scope = capture();
         if (!scope.context || get().busy) return;
         const request = ++deleteRequest;
         deleteBatches = [];
-        set({ deleteLoading: true, deletePlan: null, deleteError: null });
+        deleteSelection = { metricIds, definitionIds };
+        set({
+          deleteLoading: true,
+          deletePlan: null,
+          deleteError: null,
+          deleteOverridable: false,
+        });
         try {
           const definitions = [...new Set(definitionIds)];
           const covered = new Set(
@@ -294,6 +321,7 @@ export function createRegistryController(
               context: scope.context,
               metricIds: metrics.slice(offset, offset + 1000),
               definitionIds: definitions.slice(offset, offset + 1000),
+              allowIncompleteInventory,
             });
             if (!current(scope) || request !== deleteRequest) return;
             plans.push(plan);
@@ -312,17 +340,31 @@ export function createRegistryController(
           });
         } catch (error) {
           if (current(scope) && request === deleteRequest)
-            set({ deleteError: errorMessage(error) });
+            set({
+              deleteError: errorMessage(error),
+              deleteOverridable: !allowIncompleteInventory && overridable(error),
+            });
         } finally {
           if (current(scope) && request === deleteRequest)
             set({ deleteLoading: false });
         }
       },
+      async reviewDeleteAnyway() {
+        if (!deleteSelection) return;
+        const { metricIds, definitionIds } = deleteSelection;
+        await get().previewDelete(metricIds, definitionIds, true);
+      },
       cancelDelete() {
         if (get().busy === "delete") return;
         deleteRequest += 1;
         deleteBatches = [];
-        set({ deletePlan: null, deleteError: null, deleteLoading: false });
+        deleteSelection = null;
+        set({
+          deletePlan: null,
+          deleteError: null,
+          deleteLoading: false,
+          deleteOverridable: false,
+        });
       },
       async executeDelete() {
         const scope = capture();
@@ -351,6 +393,7 @@ export function createRegistryController(
               metricIds: batch.metricIds,
               definitionIds: batch.definitionIds,
               previewFingerprint: batch.previewFingerprint,
+              allowIncompleteInventory: batch.allowIncompleteInventory,
             });
             outcomes.push(...response.outcomes);
             if (response.failures.length) {
@@ -370,7 +413,13 @@ export function createRegistryController(
             if (!outcomes.length) {
               deleteBatches = [];
               if (current(scope))
-                set({ deleteError: failure, deletePlan: null, busy: null });
+                set({
+                  deleteError: failure,
+                  deleteOverridable:
+                    !plan.allowIncompleteInventory && overridable(error),
+                  deletePlan: null,
+                  busy: null,
+                });
               return;
             }
           }

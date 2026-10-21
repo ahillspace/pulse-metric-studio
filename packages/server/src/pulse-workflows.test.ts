@@ -750,6 +750,89 @@ test("backend deletion rejects incomplete cascades and changed plans without del
   }
 });
 
+test("backend deletion deletes by ID when the user overrides incomplete inventory", async () => {
+  let status: "partial" | "unavailable" = "partial";
+  let listed = true;
+  const deletions: unknown[] = [];
+  const variant = (metricId: string): any => ({
+    metricId,
+    name: metricId,
+    measurementPeriod: {},
+    timeframeLabel: "Custom",
+    filters: [],
+    comparison: {},
+    isDefault: false,
+    isScoped: true,
+    scopedState: "variant",
+    specification: {},
+  });
+  const server = app({
+    deletion: {
+      inventory: async () => ({
+        totalScanned: 1,
+        truncated: false,
+        failures: [],
+        definitions: [
+          {
+            definitionId: "definition",
+            name: "Sales",
+            description: "",
+            measure: "Sales",
+            aggregation: "SUM",
+            timeDimension: "Date",
+            inventoryStatus: status,
+            metrics: status === "partial" ? [variant("known")] : [],
+          },
+          {
+            definitionId: "other",
+            name: "Cost",
+            description: "",
+            measure: "Cost",
+            aggregation: "SUM",
+            timeDimension: "Date",
+            inventoryStatus: listed ? "complete" : "unavailable",
+            metrics: listed ? [variant("orphan")] : [],
+          },
+        ],
+      }),
+      execute: async (_session, entries) => {
+        deletions.push(...entries);
+        return { definitionsDeleted: 1, metricsDeleted: 1, failures: [], outcomes: [] };
+      },
+    },
+  });
+  try {
+    const selection = { context, definitionIds: ["definition"], metricIds: ["orphan"] };
+    const blocked = await server.inject({ method: "POST", url: "/api/pulse/registry/delete-preview", payload: selection });
+    assert.equal(blocked.statusCode, 409);
+    assert.equal(blocked.json().code, "delete_inventory_incomplete");
+    const override = { ...selection, allowIncompleteInventory: true };
+    const preview = await server.inject({ method: "POST", url: "/api/pulse/registry/delete-preview", payload: override });
+    assert.equal(preview.statusCode, 200, preview.body);
+    const plan = preview.json();
+    assert.equal(plan.allowIncompleteInventory, true);
+    assert.deepEqual(
+      plan.targets.map((target: any) => [target.kind, target.id, target.inventoryComplete, target.affectedMetricIds]),
+      [["definition", "definition", false, ["known"]], ["metric", "orphan", true, ["orphan"]]],
+    );
+    assert.ok(plan.warnings.some((warning: string) => /could not list every metric/.test(warning)));
+    const unconfirmed = await server.inject({ method: "POST", url: "/api/pulse/registry/delete", payload: { ...selection, previewFingerprint: plan.previewFingerprint } });
+    assert.equal(unconfirmed.statusCode, 409);
+    assert.equal(deletions.length, 0);
+    // Throttled reloads may change what Tableau returns between review and deletion.
+    status = "unavailable";
+    listed = false;
+    const deleted = await server.inject({ method: "POST", url: "/api/pulse/registry/delete", payload: { ...override, previewFingerprint: plan.previewFingerprint } });
+    assert.equal(deleted.statusCode, 200, deleted.body);
+    assert.deepEqual(deletions, [
+      { definitionId: "definition", metricIds: [], name: "Sales" },
+      { metricIds: ["orphan"], name: "orphan" },
+    ]);
+  } finally {
+    await server.close();
+  }
+});
+
 test("local history pages omit large documents, preserve detail, and search literal characters", async () => {
   const server = app();
   try {

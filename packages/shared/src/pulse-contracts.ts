@@ -234,6 +234,8 @@ export const PreparePulseDeleteRequestSchema = z.object({
   context: PulseDraftContextSchema,
   metricIds: z.array(id).max(1000),
   definitionIds: z.array(id).max(1000),
+  /** Deletes selected resources by ID when Tableau cannot return their complete current inventory. */
+  allowIncompleteInventory: z.boolean().default(false),
 });
 export const ExecutePulseDeleteRequestSchema =
   PreparePulseDeleteRequestSchema.extend({ previewFingerprint: id });
@@ -241,13 +243,17 @@ export const PulseDeletePlanSchema = z.object({
   context: PulseDraftContextSchema,
   metricIds: z.array(id),
   definitionIds: z.array(id),
+  allowIncompleteInventory: z.boolean(),
   previewFingerprint: id,
   targets: z.array(
     z.object({
       kind: z.enum(['definition', 'metric']),
       id,
       name: z.string(),
-      definitionId: id,
+      /** Null when the metric is absent from current inventory and is deleted by ID. */
+      definitionId: id.nullable(),
+      /** False when Tableau did not return every metric this target removes. */
+      inventoryComplete: z.boolean(),
       affectedMetricIds: z.array(id),
       affectedMetrics: z.array(z.object({ id, name: z.string(), followerCount: z.number().int().nonnegative().nullable() })).optional(),
     }),
