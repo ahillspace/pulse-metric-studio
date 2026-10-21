@@ -4,7 +4,7 @@
  * Improvements over Juju (see ledger D6/D7/A13):
  * - every request carries a timeout
  * - auth rejection classified centrally; unknown 403s are NOT treated as auth expiry
- * - pagination helper for page_token style APIs
+ * - bounded per-identity concurrency, with 429s honored through Retry-After
  */
 
 import { getSessionContext, getStoredConnection, isSessionCurrent, type TableauSessionContext } from './session.js';
@@ -188,12 +188,83 @@ function nextVersionCandidate(current: string): string | null {
   return remaining.length > 0 ? remaining[0] : null;
 }
 
+/** Most requests one Tableau identity keeps in flight at once. */
+export const MAX_CONCURRENT_TABLEAU_REQUESTS = 8;
+const MAX_THROTTLE_RETRIES = 4;
+const DEFAULT_RETRY_AFTER_MS = 2_000;
+const MAX_RETRY_AFTER_MS = 30_000;
+
+/** Converts a Retry-After header (seconds or HTTP date) into a bounded delay. */
+export function retryAfterMs(header: string | null, now = Date.now()): number {
+  const value = header?.trim() ?? '';
+  let delay = DEFAULT_RETRY_AFTER_MS;
+  if (/^\d+$/.test(value)) delay = Number(value) * 1000;
+  else if (value && !Number.isNaN(Date.parse(value))) delay = Math.max(0, Date.parse(value) - now);
+  return Math.min(delay, MAX_RETRY_AFTER_MS);
+}
+
+/**
+ * Tableau throttles per user and site. Every request for one identity passes
+ * through one gate that bounds concurrency and, after a 429, holds all of that
+ * identity's requests until Tableau permits more instead of letting each
+ * caller fail or retry independently.
+ */
+class RequestGate {
+  private active = 0;
+  private readonly waiting: Array<() => void> = [];
+  private resumeAt = 0;
+
+  async run<T>(task: () => Promise<T>): Promise<T> {
+    while (this.active >= MAX_CONCURRENT_TABLEAU_REQUESTS) await new Promise<void>((resolve) => this.waiting.push(resolve));
+    this.active++;
+    try {
+      for (let wait = this.resumeAt - Date.now(); wait > 0; wait = this.resumeAt - Date.now()) {
+        await new Promise((resolve) => setTimeout(resolve, wait));
+      }
+      return await task();
+    } finally {
+      this.active--;
+      this.waiting.shift()?.();
+    }
+  }
+
+  pause(delayMs: number): void {
+    this.resumeAt = Math.max(this.resumeAt, Date.now() + delayMs);
+  }
+}
+
+const gates = new Map<string, RequestGate>();
+
+function requestGate(session: TableauSession): RequestGate {
+  const key = `${session.serverUrl}\u0000${session.siteId}\u0000${session.userId}`;
+  let gate = gates.get(key);
+  if (!gate) gates.set(key, (gate = new RequestGate()));
+  return gate;
+}
+
+/** Sends through the identity's gate; a 429 means Tableau did not process the request, so it is resent. */
 async function rawFetch(
   session: TableauSession,
   path: string,
   init: RequestInit & { timeoutMs?: number } = {},
   token = session.token,
   context = getSessionContext(session),
+): Promise<Response> {
+  const gate = requestGate(session);
+  for (let attempt = 0; ; attempt++) {
+    const resp = await gate.run(() => sendOnce(session, path, init, token, context));
+    if (resp.status !== 429 || attempt === MAX_THROTTLE_RETRIES) return resp;
+    void resp.body?.cancel().catch(() => {});
+    gate.pause(retryAfterMs(resp.headers.get('retry-after')));
+  }
+}
+
+async function sendOnce(
+  session: TableauSession,
+  path: string,
+  init: RequestInit & { timeoutMs?: number },
+  token: string,
+  context: TableauSessionContext | null,
 ): Promise<Response> {
   if (context && (getSessionContext(session) !== context || !isSessionCurrent(session))) {
     throw new TableauError('The Tableau connection changed. Retry from the current connection.', 401, '', 'auth');
