@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import type { LlmHealthReasonCode } from '@pulse-metric-studio/shared';
+import type { LlmHealthReasonCode, LlmModelOption } from '@pulse-metric-studio/shared';
 
 export interface LlmMessage {
   role: 'system' | 'user' | 'assistant';
@@ -20,6 +20,8 @@ export interface CompleteOptions {
   maxTokens?: number;
   /** Defaults to LLM_REQUEST_TIMEOUT_MS. */
   timeoutMs?: number;
+  /** Cancels the active request and its owned child processes. */
+  signal?: AbortSignal;
 }
 
 export interface CompleteResult {
@@ -56,7 +58,11 @@ export interface LlmProvider {
   id: string;
   label: string;
   isConfigured(): Promise<boolean>;
-  getHealth?(): Promise<LlmProviderHealth>;
+  getHealth?(signal?: AbortSignal): Promise<LlmProviderHealth>;
+  /** Passive installation/account checks before a model has been selected. */
+  getSetupHealth?(signal?: AbortSignal): Promise<LlmProviderHealth>;
+  /** Omit when the provider requires a manually entered model ID. */
+  listModels?(signal?: AbortSignal): Promise<LlmModelOption[]>;
   complete(opts: CompleteOptions): Promise<CompleteResult>;
   /** Present when the provider was obtained through ProviderRegistry.pick(). */
   tracking?: LlmCompletionTracker;

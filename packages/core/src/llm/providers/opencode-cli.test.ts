@@ -230,3 +230,50 @@ test('OpenCode preserves Windows environment casing for executable lookup and re
   assert.deepEqual(JSON.parse(child.OPENCODE_CONFIG_CONTENT!).permission, { '*': 'deny' });
   assert.equal(buildOpenCodeChildEnv({ path: '/untrusted', PATH: '/usr/bin' }, 'darwin').path, undefined);
 });
+
+test('OpenCode passive setup checks installation without pretending to verify account or model access', async () => {
+  const profile: StoredLlmProfile = { id: 'opencode', label: 'OpenCode', protocol: 'opencode', baseUrl: '', model: '', authMode: 'none', secret: '', headers: {}, region: '', awsProfile: '', command: 'opencode', source: 'saved' };
+  const provider = new OpencodeCliProvider(profile, {
+    resolve: async () => ({ file: 'opencode' }),
+    run: async () => { throw new Error('Passive setup cannot call the provider.'); },
+  });
+  const health = await provider.getSetupHealth();
+  assert.equal(health.installed, true);
+  assert.equal(health.configured, true);
+  assert.equal(health.healthy, null);
+  assert.match(health.reason ?? '', /Account access is checked by an explicit connection test/);
+});
+
+test('OpenCode completion forwards cancellation and does not return partial output after abort', async () => {
+  const profile: StoredLlmProfile = { id: 'opencode', label: 'OpenCode', protocol: 'opencode', baseUrl: '', model: 'provider/model', authMode: 'none', secret: '', headers: {}, region: '', awsProfile: '', command: 'opencode', source: 'saved' };
+  const controller = new AbortController();
+  let started!: () => void;
+  const running = new Promise<void>((resolve) => { started = resolve; });
+  const provider = new OpencodeCliProvider(profile, {
+    resolve: async () => ({ file: 'opencode' }),
+    run: async (_bin, _args, _prompt, _provider, _model, _timeout, signal) => {
+      assert.equal(signal, controller.signal);
+      return new Promise<string>((_resolve, reject) => {
+        signal!.addEventListener('abort', () => reject(new DOMException('Cancelled', 'AbortError')), { once: true });
+        started();
+      });
+    },
+  });
+  const pending = provider.complete({ messages: [], signal: controller.signal });
+  const rejected = assert.rejects(pending, (error: any) => error.name === 'AbortError');
+  await running;
+  controller.abort();
+  await rejected;
+});
+
+test('OpenCode model discovery forwards the owned operation signal', async () => {
+  const profile: StoredLlmProfile = { id: 'opencode', label: 'OpenCode', protocol: 'opencode', baseUrl: '', model: '', authMode: 'none', secret: '', headers: {}, region: '', awsProfile: '', command: 'opencode', source: 'saved' };
+  const controller = new AbortController();
+  const provider = new OpencodeCliProvider(profile, {
+    resolve: async () => ({ file: 'opencode' }), run: async () => '',
+    listModels: async (_bin, _args, signal) => { assert.equal(signal, controller.signal); return ''; },
+  });
+  assert.deepEqual(await provider.listModels(controller.signal), []);
+  controller.abort();
+  await assert.rejects(provider.listModels(controller.signal), (error: any) => error.name === 'AbortError');
+});

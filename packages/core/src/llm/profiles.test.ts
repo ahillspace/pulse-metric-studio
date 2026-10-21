@@ -62,7 +62,7 @@ test('settings protocol and authentication changes honor explicit secret and hea
   const db = new Database(':memory:');
   db.exec('CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
   const store = new EncryptedLlmProfileStore(() => db);
-  const registry = new ProviderRegistry({ store, stateStore: new DbLlmRegistryStateStore(() => db), environment: {}, opencodeModelLister: async () => [{ id: 'test/model', label: 'Test model' }] });
+  const registry = new ProviderRegistry({ store, stateStore: new DbLlmRegistryStateStore(() => db), environment: {}, providerFactory: profile => ({ id: profile.id, label: profile.label, isConfigured: async () => true, complete: async () => ({ text: 'OK' }), ...(profile.protocol === 'opencode' ? { listModels: async () => [{ id: 'test/model', label: 'Test model' }] } : {}) }) });
   const app = Fastify();
   await app.register(sensible);
   registerLlmRoutes(app, { service: registry });
@@ -125,6 +125,49 @@ test('runtime profiles encrypt secrets at rest and return masked metadata', () =
   } finally {
     db.close();
   }
+});
+
+test('real settings conversion clears cloud configuration while preserving unrelated profiles and same-protocol credentials', async () => {
+  const db = new Database(':memory:');
+  db.exec('CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+  const store = new EncryptedLlmProfileStore(() => db);
+  const registry = new ProviderRegistry({ store, stateStore: new DbLlmRegistryStateStore(() => db), environment: {} });
+  const app = Fastify();
+  await app.register(sensible);
+  registerLlmRoutes(app, { service: registry });
+  try {
+    const api = { id: 'gateway', label: 'API', protocol: 'openai-chat' as const, baseUrl: 'https://api.example.test/v1', model: 'model', authMode: 'bearer' as const, secret: 'private-api-secret', headers: { 'x-route': 'private-route' }, credentialCommand: 'mint --secret private-command' };
+    store.save(api);
+    store.save({ ...api, id: 'untouched' });
+    let response = await app.inject({ method: 'PUT', url: '/api/llm/profiles/gateway', payload: { ...api, label: 'Renamed', secret: undefined, headers: undefined, credentialCommand: undefined } });
+    assert.equal(response.statusCode, 200, response.body);
+    assert.equal(store.get('gateway')?.secret, api.secret);
+    assert.deepEqual(store.get('gateway')?.headers, api.headers);
+    assert.equal(store.get('gateway')?.credentialCommand, api.credentialCommand);
+    response = await app.inject({ method: 'PUT', url: '/api/llm/profiles/gateway', payload: { ...api, protocol: 'openai-responses', secret: undefined, headers: undefined, credentialCommand: undefined } });
+    assert.equal(response.statusCode, 200, response.body);
+    assert.equal(store.get('gateway')?.secret, api.secret);
+    assert.deepEqual(store.get('gateway')?.headers, api.headers);
+    assert.equal(store.get('gateway')?.credentialCommand, api.credentialCommand);
+    for (const [protocol, command] of [['codex-cli', 'codex'], ['claude-code', 'claude']]) {
+      response = await app.inject({ method: 'PUT', url: '/api/llm/profiles/gateway', payload: { label: 'Local', protocol, command, model: 'explicit-model', authMode: 'local-account' } });
+      assert.equal(response.statusCode, 200, response.body);
+      const local = store.get('gateway')!;
+      assert.equal(local.secret, '');
+      assert.deepEqual(local.headers, {});
+      assert.equal(local.credentialCommand, '');
+      assert.equal(local.baseUrl, '');
+      assert.equal(local.region, '');
+      assert.equal(local.awsProfile, '');
+      assert.equal(local.allowPrivateNetwork, false);
+      assert.equal(local.authMode, 'local-account');
+    }
+    response = await app.inject({ method: 'PUT', url: '/api/llm/profiles/gateway', payload: { label: 'API again', protocol: 'openai-chat', baseUrl: api.baseUrl, model: 'model', authMode: 'bearer' } });
+    assert.equal(response.statusCode, 200, response.body);
+    assert.equal(store.get('gateway')?.command, '');
+    assert.equal(store.get('gateway')?.secret, '');
+    assert.equal(store.get('untouched')?.secret, api.secret);
+  } finally { await app.close(); db.close(); }
 });
 
 test('short secrets are never disclosed by their metadata hint', () => {

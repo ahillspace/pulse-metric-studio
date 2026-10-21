@@ -12,3 +12,9 @@
 .llm-profile-editor > .section-hint { margin-bottom: 16px; }
 @media (max-width: 640px) { .llm-choice-grid { grid-template-columns: 1fr; } }
 .llm-profile-list, .llm-profile-editor { border: 0; margin: 0; padding: 0; min-width: 0; }
+.llm-account-setup { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+.llm-account-setup .btn { justify-self: start; }
+.llm-account-setup p { margin: 0; }
+.llm-account-setup code { overflow-wrap: anywhere; }
+.llm-setup-result { display: grid; gap: 6px; font-size: 12px; color: var(--text-muted); }
+.llm-test-usage { margin: 16px 0 10px; }

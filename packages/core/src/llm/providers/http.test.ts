@@ -149,3 +149,28 @@ test('HTTP providers surface the provider explanation and report truncation', as
   ), allowEndpoint);
   assert.equal((await truncating.complete({ messages: [{ role: 'user', content: 'hello' }] })).truncated, true);
 });
+
+test('HTTP requests stop on caller cancellation without reporting a timeout', async () => {
+  const controller = new AbortController();
+  let started!: () => void;
+  const ready = new Promise<void>(resolve => { started = resolve; });
+  const provider = new HttpLlmProvider(profile('openai-chat'), async (_input, init) => new Promise((_resolve, reject) => {
+    started();
+    init?.signal?.addEventListener('abort', () => reject(init.signal!.reason), { once: true });
+  }), allowEndpoint);
+  const pending = provider.complete({ messages: [], signal: controller.signal });
+  const rejected = assert.rejects(pending, (error: unknown) => error instanceof Error && error.name === 'AbortError');
+  await ready;
+  controller.abort();
+  await rejected;
+});
+
+test('HTTP cancellation before sending does not submit a request', async () => {
+  let sent = false;
+  const provider = new HttpLlmProvider(profile('openai-chat'), async () => {
+    sent = true;
+    return Response.json({ choices: [{ message: { content: 'done' } }] });
+  }, allowEndpoint);
+  await assert.rejects(() => provider.complete({ messages: [], signal: AbortSignal.abort() }), { name: 'AbortError' });
+  assert.equal(sent, false);
+});

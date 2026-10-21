@@ -1,5 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
-import { killProcessTree, OWN_PROCESS_GROUP } from './process-tree.js';
+import { collectProcessOutput, OWN_PROCESS_GROUP, ProcessOutputError } from './process-tree.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
@@ -13,8 +13,8 @@ import { LLM_REQUEST_TIMEOUT_MS, LlmProviderError, timeoutDescription } from '..
 export interface OpencodeExecutable { file: string }
 export interface OpencodeRuntime {
   resolve(command: string): Promise<OpencodeExecutable | null>;
-  run(bin: OpencodeExecutable, args: string[], prompt: string, provider: string, model: string, timeoutMs?: number): Promise<string>;
-  listModels?(bin: OpencodeExecutable, args: string[]): Promise<string>;
+  run(bin: OpencodeExecutable, args: string[], prompt: string, provider: string, model: string, timeoutMs?: number, signal?: AbortSignal): Promise<string>;
+  listModels?(bin: OpencodeExecutable, args: string[], signal?: AbortSignal): Promise<string>;
 }
 const MAX_OPENCODE_MODEL_OUTPUT_BYTES = 1_000_000;
 const OPENCODE_MODEL_LIST_TIMEOUT_MS = 15_000;
@@ -56,12 +56,27 @@ export class OpencodeCliProvider {
     return (await this.getHealth()).configured;
   }
 
-  async getHealth(): Promise<LlmProviderHealth> {
+  async getSetupHealth(signal?: AbortSignal): Promise<LlmProviderHealth> {
+    signal?.throwIfAborted();
+    const command = this.profile.command || 'opencode';
+    const bin = isAllowedOpenCodeCommand(command) ? await this.runtime.resolve(command) : null;
+    signal?.throwIfAborted();
+    return {
+      installed: Boolean(bin), configured: Boolean(bin), healthy: bin ? null : false,
+      reasonCode: bin ? 'not_tested' : 'not_installed',
+      reason: bin ? 'OpenCode CLI is installed. Account access is checked by an explicit connection test.' : 'OpenCode CLI is not installed or is not directly executable.',
+      resolvedModel: this.profile.model.trim() || null,
+    };
+  }
+
+  async getHealth(signal?: AbortSignal): Promise<LlmProviderHealth> {
+    signal?.throwIfAborted();
     const command = this.profile.command || 'opencode';
     if (!isAllowedOpenCodeCommand(command)) {
       return { installed: false, configured: false, healthy: false, reasonCode: 'not_installed', reason: 'The configured OpenCode command is not an opencode executable.', resolvedModel: null };
     }
     const bin = await this.runtime.resolve(command);
+    signal?.throwIfAborted();
     if (!bin) {
       return { installed: false, configured: false, healthy: false, reasonCode: 'not_installed', reason: 'OpenCode CLI is not installed or is not directly executable.', resolvedModel: null };
     }
@@ -87,6 +102,7 @@ export class OpencodeCliProvider {
   }
 
   async complete(opts: CompleteOptions): Promise<CompleteResult> {
+    opts.signal?.throwIfAborted();
     const command = this.profile.command || 'opencode';
     if (!isAllowedOpenCodeCommand(command)) throw new LlmProviderError({ code: 'provider_execution', message: 'The configured OpenCode command is not allowed.', provider: this.id });
     const bin = await this.runtime.resolve(command);
@@ -101,7 +117,7 @@ export class OpencodeCliProvider {
     }
     const prompt = renderPrompt(opts);
     const args = ['--pure', 'run', '--model', model];
-    const stdout = await this.runtime.run(bin, args, prompt, this.id, model, opts.timeoutMs ?? LLM_REQUEST_TIMEOUT_MS);
+    const stdout = await this.runtime.run(bin, args, prompt, this.id, model, opts.timeoutMs ?? LLM_REQUEST_TIMEOUT_MS, opts.signal);
     return {
       text: stripAnsi(stdout),
       provider: this.id,
@@ -109,7 +125,8 @@ export class OpencodeCliProvider {
     };
   }
 
-  async listModels(): Promise<LlmModelOption[]> {
+  async listModels(signal?: AbortSignal): Promise<LlmModelOption[]> {
+    signal?.throwIfAborted();
     const command = this.profile.command || 'opencode';
     if (!isAllowedOpenCodeCommand(command)) {
       throw new LlmProviderError({ code: 'provider_execution', message: 'The configured OpenCode command is not allowed.', provider: this.id });
@@ -119,7 +136,9 @@ export class OpencodeCliProvider {
       throw new LlmProviderError({ code: 'provider_not_installed', message: 'OpenCode CLI is not installed.', provider: this.id });
     }
     const args = ['--pure', 'models', '--verbose'];
-    const output = await (this.runtime.listModels ?? runOpenCodeModelList)(bin, args);
+    const output = this.runtime.listModels
+      ? await this.runtime.listModels(bin, args, signal)
+      : await runOpenCodeModelList(bin, args, undefined, signal);
     return parseOpenCodeVerboseModels(output);
   }
 }
@@ -170,139 +189,62 @@ function where(command: string): Promise<string[]> {
   });
 }
 
-async function runOpenCode(bin: ResolveResult, args: string[], prompt: string, provider: string, model: string, timeoutMs = LLM_REQUEST_TIMEOUT_MS): Promise<string> {
+async function runOpenCode(bin: ResolveResult, args: string[], prompt: string, provider: string, model: string, timeoutMs = LLM_REQUEST_TIMEOUT_MS, signal?: AbortSignal): Promise<string> {
+  signal?.throwIfAborted();
+  const deadline = Date.now() + timeoutMs;
   const isolatedCwd = path.join(config.dataDir, 'llm-workspace');
   fs.mkdirSync(isolatedCwd, { recursive: true });
   const childEnv = buildOpenCodeChildEnv(process.env);
   // Config inspection does not start MCP servers or submit a model request.
-  const inherited = await readOpenCodeConfig(bin, childEnv);
+  const inherited = await readOpenCodeConfig(bin, childEnv, signal, Math.min(OPENCODE_MODEL_LIST_TIMEOUT_MS, deadline - Date.now()));
   const agent = `pulse-metric-studio-${randomUUID()}`;
   const requestEnv = buildOpenCodeRequestEnv(childEnv, inherited, agent);
-  const effective = await readOpenCodeConfig(bin, requestEnv);
+  const effective = await readOpenCodeConfig(bin, requestEnv, signal, Math.min(OPENCODE_MODEL_LIST_TIMEOUT_MS, deadline - Date.now()));
   assertOpenCodeRequestConfig(effective, agent);
-  return new Promise((resolve, reject) => {
+  signal?.throwIfAborted();
+  if (deadline <= Date.now()) throw new LlmProviderError({ code: 'provider_timeout', message: `OpenCode did not respond within ${timeoutDescription(timeoutMs)}.`, provider, model, retryable: true });
+  try {
     const child = spawn(bin.file, [...args, '--agent', agent], {
-      cwd: isolatedCwd,
-      shell: false,
-      windowsHide: true,
-      detached: OWN_PROCESS_GROUP,
-      env: requestEnv,
-      stdio: ['pipe', 'pipe', 'pipe'],
+      cwd: isolatedCwd, shell: false, windowsHide: true, detached: OWN_PROCESS_GROUP,
+      env: requestEnv, stdio: 'pipe',
     });
-    let stdout = '';
-    let stderr = '';
-    let settled = false;
-    const finish = (error?: LlmProviderError) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (error) reject(error);
-      else resolve(stdout);
-    };
-    const stopTree = () => killProcessTree(child);
-    const timer = setTimeout(() => {
-      stopTree();
-      finish(new LlmProviderError({ code: 'provider_timeout', message: `OpenCode did not respond within ${timeoutDescription(timeoutMs)}.`, provider, model, retryable: true }));
-    }, timeoutMs);
-    child.stdout.on('data', (data) => {
-      stdout += String(data);
-      if (Buffer.byteLength(stdout) > 2_000_000) {
-        stopTree();
-        finish(new LlmProviderError({ code: 'provider_execution', message: 'OpenCode output exceeded the 2 MB limit.', provider, model }));
-      }
+    const result = await collectProcessOutput(child, { input: prompt, timeoutMs: deadline - Date.now(), signal });
+    if (result.code !== 0 || !result.stdout.trim()) {
+      const failure = classifyOpenCodeFailure(result.stderr);
+      throw new LlmProviderError({ code: failure.code, message: failure.reason ?? `OpenCode exited with code ${result.code ?? 'unknown'}.`, provider, model, retryable: failure.retryable, reference: failure.reference });
+    }
+    return result.stdout;
+  } catch (error) {
+    if (error instanceof LlmProviderError || (error instanceof Error && error.name === 'AbortError')) throw error;
+    throw new LlmProviderError({
+      code: error instanceof ProcessOutputError && error.kind === 'timeout' ? 'provider_timeout' : 'provider_execution',
+      message: error instanceof ProcessOutputError && error.kind === 'timeout' ? `OpenCode did not respond within ${timeoutDescription(timeoutMs)}.` : 'OpenCode could not complete the request or exceeded its output limit.',
+      provider, model, retryable: error instanceof ProcessOutputError && error.kind === 'timeout', cause: error,
     });
-    child.stderr.on('data', (data) => {
-      if (Buffer.byteLength(stderr) < 128_000) stderr += String(data).slice(0, 128_000 - Buffer.byteLength(stderr));
-    });
-    child.on('error', (error) => finish(new LlmProviderError({ code: 'provider_execution', message: 'OpenCode could not start.', provider, model, cause: error })));
-    child.on('exit', (code) => {
-      if (code === 0 && stdout.trim()) finish();
-      else {
-        const failure = classifyOpenCodeFailure(stderr);
-        finish(new LlmProviderError({
-          code: failure.code,
-          message: failure.reason ?? `OpenCode exited with code ${code ?? 'unknown'}${stderr ? ' and reported process diagnostics' : ''}.`,
-          provider,
-          model,
-          retryable: failure.retryable,
-          reference: failure.reference,
-        }));
-      }
-    });
-    child.stdin.on('error', () => {});
-    child.stdin.end(prompt);
-  });
+  }
 }
 
-function runOpenCodeModelList(bin: ResolveResult, args: string[], env = buildOpenCodeChildEnv(process.env)): Promise<string> {
+async function runOpenCodeModelList(bin: ResolveResult, args: string[], env = buildOpenCodeChildEnv(process.env), signal?: AbortSignal, timeoutMs = OPENCODE_MODEL_LIST_TIMEOUT_MS): Promise<string> {
+  signal?.throwIfAborted();
+  if (timeoutMs <= 0) throw new LlmProviderError({ code: 'provider_timeout', message: 'OpenCode discovery timed out.', provider: 'opencode', retryable: true });
   const isolatedCwd = path.join(config.dataDir, 'llm-workspace');
   fs.mkdirSync(isolatedCwd, { recursive: true });
-  return new Promise((resolve, reject) => {
-    const child = spawn(bin.file, args, {
-      cwd: isolatedCwd,
-      shell: false,
-      windowsHide: true,
-      detached: OWN_PROCESS_GROUP,
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
+  try {
+    const child = spawn(bin.file, args, { cwd: isolatedCwd, shell: false, windowsHide: true, detached: OWN_PROCESS_GROUP, env, stdio: 'pipe' });
+    const result = await collectProcessOutput(child, { input: '', timeoutMs, signal, maxBytes: MAX_OPENCODE_MODEL_OUTPUT_BYTES });
+    if (result.code !== 0) {
+      const failure = classifyOpenCodeFailure(result.stderr);
+      throw new LlmProviderError({ code: failure.code, message: failure.reason ?? `OpenCode discovery exited with code ${result.code ?? 'unknown'}.`, provider: 'opencode', retryable: failure.retryable, reference: failure.reference });
+    }
+    return result.stdout;
+  } catch (error) {
+    if (error instanceof LlmProviderError || (error instanceof Error && error.name === 'AbortError')) throw error;
+    throw new LlmProviderError({
+      code: error instanceof ProcessOutputError && error.kind === 'timeout' ? 'provider_timeout' : 'provider_execution',
+      message: error instanceof ProcessOutputError && error.kind === 'timeout' ? 'OpenCode discovery timed out.' : 'OpenCode discovery could not complete or exceeded its output limit.',
+      provider: 'opencode', retryable: error instanceof ProcessOutputError && error.kind === 'timeout', cause: error,
     });
-    let stdout = '';
-    let stdoutBytes = 0;
-    let stderr = '';
-    let settled = false;
-    const stopTree = () => killProcessTree(child);
-    const finish = (error?: LlmProviderError) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (error) reject(error);
-      else resolve(stdout);
-    };
-    const timer = setTimeout(() => {
-      stopTree();
-      finish(new LlmProviderError({
-        code: 'provider_timeout',
-        message: 'OpenCode model discovery timed out after 15 seconds.',
-        provider: 'opencode',
-        retryable: true,
-      }));
-    }, OPENCODE_MODEL_LIST_TIMEOUT_MS);
-    child.stdout.on('data', (data) => {
-      stdoutBytes += Buffer.byteLength(data);
-      if (stdoutBytes > MAX_OPENCODE_MODEL_OUTPUT_BYTES) {
-        stopTree();
-        finish(new LlmProviderError({
-          code: 'provider_execution',
-          message: 'OpenCode model output exceeded the 1 MB limit.',
-          provider: 'opencode',
-        }));
-        return;
-      }
-      stdout += String(data);
-    });
-    child.stderr.on('data', (data) => {
-      if (Buffer.byteLength(stderr) < 64_000) stderr += String(data).slice(0, 64_000 - Buffer.byteLength(stderr));
-    });
-    child.on('error', (error) => finish(new LlmProviderError({
-      code: 'provider_execution',
-      message: 'OpenCode model discovery could not start.',
-      provider: 'opencode',
-      cause: error,
-    })));
-    child.on('exit', (code) => {
-      if (code === 0) finish();
-      else {
-        const failure = classifyOpenCodeFailure(stderr);
-        finish(new LlmProviderError({
-          code: failure.code,
-          message: failure.reason ?? `OpenCode model discovery exited with code ${code ?? 'unknown'}${stderr ? ' and reported process diagnostics' : ''}.`,
-          provider: 'opencode',
-          retryable: failure.retryable,
-          reference: failure.reference,
-        }));
-      }
-    });
-  });
+  }
 }
 
 export function parseOpenCodeVerboseModels(output: string): LlmModelOption[] {
@@ -378,8 +320,8 @@ const defaultRuntime: OpencodeRuntime = {
   run: runOpenCode,
 };
 
-async function readOpenCodeConfig(bin: ResolveResult, env: NodeJS.ProcessEnv): Promise<Record<string, unknown>> {
-  const output = await runOpenCodeModelList(bin, ['--pure', 'debug', 'config'], env);
+async function readOpenCodeConfig(bin: ResolveResult, env: NodeJS.ProcessEnv, signal?: AbortSignal, timeoutMs?: number): Promise<Record<string, unknown>> {
+  const output = await runOpenCodeModelList(bin, ['--pure', 'debug', 'config'], env, signal, timeoutMs);
   try {
     const parsed: unknown = JSON.parse(output);
     if (isRecord(parsed)) return parsed;

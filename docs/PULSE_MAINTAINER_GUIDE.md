@@ -171,6 +171,72 @@ For user-led live qualification, use an authorized test site and disposable reso
 Record exact resource identifiers, inspect their saved configuration, and confirm cleanup.
 Keep credentials, production data, and test evidence outside source control.
 
+## Maintain local account providers
+
+Provider profiles use one storage, registry, API, and settings workflow.
+The `codex-cli` and `claude-code` protocols use `local-account` authentication.
+Their concrete adapters own CLI discovery, authentication checks, request restrictions, response parsing, and error classification.
+HTTP adapters continue to own API-key and gateway requests.
+Pulse authoring receives assistant text through `LlmProvider.complete()` and applies the existing parsing, schema, semantic, and proposal checks.
+The model cannot publish metrics or accept its own proposal.
+
+Local account profiles store an executable location and an explicit model.
+They reject API secrets, credential commands, endpoints, custom headers, and cloud-provider routing fields.
+Changing a profile to a local account protocol removes incompatible saved credentials from that profile.
+Other profiles retain their credentials, IDs, and configuration.
+Deleting a Pulse profile does not sign out its CLI.
+Deleting the active profile leaves AI unselected.
+
+The installed official CLI owns authentication, refresh, and account switching.
+Pulse does not read, copy, or decrypt subscription tokens or credential files.
+Multiple profiles for the same CLI share its current account.
+Passive setup checks inspect installation, required capabilities, and effective authentication without generating text.
+Only an explicit connection test or authoring request submits a prompt.
+Model catalogs are optional provider capabilities; local providers accept explicit model identifiers instead of inventing an account catalog.
+A successful connection test establishes access to that model at that time.
+
+Each request uses a direct process launch, a controlled working directory, stdin for prompt text, bounded output, and a deadline.
+The child environment excludes injected API credentials, alternate cloud routes, and Pulse internal secrets.
+The adapters apply their vendor's supported controls for inherited instructions, tools, MCP servers, hooks, and session persistence.
+Unsupported required controls fail before submission.
+CLI help checks establish flag availability, not full configuration compatibility.
+Codex validates the request's configuration overrides during the actual `exec` run with strict configuration enabled.
+The offline tests do not establish that a specific installed CLI accepts every override or can complete a live request.
+Cancellation and backend shutdown stop active local requests and await their completion.
+Progress messages and tool events never enter the Pulse JSON parser as assistant output.
+A successful process exit alone does not establish a valid completion.
+
+These controls do not make the CLI an operating-system security boundary.
+The installed executable, vendor authentication machinery, and enforced enterprise policies remain trusted dependencies.
+An account status check and a subsequent request are separate CLI operations.
+Another process can change shared authentication between them; Pulse does not lock or replace the vendor's credential store.
+Current authentication and setup failures take precedence over saved readiness.
+When the CLI does not expose a verified account identity, successful requests remain history instead of establishing persistent green readiness.
+Settings stay yellow and explain that sign-in is checked before each request.
+Do not claim an atomic subscription-only billing guarantee.
+
+On POSIX, the backend stops the process group even if its original parent has exited.
+Windows tree termination depends on a living parent process.
+If that parent exits before cancellation, detached descendants cannot be reliably identified through the parent PID.
+Forced cleanup bounds shutdown and closes pipes; it does not establish that such a descendant has stopped.
+Qualify this behavior with the supported official CLI builds before release.
+
+The Bedrock SDK owns its AWS credential-provider chain separately from these CLI adapters.
+Its `credential_process` implementation does not expose cancellation or a process deadline in the installed SDK.
+Cancelling an AWS request does not establish that an already running SDK credential helper stops.
+This existing dependency limit also prevents a blanket guarantee that backend shutdown cancels every credential-provider operation.
+
+Pulse does not retry a failed account request through an API provider or another model.
+Vendor usage limits and enabled usage credits still apply.
+Anthropic's terms distinguish running its unmodified CLI from collecting or intermediating subscription tokens.
+Keep sign-in in the vendor's own flow and preserve the installed binary's authentication methods.
+Review the current [Claude Code integration conditions](https://code.claude.com/docs/en/legal-and-compliance), [Claude account billing guidance](https://support.claude.com/en/articles/13189465-log-in-to-your-claude-account), and [Codex authentication documentation](https://learn.chatgpt.com/docs/auth) before distribution.
+
+Automated adapter tests use fake runtimes and documented output fixtures without contacting vendors.
+User-led qualification must cover real account access, quota errors, account switching, tool denial, managed policies, and cancellation on each supported desktop platform.
+The optional CLI can require a newer operating system than Pulse itself.
+Build success and offline protocol tests do not establish live subscription entitlement, billing treatment, or native CLI compatibility.
+
 ## Diagnose failures
 
 For OpenCode, reproduce the same model with an ordinary CLI invocation before diagnosing account access.
