@@ -46,38 +46,45 @@ export class PulseDeletionService {
         "delete_selection_empty",
         "Select at least one resource to delete.",
       );
+    // An override deletes by ID: inventory still supplies names and the
+    // default-metric guard, but its contents no longer gate the deletion and
+    // are left out of the fingerprint, so a reload Tableau throttles
+    // differently after review cannot invalidate the confirmed plan.
+    const override = request.allowIncompleteInventory;
     const targets: PulseDeletePlan["targets"] = [];
     const relevant: unknown[] = [];
     for (const definitionId of definitionIds) {
       const definition = inventory.definitions.find(
         (entry) => entry.definitionId === definitionId,
       );
-      if (
-        !definition ||
-        inventory.truncated ||
-        definition.inventoryStatus !== "complete"
-      )
+      const inventoryComplete =
+        !!definition &&
+        !inventory.truncated &&
+        definition.inventoryStatus === "complete";
+      if (!inventoryComplete && !override)
         throw new PulseApplicationError(
           "delete_inventory_incomplete",
-          "Complete current inventory is required before deleting a definition.",
+          "Tableau did not return the complete current inventory for this definition.",
           409,
         );
-      const affectedMetricIds = definition.metrics
+      const affectedMetricIds = (definition?.metrics ?? [])
         .map((entry) => entry.metricId)
         .sort();
       targets.push({
         kind: "definition",
         id: definitionId,
-        name: definition.name,
+        name: definition?.name ?? definitionId,
         definitionId,
+        inventoryComplete,
         affectedMetricIds,
       });
-      relevant.push({
-        ...definition,
-        metrics: [...definition.metrics].sort((left, right) =>
-          compareCanonicalStrings(left.metricId, right.metricId),
-        ),
-      });
+      if (definition && !override)
+        relevant.push({
+          ...definition,
+          metrics: [...definition.metrics].sort((left, right) =>
+            compareCanonicalStrings(left.metricId, right.metricId),
+          ),
+        });
     }
     for (const metricId of metricIds) {
       const definition = inventory.definitions.find((entry) =>
@@ -86,12 +93,23 @@ export class PulseDeletionService {
       const metric = definition?.metrics.find(
         (entry) => entry.metricId === metricId,
       );
-      if (!definition || !metric)
-        throw new PulseApplicationError(
-          "delete_metric_unavailable",
-          "A selected metric is absent from current inventory. Reload the registry.",
-          409,
-        );
+      if (!definition || !metric) {
+        if (!override)
+          throw new PulseApplicationError(
+            "delete_metric_unavailable",
+            "A selected metric is absent from current inventory. Reload the registry.",
+            409,
+          );
+        targets.push({
+          kind: "metric",
+          id: metricId,
+          name: metricId,
+          definitionId: null,
+          inventoryComplete: false,
+          affectedMetricIds: [metricId],
+        });
+        continue;
+      }
       if (definitionIds.includes(definition.definitionId)) continue;
       if (metric.isDefault !== false)
         throw new PulseApplicationError(
@@ -104,13 +122,17 @@ export class PulseDeletionService {
         id: metricId,
         name: metric.name || definition.name,
         definitionId: definition.definitionId,
+        inventoryComplete: true,
         affectedMetricIds: [metricId],
       });
-      relevant.push({ definitionId: definition.definitionId, metric });
+      if (!override) relevant.push({ definitionId: definition.definitionId, metric });
     }
     const previewFingerprint = fingerprint({
       context: request.context,
-      targets,
+      override,
+      targets: override
+        ? targets.map(({ kind, id }) => ({ kind, id }))
+        : targets,
       relevant,
     });
     if (includeDetails) {
@@ -141,16 +163,22 @@ export class PulseDeletionService {
           followerCount: counts[id] ?? null,
         }));
     }
+    const warnings: string[] = [];
+    if (definitionIds.length)
+      warnings.push(
+        "Deleting a definition also removes its metrics and their subscriptions.",
+      );
+    if (targets.some((target) => !target.inventoryComplete))
+      warnings.push(
+        "Tableau could not list every metric for the resources marked incomplete. They are deleted by ID, including metrics and subscriptions this review cannot show.",
+      );
     return {
       context: request.context,
       metricIds,
       definitionIds,
+      allowIncompleteInventory: override,
       targets,
-      warnings: definitionIds.length
-        ? [
-            "Deleting a definition also removes its metrics and their subscriptions.",
-          ]
-        : [],
+      warnings,
       previewFingerprint,
     };
   }

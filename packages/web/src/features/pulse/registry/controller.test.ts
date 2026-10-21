@@ -49,6 +49,7 @@ function fixture(
         id,
         name: id,
         definitionId: "definition",
+        inventoryComplete: true,
         affectedMetricIds: [id],
       })),
     }),
@@ -122,6 +123,7 @@ test("reviewed deletion chunks all 1001 selected variants without omissions", as
             id,
             name: id,
             definitionId: "definition",
+            inventoryComplete: true,
             affectedMetricIds: [id],
           })),
         };
@@ -178,6 +180,7 @@ test("mixed bulk review removes covered children before splitting and retains ea
               id,
               name: id,
               definitionId: id,
+              inventoryComplete: true,
               affectedMetricIds: ["covered"],
             })),
             ...input.metricIds.map((id) => ({
@@ -185,6 +188,7 @@ test("mixed bulk review removes covered children before splitting and retains ea
               id,
               name: id,
               definitionId: "other",
+              inventoryComplete: true,
               affectedMetricIds: [id],
             })),
           ],
@@ -354,6 +358,7 @@ test("metric selection cannot imply definition deletion and execute uses exactly
             id,
             name: id,
             definitionId: "parent",
+            inventoryComplete: true,
             affectedMetricIds: [id],
           })),
         };
@@ -374,7 +379,12 @@ test("metric selection cannot imply definition deletion and execute uses exactly
   await store.getState().previewDelete(["child"], []);
   await store.getState().executeDelete();
   assert.deepEqual(previews, [
-    { context, metricIds: ["child"], definitionIds: [] },
+    {
+      context,
+      metricIds: ["child"],
+      definitionIds: [],
+      allowIncompleteInventory: false,
+    },
   ]);
   assert.deepEqual(commands, [
     {
@@ -382,6 +392,7 @@ test("metric selection cannot imply definition deletion and execute uses exactly
       metricIds: ["child"],
       definitionIds: [],
       previewFingerprint: "exact",
+      allowIncompleteInventory: false,
     },
   ]);
   assert.equal(store.getState().results?.items[0].status, "removed");
@@ -401,6 +412,7 @@ test("explicit whole-definition previews retain the backend blast radius and par
             id: "parent",
             name: "Sales",
             definitionId: "parent",
+            inventoryComplete: true,
             affectedMetricIds: ["visible", "unlisted"],
           },
           {
@@ -408,6 +420,7 @@ test("explicit whole-definition previews retain the backend blast radius and par
             id: "other",
             name: "Other",
             definitionId: "other-parent",
+            inventoryComplete: true,
             affectedMetricIds: ["other"],
           },
         ],
@@ -649,4 +662,57 @@ test("inventory cache restores datasource snapshot and rejects late responses fr
   await store.getState().ensureLoaded();
   assert.equal(calls, 2);
   assert.equal(store.getState().inventory?.definitions[0].name, "b");
+});
+
+test("incomplete inventory offers an explicit by-ID deletion review", async () => {
+  const previews: boolean[] = [];
+  const executed: boolean[] = [];
+  const store = fixture(
+    {},
+    {
+      previewDelete: async (input) => {
+        previews.push(input.allowIncompleteInventory);
+        if (!input.allowIncompleteInventory)
+          throw new PulseApiError(
+            "Tableau did not return the complete current inventory for this definition.",
+            409,
+            "delete_inventory_incomplete",
+          );
+        return {
+          ...input,
+          previewFingerprint: "by-id",
+          warnings: [],
+          targets: input.definitionIds.map((id) => ({
+            kind: "definition" as const,
+            id,
+            name: id,
+            definitionId: id,
+            inventoryComplete: false,
+            affectedMetricIds: [],
+          })),
+        };
+      },
+      delete: async (input) => {
+        executed.push(input.allowIncompleteInventory);
+        return {
+          definitionsDeleted: 1,
+          metricsDeleted: 0,
+          failures: [],
+          outcomes: [{ definitionId: "parent", status: "deleted" as const }],
+        };
+      },
+    },
+  );
+  store.getState().setContext(draft().context);
+  await store.getState().previewDelete([], ["parent"]);
+  assert.equal(store.getState().deletePlan, null);
+  assert.equal(store.getState().deleteOverridable, true);
+  await store.getState().reviewDeleteAnyway();
+  assert.equal(store.getState().deleteOverridable, false);
+  assert.equal(store.getState().deleteError, null);
+  assert.equal(store.getState().deletePlan?.allowIncompleteInventory, true);
+  await store.getState().executeDelete();
+  assert.deepEqual(previews, [false, true]);
+  assert.deepEqual(executed, [true]);
+  assert.equal(store.getState().results?.items[0].status, "removed");
 });

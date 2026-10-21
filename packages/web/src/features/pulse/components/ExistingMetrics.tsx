@@ -553,17 +553,27 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
               >
                 Cancel
               </button>
-              <button
-                className="btn danger"
-                disabled={
-                  !registry.deletePlan ||
-                  registry.deleteLoading ||
-                  registry.busy === "delete"
-                }
-                onClick={() => void registry.executeDelete()}
-              >
-                <BusyLabel busy={registry.busy === "delete"} idle="Delete reviewed resources" active="Deleting..." />
-              </button>
+              {registry.deleteOverridable ? (
+                <button
+                  className="btn danger"
+                  disabled={registry.deleteLoading}
+                  onClick={() => void registry.reviewDeleteAnyway()}
+                >
+                  Review deletion by ID
+                </button>
+              ) : (
+                <button
+                  className="btn danger"
+                  disabled={
+                    !registry.deletePlan ||
+                    registry.deleteLoading ||
+                    registry.busy === "delete"
+                  }
+                  onClick={() => void registry.executeDelete()}
+                >
+                  <BusyLabel busy={registry.busy === "delete"} idle="Delete reviewed resources" active="Deleting..." />
+                </button>
+              )}
             </>
           }
         >
@@ -573,6 +583,8 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
           {registry.deleteError && (
             <p className="warning-banner" role="alert">
               {registry.deleteError}
+              {registry.deleteOverridable &&
+                " Refresh metrics to retry, or review the deletion by ID. Tableau then deletes the selected resources, including any metrics it did not list."}
             </p>
           )}
           {registry.deletePlan && (
@@ -586,8 +598,12 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
                   <li key={`${target.kind}-${target.id}`}>
                     <strong>{target.name}</strong> -{" "}
                     {target.kind === "definition"
-                      ? `definition and its ${target.affectedMetricIds.length} ${target.affectedMetricIds.length === 1 ? "metric" : "metrics"}; associated subscriptions are removed`
-                      : "individual metric"}
+                      ? target.inventoryComplete
+                        ? `definition and its ${target.affectedMetricIds.length} ${target.affectedMetricIds.length === 1 ? "metric" : "metrics"}; associated subscriptions are removed`
+                        : `definition and every metric under it (inventory incomplete, ${target.affectedMetricIds.length} listed); associated subscriptions are removed`
+                      : target.inventoryComplete
+                        ? "individual metric"
+                        : "individual metric, deleted by ID (inventory incomplete)"}
                     {!!target.affectedMetrics?.length && (
                       <ul>
                         {target.affectedMetrics.map((metric) => (
