@@ -18,7 +18,7 @@ test('Bedrock bearer and SDK requests honor caller cancellation', async () => {
     });
     const provider = new BedrockProvider({
       id: 'bedrock', label: 'Bedrock', protocol: 'bedrock-converse', baseUrl: '', model: 'test-model',
-      authMode, secret: 'test-secret', headers: {}, region: 'us-west-2', awsProfile: '', command: '', source: 'saved',
+      authMode, secret: { value: 'test-secret' }, headers: {}, credentialCommand: null, credentialCommandHint: null, region: 'us-west-2', awsProfile: '', command: '', source: 'saved',
     }, async (_input, init) => waitForCancellation(init?.signal), allowEndpoint);
     provider.getHealth = async () => ({ installed: true, configured: true, healthy: null, reasonCode: 'not_tested', reason: null, resolvedModel: 'test-model' });
     provider.client = () => ({ send: async (_command: unknown, options: { abortSignal?: AbortSignal }) => waitForCancellation(options.abortSignal) }) as unknown as ReturnType<BedrockProvider['client']>;
@@ -33,7 +33,7 @@ test('Bedrock bearer and SDK requests honor caller cancellation', async () => {
 test('Bedrock bearer profiles use the verified Converse HTTP contract', async () => {
   const profile: StoredLlmProfile = {
     id: 'bedrock-key', label: 'Bedrock API key', protocol: 'bedrock-converse', baseUrl: '',
-    model: 'us.anthropic.claude-model', authMode: 'bearer', secret: 'bedrock-secret', headers: {},
+    model: 'us.anthropic.claude-model', authMode: 'bearer', secret: { value: 'bedrock-secret' }, headers: {}, credentialCommand: null, credentialCommandHint: null,
     region: 'us-west-2', awsProfile: '', command: '', source: 'saved',
   };
   const requests: Array<{ url: string; init: RequestInit }> = [];
@@ -57,8 +57,8 @@ test('Bedrock bearer profiles mint the token from a credential command', async (
   clearCredentialCache();
   const profile: StoredLlmProfile = {
     id: 'bedrock-key', label: 'Bedrock API key', protocol: 'bedrock-converse', baseUrl: '',
-    model: 'us.anthropic.claude-model', authMode: 'bearer', secret: '', headers: {},
-    region: 'us-west-2', awsProfile: '', command: '', credentialCommand: `node -e "process.stdout.write('MINTED-TOKEN')"`, source: 'saved',
+    model: 'us.anthropic.claude-model', authMode: 'bearer', secret: null, headers: {},
+    region: 'us-west-2', awsProfile: '', command: '', credentialCommand: { value: `node -e "process.stdout.write('MINTED-TOKEN')"` }, credentialCommandHint: 'node ...', source: 'saved',
   };
   const requests: Array<{ init: RequestInit }> = [];
   const provider = new BedrockProvider(profile, async (_input, init) => {
@@ -74,7 +74,7 @@ test('Bedrock bearer profiles mint the token from a credential command', async (
 test('Bedrock bearer timeout failures are classified as provider timeouts', async () => {
   const profile: StoredLlmProfile = {
     id: 'bedrock-key', label: 'Bedrock API key', protocol: 'bedrock-converse', baseUrl: '',
-    model: 'us.anthropic.claude-model', authMode: 'bearer', secret: 'bedrock-secret', headers: {},
+    model: 'us.anthropic.claude-model', authMode: 'bearer', secret: { value: 'bedrock-secret' }, headers: {}, credentialCommand: null, credentialCommandHint: null,
     region: 'us-west-2', awsProfile: '', command: '', source: 'saved',
   };
   const provider = new BedrockProvider(profile, async () => {
@@ -95,7 +95,7 @@ test('Bedrock SDK errors use AWS names and status metadata for classification', 
 test('Bedrock bearer failures surface the gateway explanation and truncation', async () => {
   const profile: StoredLlmProfile = {
     id: 'gateway', label: 'Gateway', protocol: 'bedrock-converse', baseUrl: 'https://gateway.example.test/bedrock',
-    model: 'claude-model', authMode: 'bearer', secret: 'gateway-secret', headers: {},
+    model: 'claude-model', authMode: 'bearer', secret: { value: 'gateway-secret' }, headers: {}, credentialCommand: null, credentialCommandHint: null,
     region: 'us-east-2', awsProfile: '', command: '', source: 'saved',
   };
   const rejecting = new BedrockProvider(profile, async () => Response.json(

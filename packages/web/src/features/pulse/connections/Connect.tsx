@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { SAVED_SECRET_PLACEHOLDER } from "@pulse-metric-studio/shared";
 import { useConnection } from "./controller";
 import { useNotices } from "../shell/notifications";
 import { BusyLabel } from "../components/ui";
@@ -396,6 +397,7 @@ export function ConnectCard() {
               ref={patSecretRef}
               type="password"
               autoComplete="new-password"
+              placeholder={selected ? SAVED_SECRET_PLACEHOLDER : undefined}
               onChange={(event) => setHasPatSecret(Boolean(event.target.value))}
             />
           </label>

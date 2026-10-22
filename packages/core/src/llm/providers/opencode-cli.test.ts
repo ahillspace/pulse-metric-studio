@@ -23,7 +23,7 @@ test('OpenCode discovery retries an executable that was installed after a failed
     if (String(candidate) !== executable) throw new Error('Not in this installation fixture');
     return originalAccess(candidate, mode);
   };
-  const profile: StoredLlmProfile = { id: 'opencode', label: 'OpenCode', protocol: 'opencode', baseUrl: '', model: 'provider/model', authMode: 'none', secret: '', headers: {}, region: '', awsProfile: '', command: executable, source: 'saved' };
+  const profile: StoredLlmProfile = { id: 'opencode', label: 'OpenCode', protocol: 'opencode', baseUrl: '', model: 'provider/model', authMode: 'none', secret: null, credentialCommand: null, credentialCommandHint: null, headers: {}, region: '', awsProfile: '', command: executable, source: 'saved' };
   try {
     assert.equal((await new OpencodeCliProvider(profile).getHealth()).installed, false);
     fs.writeFileSync(executable, '', { mode: 0o755 });
@@ -36,7 +36,7 @@ test('OpenCode discovery retries an executable that was installed after a failed
 
 test('OpenCode sends prompts separately from shell-free process arguments and reports the resolved model', async () => {
   const profile: StoredLlmProfile = {
-    id: 'opencode', label: 'OpenCode', protocol: 'opencode', baseUrl: '', model: 'provider/model-1', authMode: 'none', secret: '',
+    id: 'opencode', label: 'OpenCode', protocol: 'opencode', baseUrl: '', model: 'provider/model-1', authMode: 'none', secret: null, credentialCommand: null, credentialCommandHint: null,
     headers: {}, region: '', awsProfile: '', command: 'opencode', source: 'saved',
   };
   const invocations: Array<{ args: string[]; prompt: string }> = [];
@@ -60,7 +60,7 @@ test('OpenCode sends prompts separately from shell-free process arguments and re
 
 test('OpenCode rejects a blank model instead of using an inherited default', async () => {
   const profile: StoredLlmProfile = {
-    id: 'opencode', label: 'OpenCode', protocol: 'opencode', baseUrl: '', model: '', authMode: 'none', secret: '',
+    id: 'opencode', label: 'OpenCode', protocol: 'opencode', baseUrl: '', model: '', authMode: 'none', secret: null, credentialCommand: null, credentialCommandHint: null,
     headers: {}, region: '', awsProfile: '', command: 'opencode', source: 'saved',
   };
   const runtime: OpencodeRuntime = {
@@ -150,7 +150,7 @@ test('OpenCode returns the complete sorted model response', () => {
 
 test('OpenCode model discovery uses the resolved executable and exact non-refresh arguments', async () => {
   const profile: StoredLlmProfile = {
-    id: 'opencode', label: 'OpenCode', protocol: 'opencode', baseUrl: '', model: '', authMode: 'none', secret: '',
+    id: 'opencode', label: 'OpenCode', protocol: 'opencode', baseUrl: '', model: '', authMode: 'none', secret: null, credentialCommand: null, credentialCommandHint: null,
     headers: {}, region: '', awsProfile: '', command: 'C:\\tools\\opencode.exe', source: 'saved',
   };
   const invocations: Array<{ file: string; args: string[] }> = [];
@@ -232,7 +232,7 @@ test('OpenCode preserves Windows environment casing for executable lookup and re
 });
 
 test('OpenCode passive setup checks installation without pretending to verify account or model access', async () => {
-  const profile: StoredLlmProfile = { id: 'opencode', label: 'OpenCode', protocol: 'opencode', baseUrl: '', model: '', authMode: 'none', secret: '', headers: {}, region: '', awsProfile: '', command: 'opencode', source: 'saved' };
+  const profile: StoredLlmProfile = { id: 'opencode', label: 'OpenCode', protocol: 'opencode', baseUrl: '', model: '', authMode: 'none', secret: null, credentialCommand: null, credentialCommandHint: null, headers: {}, region: '', awsProfile: '', command: 'opencode', source: 'saved' };
   const provider = new OpencodeCliProvider(profile, {
     resolve: async () => ({ file: 'opencode' }),
     run: async () => { throw new Error('Passive setup cannot call the provider.'); },
@@ -245,7 +245,7 @@ test('OpenCode passive setup checks installation without pretending to verify ac
 });
 
 test('OpenCode completion forwards cancellation and does not return partial output after abort', async () => {
-  const profile: StoredLlmProfile = { id: 'opencode', label: 'OpenCode', protocol: 'opencode', baseUrl: '', model: 'provider/model', authMode: 'none', secret: '', headers: {}, region: '', awsProfile: '', command: 'opencode', source: 'saved' };
+  const profile: StoredLlmProfile = { id: 'opencode', label: 'OpenCode', protocol: 'opencode', baseUrl: '', model: 'provider/model', authMode: 'none', secret: null, credentialCommand: null, credentialCommandHint: null, headers: {}, region: '', awsProfile: '', command: 'opencode', source: 'saved' };
   const controller = new AbortController();
   let started!: () => void;
   const running = new Promise<void>((resolve) => { started = resolve; });
@@ -267,7 +267,7 @@ test('OpenCode completion forwards cancellation and does not return partial outp
 });
 
 test('OpenCode model discovery forwards the owned operation signal', async () => {
-  const profile: StoredLlmProfile = { id: 'opencode', label: 'OpenCode', protocol: 'opencode', baseUrl: '', model: '', authMode: 'none', secret: '', headers: {}, region: '', awsProfile: '', command: 'opencode', source: 'saved' };
+  const profile: StoredLlmProfile = { id: 'opencode', label: 'OpenCode', protocol: 'opencode', baseUrl: '', model: '', authMode: 'none', secret: null, credentialCommand: null, credentialCommandHint: null, headers: {}, region: '', awsProfile: '', command: 'opencode', source: 'saved' };
   const controller = new AbortController();
   const provider = new OpencodeCliProvider(profile, {
     resolve: async () => ({ file: 'opencode' }), run: async () => '',

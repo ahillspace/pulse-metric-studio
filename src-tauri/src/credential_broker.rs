@@ -12,16 +12,20 @@ use tauri::{Manager, State, WebviewWindow};
 use uuid::Uuid;
 
 const RESOLVE_PATH: &str = "/v1/credentials/resolve";
+const STORE_PATH: &str = "/v1/credentials/store";
 const DELETE_PATH: &str = "/v1/credentials/delete";
-const DATA_KEY_PATH: &str = "/v1/data-key";
+const LEGACY_DATA_KEY_PATH: &str = "/v1/legacy/data-key";
 const APPROVE_COMMAND_PATH: &str = "/v1/approvals/credential-command";
-const DATA_KEY_ACCOUNT: &str = "local-data-key";
+const LEGACY_DATA_KEY_ACCOUNT: &str = "local-data-key";
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_COMMAND_CHARS: usize = 4000;
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_SERVER_URL: usize = 2048;
 const MAX_NAME: usize = 256;
-const MAX_PAT_SECRET: usize = 4096;
+/// Fits both stores: Credential Manager holds 1,280 UTF-16 characters, and the
+/// macOS security tool reads at most a 4 KB command line (the secret goes in as hex).
+/// Mirrors SAVED_SECRET_MAX_BYTES in packages/shared.
+const MAX_STORED_SECRET: usize = 1200;
 const MAX_CREDENTIAL_REF: usize = 64;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -32,80 +36,253 @@ enum StoreError {
 
 trait CredentialStore: Send + Sync {
     fn available(&self) -> bool;
-    fn get(&self, service: &str, credential_ref: &str) -> Result<String, StoreError>;
-    fn set(&self, service: &str, credential_ref: &str, secret: &str) -> Result<(), StoreError>;
-    fn delete(&self, service: &str, credential_ref: &str) -> Result<bool, StoreError>;
+    fn get(&self, service: &str, account: &str) -> Result<String, StoreError>;
+    fn set(&self, service: &str, account: &str, secret: &str) -> Result<(), StoreError>;
+    fn delete(&self, service: &str, account: &str) -> Result<bool, StoreError>;
 }
 
-struct NativeCredentialStore;
-
-#[cfg(any(target_os = "windows", target_os = "macos"))]
-fn native_entry(service: &str, credential_ref: &str) -> Result<keyring::v1::Entry, StoreError> {
-    keyring::v1::Entry::new(service, credential_ref).map_err(|_| StoreError::Unavailable)
+/// Every item is created and read by Apple's /usr/bin/security tool, so the
+/// Keychain's access list trusts that stable system binary instead of this
+/// app's build. Updating the app therefore never asks for Keychain access.
+#[cfg(target_os = "macos")]
+struct SecurityToolStore {
+    /// None uses the login keychain; tests use a temporary keychain.
+    keychain: Option<PathBuf>,
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos"))]
-fn map_native_error(error: keyring::v1::Error) -> StoreError {
-    match error {
-        keyring::v1::Error::NoEntry => StoreError::NotFound,
-        _ => StoreError::Unavailable,
+#[cfg(target_os = "macos")]
+mod security_tool {
+    use super::StoreError;
+    use std::io::Write;
+    use std::path::Path;
+    use std::process::{Command, Output, Stdio};
+
+    const SECURITY_TOOL: &str = "/usr/bin/security";
+    const ITEM_NOT_FOUND: i32 = 44;
+
+    fn run(arguments: &[&str], keychain: Option<&Path>, input: Option<&str>) -> Result<Output, StoreError> {
+        let mut command = Command::new(SECURITY_TOOL);
+        command.args(arguments);
+        if let Some(keychain) = keychain {
+            command.arg(keychain);
+        }
+        let mut child = command
+            .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|_| StoreError::Unavailable)?;
+        if let Some(input) = input {
+            let mut stdin = child.stdin.take().ok_or(StoreError::Unavailable)?;
+            stdin.write_all(input.as_bytes()).map_err(|_| StoreError::Unavailable)?;
+        }
+        child.wait_with_output().map_err(|_| StoreError::Unavailable)
+    }
+
+    /// Service and account names are app-generated; the interactive command line
+    /// quotes them, so they must not contain quoting or whitespace characters.
+    fn plain_name(value: &str) -> Result<&str, StoreError> {
+        if value.is_empty() || value.chars().any(|c| c == '"' || c == '\\' || c.is_whitespace() || c.is_control()) {
+            return Err(StoreError::Unavailable);
+        }
+        Ok(value)
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn unhex(value: &str) -> Option<Vec<u8>> {
+        if !value.len().is_multiple_of(2) {
+            return None;
+        }
+        (0..value.len())
+            .step_by(2)
+            .map(|index| u8::from_str_radix(value.get(index..index + 2)?, 16).ok())
+            .collect()
+    }
+
+    /// `-g` prints `password: "text"` for plain text and `password: 0x<hex>  "..."`
+    /// otherwise, so the value reads back exactly whatever bytes it holds.
+    pub(super) fn parse_password(diagnostics: &str) -> Option<String> {
+        let value = diagnostics.lines().find_map(|line| line.strip_prefix("password: "))?;
+        if let Some(encoded) = value.strip_prefix("0x") {
+            let digits = encoded.split_whitespace().next()?;
+            return String::from_utf8(unhex(digits)?).ok();
+        }
+        value.strip_prefix('"')?.strip_suffix('"').map(str::to_string)
+    }
+
+    pub(super) fn available(keychain: Option<&Path>) -> bool {
+        let arguments: &[&str] = if keychain.is_some() { &["show-keychain-info"] } else { &["default-keychain"] };
+        run(arguments, keychain, None).is_ok_and(|output| output.status.success())
+    }
+
+    pub(super) fn get(keychain: Option<&Path>, service: &str, account: &str) -> Result<String, StoreError> {
+        let output = run(&["find-generic-password", "-s", plain_name(service)?, "-a", plain_name(account)?, "-g"], keychain, None)?;
+        match output.status.code() {
+            Some(0) => parse_password(&String::from_utf8_lossy(&output.stderr)).ok_or(StoreError::Unavailable),
+            Some(ITEM_NOT_FOUND) => Err(StoreError::NotFound),
+            _ => Err(StoreError::Unavailable),
+        }
+    }
+
+    /// The secret travels on stdin, never in argv: every local user can read
+    /// other processes' arguments on macOS.
+    pub(super) fn set(keychain: Option<&Path>, service: &str, account: &str, secret: &str) -> Result<(), StoreError> {
+        let target = match keychain {
+            None => String::new(),
+            Some(path) => format!(" \"{}\"", plain_name(path.to_str().ok_or(StoreError::Unavailable)?)?),
+        };
+        let line = format!(
+            "add-generic-password -s \"{}\" -a \"{}\" -X {}{target}\n",
+            plain_name(service)?,
+            plain_name(account)?,
+            hex(secret.as_bytes()),
+        );
+        let output = run(&["-i"], None, Some(&line))?;
+        // Interactive mode reports a failed command on stderr, not always through its exit status.
+        if output.status.success() && output.stderr.is_empty() {
+            Ok(())
+        } else {
+            Err(StoreError::Unavailable)
+        }
+    }
+
+    pub(super) fn delete(keychain: Option<&Path>, service: &str, account: &str) -> Result<bool, StoreError> {
+        let output = run(&["delete-generic-password", "-s", plain_name(service)?, "-a", plain_name(account)?], keychain, None)?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(ITEM_NOT_FOUND) => Ok(false),
+            _ => Err(StoreError::Unavailable),
+        }
     }
 }
 
-impl CredentialStore for NativeCredentialStore {
+#[cfg(target_os = "macos")]
+impl CredentialStore for SecurityToolStore {
     fn available(&self) -> bool {
-        #[cfg(any(target_os = "windows", target_os = "macos"))]
-        {
-            keyring::v1::Entry::store_status().is_ok()
+        security_tool::available(self.keychain.as_deref())
+    }
+
+    fn get(&self, service: &str, account: &str) -> Result<String, StoreError> {
+        security_tool::get(self.keychain.as_deref(), service, account)
+    }
+
+    fn set(&self, service: &str, account: &str, secret: &str) -> Result<(), StoreError> {
+        security_tool::set(self.keychain.as_deref(), service, account, secret)
+    }
+
+    fn delete(&self, service: &str, account: &str) -> Result<bool, StoreError> {
+        security_tool::delete(self.keychain.as_deref(), service, account)
+    }
+}
+
+/// Windows Credential Manager, through the keyring crate.
+#[cfg(target_os = "windows")]
+struct CredentialManagerStore;
+
+#[cfg(target_os = "windows")]
+fn credential_manager_entry(service: &str, account: &str) -> Result<keyring::v1::Entry, StoreError> {
+    keyring::v1::Entry::new(service, account).map_err(|_| StoreError::Unavailable)
+}
+
+#[cfg(target_os = "windows")]
+impl CredentialStore for CredentialManagerStore {
+    fn available(&self) -> bool {
+        keyring::v1::Entry::store_status().is_ok()
+    }
+
+    fn get(&self, service: &str, account: &str) -> Result<String, StoreError> {
+        credential_manager_entry(service, account)?
+            .get_password()
+            .map_err(|error| match error {
+                keyring::v1::Error::NoEntry => StoreError::NotFound,
+                _ => StoreError::Unavailable,
+            })
+    }
+
+    fn set(&self, service: &str, account: &str, secret: &str) -> Result<(), StoreError> {
+        credential_manager_entry(service, account)?
+            .set_password(secret)
+            .map_err(|_| StoreError::Unavailable)
+    }
+
+    fn delete(&self, service: &str, account: &str) -> Result<bool, StoreError> {
+        match credential_manager_entry(service, account)?.delete_credential() {
+            Ok(()) => Ok(true),
+            Err(keyring::v1::Error::NoEntry) => Ok(false),
+            Err(_) => Err(StoreError::Unavailable),
         }
-        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-        {
-            false
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+struct UnsupportedStore;
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+impl CredentialStore for UnsupportedStore {
+    fn available(&self) -> bool {
+        false
+    }
+
+    fn get(&self, _service: &str, _account: &str) -> Result<String, StoreError> {
+        Err(StoreError::Unavailable)
+    }
+
+    fn set(&self, _service: &str, _account: &str, _secret: &str) -> Result<(), StoreError> {
+        Err(StoreError::Unavailable)
+    }
+
+    fn delete(&self, _service: &str, _account: &str) -> Result<bool, StoreError> {
+        Err(StoreError::Unavailable)
+    }
+}
+
+fn native_store() -> Arc<dyn CredentialStore> {
+    #[cfg(target_os = "macos")]
+    {
+        Arc::new(SecurityToolStore { keychain: None })
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Arc::new(CredentialManagerStore)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        Arc::new(UnsupportedStore)
+    }
+}
+
+/// Each kind of saved secret has its own OS store service; the reference prefix names the kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum CredentialKind {
+    TableauPat,
+    LlmSecret,
+}
+
+impl CredentialKind {
+    const ALL: [CredentialKind; 2] = [CredentialKind::TableauPat, CredentialKind::LlmSecret];
+
+    fn prefix(self) -> &'static str {
+        match self {
+            CredentialKind::TableauPat => "cred_",
+            CredentialKind::LlmSecret => "llm_",
         }
     }
 
-    fn get(&self, service: &str, credential_ref: &str) -> Result<String, StoreError> {
-        #[cfg(any(target_os = "windows", target_os = "macos"))]
-        {
-            native_entry(service, credential_ref)?
-                .get_password()
-                .map_err(map_native_error)
-        }
-        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-        {
-            let _ = (service, credential_ref);
-            Err(StoreError::Unavailable)
-        }
+    fn of_ref(credential_ref: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| {
+            credential_ref
+                .strip_prefix(kind.prefix())
+                .filter(|id| id.len() == 32)
+                .is_some_and(|id| Uuid::parse_str(id).is_ok())
+        })
     }
 
-    fn set(&self, service: &str, credential_ref: &str, secret: &str) -> Result<(), StoreError> {
-        #[cfg(any(target_os = "windows", target_os = "macos"))]
-        {
-            native_entry(service, credential_ref)?
-                .set_password(secret)
-                .map_err(map_native_error)
-        }
-        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-        {
-            let _ = (service, credential_ref, secret);
-            Err(StoreError::Unavailable)
-        }
-    }
-
-    fn delete(&self, service: &str, credential_ref: &str) -> Result<bool, StoreError> {
-        #[cfg(any(target_os = "windows", target_os = "macos"))]
-        {
-            match native_entry(service, credential_ref)?.delete_credential() {
-                Ok(()) => Ok(true),
-                Err(keyring::v1::Error::NoEntry) => Ok(false),
-                Err(_) => Err(StoreError::Unavailable),
-            }
-        }
-        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-        {
-            let _ = (service, credential_ref);
-            Err(StoreError::Unavailable)
-        }
+    fn new_ref(self) -> String {
+        format!("{}{}", self.prefix(), Uuid::new_v4().simple())
     }
 }
 
@@ -201,8 +378,7 @@ impl CommandApprovals {
 
 #[derive(Clone)]
 pub struct CredentialContext {
-    tableau_service_name: Arc<str>,
-    data_key_service_name: Arc<str>,
+    app_identifier: Arc<str>,
     store: Arc<dyn CredentialStore>,
     approvals: Arc<CommandApprovals>,
 }
@@ -210,14 +386,62 @@ pub struct CredentialContext {
 impl CredentialContext {
     pub fn native(app_identifier: &str, data_directory: &std::path::Path) -> Self {
         Self {
-            tableau_service_name: Arc::from(format!("{app_identifier}.tableau-pat")),
-            data_key_service_name: Arc::from(format!("{app_identifier}.data-key")),
-            store: Arc::new(NativeCredentialStore),
+            app_identifier: Arc::from(app_identifier),
+            store: native_store(),
             approvals: Arc::new(CommandApprovals::load(
                 Some(data_directory.join("approved-credential-commands.json")),
                 Arc::new(DialogApprover),
             )),
         }
+    }
+
+    fn service(&self, kind: CredentialKind) -> String {
+        match kind {
+            CredentialKind::TableauPat => format!("{}.tableau-pat", self.app_identifier),
+            CredentialKind::LlmSecret => format!("{}.llm-secret", self.app_identifier),
+        }
+    }
+
+    /// Releases before 0.1.2 kept a local data-encryption key in the OS store.
+    /// The startup migration reads it once to re-home old secrets, then deletes it.
+    fn legacy_data_key_service(&self) -> String {
+        format!("{}.data-key", self.app_identifier)
+    }
+
+    fn store_secret(&self, kind: CredentialKind, secret: &str) -> Result<String, StoreError> {
+        let credential_ref = kind.new_ref();
+        self.store.set(&self.service(kind), &credential_ref, secret)?;
+        Ok(credential_ref)
+    }
+
+    fn get_secret(&self, credential_ref: &str) -> Result<String, StoreError> {
+        let kind = parse_ref(credential_ref).ok_or(StoreError::NotFound)?;
+        self.store.get(&self.service(kind), credential_ref)
+    }
+
+    fn delete_secret(&self, credential_ref: &str) -> Result<bool, StoreError> {
+        let Some(kind) = parse_ref(credential_ref) else {
+            return Ok(false);
+        };
+        self.store.delete(&self.service(kind), credential_ref)
+    }
+}
+
+fn parse_ref(credential_ref: &str) -> Option<CredentialKind> {
+    if credential_ref.len() > MAX_CREDENTIAL_REF {
+        return None;
+    }
+    CredentialKind::of_ref(credential_ref)
+}
+
+fn valid_secret(secret: &str) -> bool {
+    !secret.trim().is_empty() && secret.len() <= MAX_STORED_SECRET
+}
+
+fn store_error_message(error: StoreError) -> String {
+    match error {
+        StoreError::NotFound => "The saved OS credential was not found.".to_string(),
+        StoreError::Unavailable => unavailable_reason().to_string(),
     }
 }
 
@@ -325,34 +549,17 @@ fn validate_coordinates(
     if pat_secret.trim().is_empty() {
         return Err("The PAT secret is required.".to_string());
     }
+    if pat_secret.len() > MAX_STORED_SECRET {
+        return Err(format!("The PAT secret is longer than {MAX_STORED_SECRET} bytes."));
+    }
     if server_url.len() > MAX_SERVER_URL
         || site_content_url.len() > MAX_NAME
         || pat_name.len() > MAX_NAME
         || label.is_some_and(|label| label.len() > MAX_NAME)
-        || pat_secret.len() > MAX_PAT_SECRET
     {
         return Err("A connection field is too long.".to_string());
     }
     Ok(())
-}
-
-fn new_credential_ref() -> String {
-    format!("cred_{}", Uuid::new_v4().simple())
-}
-
-fn valid_credential_ref(value: &str) -> bool {
-    value
-        .strip_prefix("cred_")
-        .filter(|id| id.len() == 32)
-        .is_some_and(|id| Uuid::parse_str(id).is_ok())
-}
-
-fn service_for_ref<'a>(context: &'a CredentialContext, credential_ref: &str) -> Option<&'a str> {
-    if valid_credential_ref(credential_ref) {
-        Some(&context.tableau_service_name)
-    } else {
-        None
-    }
 }
 
 #[tauri::command]
@@ -369,15 +576,9 @@ pub fn tableau_store_credential(
         request.label.as_deref(),
         &request.pat_secret,
     )?;
-    let credential_ref = new_credential_ref();
-    context
-        .store
-        .set(
-            &context.tableau_service_name,
-            &credential_ref,
-            &request.pat_secret,
-        )
-        .map_err(|_| unavailable_reason().to_string())?;
+    let credential_ref = context
+        .store_secret(CredentialKind::TableauPat, &request.pat_secret)
+        .map_err(store_error_message)?;
     Ok(CredentialReferenceResponse { credential_ref })
 }
 
@@ -396,28 +597,14 @@ pub fn tableau_replace_credential(
         &request.pat_secret,
     )?;
     let old_credential_ref = request.credential_ref.trim();
-    if old_credential_ref.len() > MAX_CREDENTIAL_REF || !valid_credential_ref(old_credential_ref) {
-        return Err("The saved OS credential was not found.".to_string());
+    if parse_ref(old_credential_ref) != Some(CredentialKind::TableauPat) {
+        return Err(store_error_message(StoreError::NotFound));
     }
-    context
-        .store
-        .get(&context.tableau_service_name, old_credential_ref)
-        .map_err(|error| match error {
-            StoreError::NotFound => "The saved OS credential was not found.".to_string(),
-            StoreError::Unavailable => unavailable_reason().to_string(),
-        })?;
-    let new_credential_ref = new_credential_ref();
-    context
-        .store
-        .set(
-            &context.tableau_service_name,
-            &new_credential_ref,
-            &request.pat_secret,
-        )
-        .map_err(|_| unavailable_reason().to_string())?;
-    Ok(CredentialReferenceResponse {
-        credential_ref: new_credential_ref,
-    })
+    context.get_secret(old_credential_ref).map_err(store_error_message)?;
+    let credential_ref = context
+        .store_secret(CredentialKind::TableauPat, &request.pat_secret)
+        .map_err(store_error_message)?;
+    Ok(CredentialReferenceResponse { credential_ref })
 }
 
 #[tauri::command]
@@ -428,13 +615,10 @@ pub fn tableau_delete_credential(
 ) -> Result<DeleteCredentialResponse, String> {
     require_main_window(&window)?;
     let credential_ref = request.credential_ref.trim();
-    if credential_ref.len() > MAX_CREDENTIAL_REF || !valid_credential_ref(credential_ref) {
+    if parse_ref(credential_ref) != Some(CredentialKind::TableauPat) {
         return Ok(DeleteCredentialResponse { removed: false });
     }
-    let removed = context
-        .store
-        .delete(&context.tableau_service_name, credential_ref)
-        .map_err(|_| unavailable_reason().to_string())?;
+    let removed = context.delete_secret(credential_ref).map_err(store_error_message)?;
     Ok(DeleteCredentialResponse { removed })
 }
 
@@ -614,18 +798,15 @@ struct DeleteBrokerCredentialRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct DataKeyRequest {
-    candidate: String,
+struct StoreBrokerCredentialRequest {
+    kind: CredentialKind,
+    secret: String,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ApproveCommandRequest {
     command: String,
-}
-
-fn valid_data_key(value: &str) -> bool {
-    value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 struct BrokerResponse {
@@ -698,12 +879,7 @@ fn resolve_response(request: &ParsedRequest, context: &CredentialContext) -> Bro
     let Ok(body) = serde_json::from_slice::<ResolveRequest>(&request.body) else {
         return BrokerResponse::not_found();
     };
-    let credential_ref = body.credential_ref.trim();
-    let Some(service_name) = service_for_ref(context, credential_ref) else {
-        return BrokerResponse::not_found();
-    };
-
-    match context.store.get(service_name, credential_ref) {
+    match context.get_secret(body.credential_ref.trim()) {
         Ok(secret) if !secret.trim().is_empty() => {
             BrokerResponse::json(200, "OK", serde_json::json!({ "secret": secret }))
         }
@@ -712,47 +888,45 @@ fn resolve_response(request: &ParsedRequest, context: &CredentialContext) -> Bro
     }
 }
 
+fn store_response(request: &ParsedRequest, context: &CredentialContext) -> BrokerResponse {
+    let Ok(body) = serde_json::from_slice::<StoreBrokerCredentialRequest>(&request.body) else {
+        return BrokerResponse::bad_request();
+    };
+    if !valid_secret(&body.secret) {
+        return BrokerResponse::bad_request();
+    }
+    match context.store_secret(body.kind, &body.secret) {
+        Ok(credential_ref) => BrokerResponse::json(200, "OK", serde_json::json!({ "credentialRef": credential_ref })),
+        Err(_) => BrokerResponse::unavailable(),
+    }
+}
+
 fn delete_response(request: &ParsedRequest, context: &CredentialContext) -> BrokerResponse {
     let Ok(body) = serde_json::from_slice::<DeleteBrokerCredentialRequest>(&request.body) else {
         return BrokerResponse::bad_request();
     };
     let credential_ref = body.credential_ref.trim();
-    let Some(service_name) = service_for_ref(context, credential_ref) else {
+    if parse_ref(credential_ref).is_none() {
         return BrokerResponse::not_found();
-    };
-
-    match context.store.delete(service_name, credential_ref) {
+    }
+    match context.delete_secret(credential_ref) {
         Ok(removed) => BrokerResponse::json(200, "OK", serde_json::json!({ "removed": removed })),
         Err(_) => BrokerResponse::unavailable(),
     }
 }
 
-/// The local data-encryption key lives in the OS store. The first caller's
-/// candidate (a migrated key file or a fresh random key) is kept if none exists.
-fn data_key_response(request: &ParsedRequest, context: &CredentialContext) -> BrokerResponse {
-    let Ok(body) = serde_json::from_slice::<DataKeyRequest>(&request.body) else {
-        return BrokerResponse::bad_request();
-    };
-    let service = &context.data_key_service_name;
-    match context.store.get(service, DATA_KEY_ACCOUNT) {
-        Ok(key) if valid_data_key(key.trim()) => {
-            return BrokerResponse::json(200, "OK", serde_json::json!({ "key": key.trim() }))
-        }
-        Ok(_) | Err(StoreError::Unavailable) => return BrokerResponse::unavailable(),
-        Err(StoreError::NotFound) => {}
+fn legacy_data_key_response(context: &CredentialContext) -> BrokerResponse {
+    match context.store.get(&context.legacy_data_key_service(), LEGACY_DATA_KEY_ACCOUNT) {
+        Ok(key) => BrokerResponse::json(200, "OK", serde_json::json!({ "key": key.trim() })),
+        Err(StoreError::NotFound) => BrokerResponse::not_found(),
+        Err(StoreError::Unavailable) => BrokerResponse::unavailable(),
     }
-    let candidate = body.candidate.trim().to_ascii_lowercase();
-    if !valid_data_key(&candidate) {
-        return BrokerResponse::bad_request();
-    }
-    if context.store.set(service, DATA_KEY_ACCOUNT, &candidate).is_err() {
-        return BrokerResponse::unavailable();
-    }
-    match context.store.get(service, DATA_KEY_ACCOUNT) {
-        Ok(key) if valid_data_key(key.trim()) => {
-            BrokerResponse::json(200, "OK", serde_json::json!({ "key": key.trim() }))
-        }
-        _ => BrokerResponse::unavailable(),
+}
+
+fn delete_legacy_data_key_response(context: &CredentialContext) -> BrokerResponse {
+    match context.store.delete(&context.legacy_data_key_service(), LEGACY_DATA_KEY_ACCOUNT) {
+        Ok(removed) => BrokerResponse::json(200, "OK", serde_json::json!({ "removed": removed })),
+        Err(_) => BrokerResponse::unavailable(),
     }
 }
 
@@ -779,8 +953,10 @@ fn broker_response(
 
     match (request.method.as_str(), request.path.as_str()) {
         ("POST", RESOLVE_PATH) => resolve_response(request, context),
+        ("POST", STORE_PATH) => store_response(request, context),
         ("DELETE", DELETE_PATH) => delete_response(request, context),
-        ("POST", DATA_KEY_PATH) => data_key_response(request, context),
+        ("POST", LEGACY_DATA_KEY_PATH) => legacy_data_key_response(context),
+        ("DELETE", LEGACY_DATA_KEY_PATH) => delete_legacy_data_key_response(context),
         ("POST", APPROVE_COMMAND_PATH) => approve_command_response(request, context),
         _ => BrokerResponse::not_found(),
     }
@@ -810,10 +986,10 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    /// Keys values by service and account, like the OS stores.
     struct TestStore {
         available: bool,
-        values: Mutex<HashMap<String, String>>,
-        reads: Mutex<usize>,
+        values: Mutex<HashMap<(String, String), String>>,
     }
 
     struct PanicOnReadStore;
@@ -823,40 +999,27 @@ mod tests {
             true
         }
 
-        fn get(&self, _service: &str, _credential_ref: &str) -> Result<String, StoreError> {
+        fn get(&self, _service: &str, _account: &str) -> Result<String, StoreError> {
             panic!("unauthorized requests must not access the credential store")
         }
 
-        fn set(
-            &self,
-            _service: &str,
-            _credential_ref: &str,
-            _secret: &str,
-        ) -> Result<(), StoreError> {
+        fn set(&self, _service: &str, _account: &str, _secret: &str) -> Result<(), StoreError> {
             unreachable!()
         }
 
-        fn delete(&self, _service: &str, _credential_ref: &str) -> Result<bool, StoreError> {
+        fn delete(&self, _service: &str, _account: &str) -> Result<bool, StoreError> {
             unreachable!()
         }
     }
 
     impl TestStore {
-        fn context(available: bool, values: &[(&str, &str)]) -> CredentialContext {
-            test_context(
-                Arc::new(Self {
-                    available,
-                    values: Mutex::new(
-                        values
-                            .iter()
-                            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
-                            .collect(),
-                    ),
-                    reads: Mutex::new(0),
-                }),
-                None,
-                true,
-            )
+        fn context(available: bool) -> (Arc<TestStore>, CredentialContext) {
+            let store = Arc::new(Self { available, values: Mutex::new(HashMap::new()) });
+            (store.clone(), test_context(store, None, true))
+        }
+
+        fn value(&self, service: &str, account: &str) -> Option<String> {
+            self.values.lock().unwrap().get(&(service.to_string(), account.to_string())).cloned()
         }
     }
 
@@ -865,34 +1028,29 @@ mod tests {
             self.available
         }
 
-        fn get(&self, _service: &str, credential_ref: &str) -> Result<String, StoreError> {
-            *self.reads.lock().unwrap() += 1;
+        fn get(&self, service: &str, account: &str) -> Result<String, StoreError> {
+            if !self.available {
+                return Err(StoreError::Unavailable);
+            }
+            self.value(service, account).ok_or(StoreError::NotFound)
+        }
+
+        fn set(&self, service: &str, account: &str, secret: &str) -> Result<(), StoreError> {
             if !self.available {
                 return Err(StoreError::Unavailable);
             }
             self.values
                 .lock()
                 .unwrap()
-                .get(credential_ref)
-                .cloned()
-                .ok_or(StoreError::NotFound)
-        }
-
-        fn set(
-            &self,
-            _service: &str,
-            credential_ref: &str,
-            secret: &str,
-        ) -> Result<(), StoreError> {
-            self.values
-                .lock()
-                .unwrap()
-                .insert(credential_ref.to_string(), secret.to_string());
+                .insert((service.to_string(), account.to_string()), secret.to_string());
             Ok(())
         }
 
-        fn delete(&self, _service: &str, credential_ref: &str) -> Result<bool, StoreError> {
-            Ok(self.values.lock().unwrap().remove(credential_ref).is_some())
+        fn delete(&self, service: &str, account: &str) -> Result<bool, StoreError> {
+            if !self.available {
+                return Err(StoreError::Unavailable);
+            }
+            Ok(self.values.lock().unwrap().remove(&(service.to_string(), account.to_string())).is_some())
         }
     }
 
@@ -908,14 +1066,15 @@ mod tests {
         }
     }
 
+    const APP: &str = "com.ahillspace.pulsemetricstudio";
+
     fn test_context(
         store: Arc<dyn CredentialStore>,
         approvals_path: Option<PathBuf>,
         answer: bool,
     ) -> CredentialContext {
         CredentialContext {
-            tableau_service_name: Arc::from("com.ahillspace.pulsemetricstudio.tableau-pat"),
-            data_key_service_name: Arc::from("com.ahillspace.pulsemetricstudio.data-key"),
+            app_identifier: Arc::from(APP),
             store,
             approvals: Arc::new(CommandApprovals::load(
                 approvals_path,
@@ -927,37 +1086,72 @@ mod tests {
         }
     }
 
-    fn post(path: &str, body: serde_json::Value) -> ParsedRequest {
+    fn call(method: &str, path: &str, body: serde_json::Value) -> ParsedRequest {
         ParsedRequest {
-            method: "POST".to_string(),
+            method: method.to_string(),
             path: path.to_string(),
             authorization: Some("Bearer token".to_string()),
             body: serde_json::to_vec(&body).unwrap(),
         }
     }
 
+    fn post(path: &str, body: serde_json::Value) -> ParsedRequest {
+        call("POST", path, body)
+    }
+
+    fn json(response: &BrokerResponse) -> serde_json::Value {
+        serde_json::from_str(&response.body).unwrap()
+    }
+
     #[test]
-    fn data_key_keeps_the_first_candidate_and_returns_it_afterwards() {
-        let context = TestStore::context(true, &[]);
-        let first = "a".repeat(64);
-        let response = broker_response(&post(DATA_KEY_PATH, serde_json::json!({ "candidate": first })), "token", &context);
-        assert_eq!(response.status, 200);
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&response.body).unwrap()["key"], first);
-        let second = broker_response(
-            &post(DATA_KEY_PATH, serde_json::json!({ "candidate": "b".repeat(64) })),
+    fn stored_secrets_resolve_and_delete_under_their_kind_service() {
+        let (store, context) = TestStore::context(true);
+        let stored = broker_response(
+            &post(STORE_PATH, serde_json::json!({ "kind": "llm-secret", "secret": "sk-test" })),
             "token",
             &context,
         );
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&second.body).unwrap()["key"], first);
-        let invalid = TestStore::context(true, &[]);
+        assert_eq!(stored.status, 200);
+        let credential_ref = json(&stored)["credentialRef"].as_str().unwrap().to_string();
+        assert!(credential_ref.starts_with("llm_"));
+        assert_eq!(store.value(&format!("{APP}.llm-secret"), &credential_ref).as_deref(), Some("sk-test"));
+
+        let resolved = broker_response(&post(RESOLVE_PATH, serde_json::json!({ "credentialRef": credential_ref })), "token", &context);
+        assert_eq!(json(&resolved), serde_json::json!({ "secret": "sk-test" }));
+
+        let delete = call("DELETE", DELETE_PATH, serde_json::json!({ "credentialRef": credential_ref }));
+        assert_eq!(json(&broker_response(&delete, "token", &context))["removed"], true);
+        assert_eq!(json(&broker_response(&delete, "token", &context))["removed"], false);
+        assert_eq!(broker_response(&post(RESOLVE_PATH, serde_json::json!({ "credentialRef": credential_ref })), "token", &context).status, 404);
+    }
+
+    #[test]
+    fn store_route_rejects_empty_oversized_and_unknown_secrets() {
+        let (_store, context) = TestStore::context(true);
+        let store = |body: serde_json::Value| broker_response(&post(STORE_PATH, body), "token", &context).status;
+        assert_eq!(store(serde_json::json!({ "kind": "llm-secret", "secret": " " })), 400);
+        assert_eq!(store(serde_json::json!({ "kind": "llm-secret", "secret": "s".repeat(MAX_STORED_SECRET + 1) })), 400);
+        assert_eq!(store(serde_json::json!({ "kind": "llm-secret", "secret": "s".repeat(MAX_STORED_SECRET) })), 200);
+        assert_eq!(store(serde_json::json!({ "kind": "data-key", "secret": "s" })), 400);
+        let (_store, unavailable) = TestStore::context(false);
         assert_eq!(
-            broker_response(&post(DATA_KEY_PATH, serde_json::json!({ "candidate": "short" })), "token", &invalid).status,
-            400
-        );
-        assert_eq!(
-            broker_response(&post(DATA_KEY_PATH, serde_json::json!({ "candidate": first })), "token", &TestStore::context(false, &[])).status,
+            broker_response(&post(STORE_PATH, serde_json::json!({ "kind": "tableau-pat", "secret": "s" })), "token", &unavailable).status,
             503
         );
+    }
+
+    #[test]
+    fn legacy_data_key_is_read_until_deleted() {
+        let (store, context) = TestStore::context(true);
+        let read = || broker_response(&post(LEGACY_DATA_KEY_PATH, serde_json::json!({})), "token", &context);
+        assert_eq!(read().status, 404);
+        store.set(&format!("{APP}.data-key"), LEGACY_DATA_KEY_ACCOUNT, "ab".repeat(32).as_str()).unwrap();
+        assert_eq!(json(&read())["key"], "ab".repeat(32));
+        let delete = call("DELETE", LEGACY_DATA_KEY_PATH, serde_json::json!({}));
+        assert_eq!(json(&broker_response(&delete, "token", &context))["removed"], true);
+        assert_eq!(read().status, 404);
+        let (_store, unavailable) = TestStore::context(false);
+        assert_eq!(broker_response(&post(LEGACY_DATA_KEY_PATH, serde_json::json!({})), "token", &unavailable).status, 503);
     }
 
     #[test]
@@ -984,7 +1178,7 @@ mod tests {
     fn approval_route_validates_input_and_reports_denial() {
         let context = test_context(Arc::new(PanicOnReadStore), None, false);
         let denied = broker_response(&post(APPROVE_COMMAND_PATH, serde_json::json!({ "command": "mint" })), "token", &context);
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&denied.body).unwrap()["approved"], false);
+        assert_eq!(json(&denied)["approved"], false);
         assert_eq!(
             broker_response(&post(APPROVE_COMMAND_PATH, serde_json::json!({ "command": " " })), "token", &context).status,
             400
@@ -1000,7 +1194,8 @@ mod tests {
         assert!(validate_coordinates("https://tableau.example", "site", "pat", None, "secret").is_ok());
         assert!(validate_coordinates(&"h".repeat(MAX_SERVER_URL + 1), "site", "pat", None, "secret").is_err());
         assert!(validate_coordinates("https://tableau.example", "site", "pat", Some(&"l".repeat(MAX_NAME + 1)), "secret").is_err());
-        assert!(validate_coordinates("https://tableau.example", "site", "pat", None, &"s".repeat(MAX_PAT_SECRET + 1)).is_err());
+        assert!(validate_coordinates("https://tableau.example", "site", "pat", None, &"s".repeat(MAX_STORED_SECRET)).is_ok());
+        assert!(validate_coordinates("https://tableau.example", "site", "pat", None, &"s".repeat(MAX_STORED_SECRET + 1)).is_err());
     }
 
     fn request(token: Option<&str>, credential_ref: &str) -> ParsedRequest {
@@ -1030,7 +1225,7 @@ mod tests {
     fn unauthorized_requests_return_401_before_store_access() {
         let context = test_context(Arc::new(PanicOnReadStore), None, true);
         let response = broker_response(
-            &request(Some("wrong"), &new_credential_ref()),
+            &request(Some("wrong"), &CredentialKind::TableauPat.new_ref()),
             "token",
             &context,
         );
@@ -1045,7 +1240,7 @@ mod tests {
             broker_response(&invalid_reference, "token", &context).status,
             404
         );
-        let mut unsupported_route = request(Some("token"), &new_credential_ref());
+        let mut unsupported_route = request(Some("token"), &CredentialKind::TableauPat.new_ref());
         unsupported_route.path = "/v1/credentials/unsupported/store".to_string();
         assert_eq!(
             broker_response(&unsupported_route, "token", &context).status,
@@ -1055,23 +1250,20 @@ mod tests {
 
     #[test]
     fn broker_statuses_distinguish_found_missing_and_unavailable_credentials() {
-        let credential_ref = new_credential_ref();
-        let found = TestStore::context(true, &[(credential_ref.as_str(), "test-secret")]);
+        let (_store, found) = TestStore::context(true);
+        let credential_ref = found.store_secret(CredentialKind::TableauPat, "test-secret").unwrap();
         let found_response =
             broker_response(&request(Some("token"), &credential_ref), "token", &found);
         assert_eq!(found_response.status, 200);
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&found_response.body).unwrap(),
-            serde_json::json!({ "secret": "test-secret" })
-        );
+        assert_eq!(json(&found_response), serde_json::json!({ "secret": "test-secret" }));
 
-        let missing = TestStore::context(true, &[]);
+        let (_store, missing) = TestStore::context(true);
         assert_eq!(
             broker_response(&request(Some("token"), &credential_ref), "token", &missing).status,
             404
         );
 
-        let unavailable = TestStore::context(false, &[]);
+        let (_store, unavailable) = TestStore::context(false);
         assert_eq!(
             broker_response(
                 &request(Some("token"), &credential_ref),
@@ -1084,23 +1276,62 @@ mod tests {
     }
 
     #[test]
-    fn opaque_refs_and_service_names_are_app_specific() {
-        let credential_ref = new_credential_ref();
-        assert!(valid_credential_ref(&credential_ref));
-        assert!(!valid_credential_ref("connection-name"));
+    fn opaque_refs_name_their_kind_and_services_are_app_specific() {
+        let tableau = CredentialKind::TableauPat.new_ref();
+        let llm = CredentialKind::LlmSecret.new_ref();
+        assert_eq!(parse_ref(&tableau), Some(CredentialKind::TableauPat));
+        assert_eq!(parse_ref(&llm), Some(CredentialKind::LlmSecret));
+        assert_eq!(parse_ref("connection-name"), None);
+        assert_eq!(parse_ref(&format!("llm_{}", "g".repeat(32))), None);
         let directory = std::env::temp_dir();
-        let context = CredentialContext::native("com.ahillspace.pulsemetricstudio", &directory);
-        assert_eq!(
-            context.tableau_service_name.as_ref(),
-            "com.ahillspace.pulsemetricstudio.tableau-pat"
-        );
-        assert_eq!(
-            context.data_key_service_name.as_ref(),
-            "com.ahillspace.pulsemetricstudio.data-key"
-        );
+        let context = CredentialContext::native(APP, &directory);
+        assert_eq!(context.service(CredentialKind::TableauPat), format!("{APP}.tableau-pat"));
+        assert_eq!(context.service(CredentialKind::LlmSecret), format!("{APP}.llm-secret"));
+        assert_eq!(context.legacy_data_key_service(), format!("{APP}.data-key"));
         assert_ne!(
-            context.tableau_service_name,
-            CredentialContext::native("com.example.otherapp", &directory).tableau_service_name
+            context.service(CredentialKind::TableauPat),
+            CredentialContext::native("com.example.otherapp", &directory).service(CredentialKind::TableauPat)
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn security_tool_reads_back_exactly_what_it_saved() {
+        assert_eq!(security_tool::parse_password("keychain: \"x\"\npassword: \"plain\"\n").as_deref(), Some("plain"));
+        assert_eq!(security_tool::parse_password("password: 0x6869E280A2  \"hi\\342\\200\\242\"\n").as_deref(), Some("hi\u{2022}"));
+        assert_eq!(security_tool::parse_password("password: \n"), None);
+        assert_eq!(security_tool::parse_password("nothing here"), None);
+    }
+
+    /// Runs the real security tool against a throwaway keychain, never the login keychain.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn security_tool_store_round_trips_against_a_temporary_keychain() {
+        let path = std::env::temp_dir().join(format!("pms-{}.keychain-db", Uuid::new_v4().simple()));
+        let keychain = path.to_str().unwrap();
+        let created = std::process::Command::new("/usr/bin/security")
+            .args(["create-keychain", "-p", "pms-test", keychain])
+            .status()
+            .unwrap();
+        assert!(created.success());
+        let store = SecurityToolStore { keychain: Some(path.clone()) };
+        let outcome = std::panic::catch_unwind(|| {
+            assert!(store.available());
+            let service = format!("{APP}.llm-secret");
+            for secret in ["sk-plain", "quote\"back\\slash $HOME 'single'", "line\nbreak\ttab", "caf\u{e9} \u{1f511}", &"x".repeat(MAX_STORED_SECRET)] {
+                let account = CredentialKind::LlmSecret.new_ref();
+                store.set(&service, &account, secret).unwrap();
+                assert_eq!(store.get(&service, &account).unwrap(), secret);
+                assert!(store.delete(&service, &account).unwrap());
+                assert_eq!(store.get(&service, &account), Err(StoreError::NotFound));
+                assert!(!store.delete(&service, &account).unwrap());
+            }
+            assert_eq!(store.set("bad service", "account", "secret"), Err(StoreError::Unavailable));
+        });
+        let _ = std::process::Command::new("/usr/bin/security").args(["delete-keychain", keychain]).status();
+        let _ = std::fs::remove_file(&path);
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
     }
 }

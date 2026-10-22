@@ -9,4 +9,6 @@ export * from './tableau/signin.js';
 export * from './tableau/vds-fields.js';
 export * from './tableau/metadata-fallback.js';
 export * from './tableau/credential-broker.js';
+export * from './secrets/vault.js';
+export * from './secrets/migration.js';
 export * from './llm/index.js';

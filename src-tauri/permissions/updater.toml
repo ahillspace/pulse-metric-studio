@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "updater"
+description = "Allows the main window to read update status and install an available update."
+commands.allow = ["pulse_update_status", "pulse_update_apply"]

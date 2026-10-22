@@ -17,8 +17,10 @@ function profile(protocol: LlmProtocol): StoredLlmProfile {
     baseUrl: 'https://gateway.example.test/v1',
     model: 'model-1',
     authMode: protocol === 'anthropic-messages' ? 'x-api-key' : 'bearer',
-    secret: 'secret-value',
-    headers: { 'x-company-route': 'route-a' },
+    secret: { value: 'secret-value' },
+    headers: { 'x-company-route': { value: 'route-a' } },
+    credentialCommand: null,
+    credentialCommandHint: null,
     region: '',
     awsProfile: '',
     command: '',
@@ -59,8 +61,9 @@ test('credential commands mint the x-api-key token per request and satisfy confi
   clearCredentialCache();
   const credentialed: StoredLlmProfile = {
     ...profile('anthropic-messages'),
-    secret: '',
-    credentialCommand: `node -e "process.stdout.write('MINTED-TOKEN')"`,
+    secret: null,
+    credentialCommand: { value: `node -e "process.stdout.write('MINTED-TOKEN')"` },
+    credentialCommandHint: 'node ...',
   };
   const requests: Array<{ init: RequestInit }> = [];
   const provider = new HttpLlmProvider(credentialed, async (_input, init) => {
@@ -110,7 +113,7 @@ test('HTTP provider error explanations never echo the request credential', async
 });
 
 test('HTTP provider error explanations never echo custom header credentials', async () => {
-  const configured = { ...profile('openai-chat'), headers: { 'x-gateway-key': 'Bearer header-credential-value' } };
+  const configured = { ...profile('openai-chat'), headers: { 'x-gateway-key': { value: 'Bearer header-credential-value' } } };
   const provider = new HttpLlmProvider(configured, async () => Response.json(
     { error: { message: 'Upstream rejected header-credential-value for route.' } },
     { status: 403 },

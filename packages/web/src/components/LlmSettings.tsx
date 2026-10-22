@@ -1,12 +1,13 @@
 import { desktopFetch } from '../desktop-transport';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type {
-  LlmAuthMode,
-  LlmModelCatalogResponse,
-  LlmProfilePublic,
-  LlmProtocol,
-  LlmProviderStatus,
-  LlmStatusResponse,
+import {
+  SAVED_SECRET_PLACEHOLDER,
+  type LlmAuthMode,
+  type LlmModelCatalogResponse,
+  type LlmProfilePublic,
+  type LlmProtocol,
+  type LlmProviderStatus,
+  type LlmStatusResponse,
 } from '@pulse-metric-studio/shared';
 import { WorkbenchModal } from './workbench';
 import { buildModelOptions, isCurrentModel } from './llm-model-options';
@@ -35,13 +36,13 @@ type SetupStatus = Pick<LlmProviderStatus, 'installed' | 'configured' | 'healthy
 
 interface ProfileForm {
   id: string; label: string; protocol: LlmProtocol; baseUrl: string; model: string; authMode: LlmAuthMode;
-  secret: string; hasSecret: boolean; clearSecret: boolean; headersText: string; headersDirty: boolean; clearHeaders: boolean; region: string; awsProfile: string; command: string; credentialCommand: string; hasCredentialCommand: boolean; credentialCommandHint: string | null; clearCredentialCommand: boolean; secretHint: string | null; allowPrivateNetwork: boolean; source: 'environment' | 'saved' | 'new';
+  secret: string; hasSecret: boolean; clearSecret: boolean; headersText: string; headersDirty: boolean; clearHeaders: boolean; region: string; awsProfile: string; command: string; credentialCommand: string; hasCredentialCommand: boolean; credentialCommandHint: string | null; clearCredentialCommand: boolean; allowPrivateNetwork: boolean; source: 'environment' | 'saved' | 'new';
 }
 
-const emptyForm: ProfileForm = { id: '', label: '', protocol: 'opencode', baseUrl: '', model: '', authMode: 'none', secret: '', hasSecret: false, clearSecret: false, headersText: '{}', headersDirty: false, clearHeaders: false, region: '', awsProfile: '', command: 'opencode', credentialCommand: '', hasCredentialCommand: false, credentialCommandHint: null, clearCredentialCommand: false, secretHint: null, allowPrivateNetwork: false, source: 'new' };
+const emptyForm: ProfileForm = { id: '', label: '', protocol: 'opencode', baseUrl: '', model: '', authMode: 'none', secret: '', hasSecret: false, clearSecret: false, headersText: '{}', headersDirty: false, clearHeaders: false, region: '', awsProfile: '', command: 'opencode', credentialCommand: '', hasCredentialCommand: false, credentialCommandHint: null, clearCredentialCommand: false, allowPrivateNetwork: false, source: 'new' };
 
 function formFromProfile(profile: LlmProfilePublic): ProfileForm {
-  return { id: profile.id, label: profile.label, protocol: profile.protocol, baseUrl: profile.baseUrl, model: profile.model, authMode: profile.authMode, secret: '', hasSecret: profile.hasSecret, clearSecret: false, headersText: JSON.stringify(profile.headers, null, 2), headersDirty: false, clearHeaders: false, region: profile.region, awsProfile: profile.awsProfile, command: profile.command, credentialCommand: '', hasCredentialCommand: profile.hasCredentialCommand, credentialCommandHint: profile.credentialCommandHint, clearCredentialCommand: false, secretHint: profile.secretHint, allowPrivateNetwork: profile.allowPrivateNetwork, source: profile.source };
+  return { id: profile.id, label: profile.label, protocol: profile.protocol, baseUrl: profile.baseUrl, model: profile.model, authMode: profile.authMode, secret: '', hasSecret: profile.hasSecret, clearSecret: false, headersText: JSON.stringify(profile.headers, null, 2), headersDirty: false, clearHeaders: false, region: profile.region, awsProfile: profile.awsProfile, command: profile.command, credentialCommand: '', hasCredentialCommand: profile.hasCredentialCommand, credentialCommandHint: profile.credentialCommandHint, clearCredentialCommand: false, allowPrivateNetwork: profile.allowPrivateNetwork, source: profile.source };
 }
 
 /** Saved commands are never sent back to the UI: send one only when it is new or being cleared. */
@@ -80,7 +81,6 @@ export function changeProfileProtocol(form: ProfileForm, protocol: LlmProtocol, 
     allowPrivateNetwork: local ? false : form.allowPrivateNetwork,
     secret: clearsCredentials ? '' : form.secret,
     hasSecret: clearsCredentials ? false : form.hasSecret,
-    secretHint: clearsCredentials ? null : form.secretHint,
     clearSecret: form.clearSecret || clearsCredentials && existing && form.hasSecret,
     credentialCommand: clearsCredentials ? '' : form.credentialCommand,
     hasCredentialCommand: clearsCredentials ? false : form.hasCredentialCommand,
@@ -362,8 +362,8 @@ export function ProfileEditor({
           </div>}
         </section>}
         {(http || bedrock) && <>
-            {authUsesSecret && <label>Key or token<input type="password" autoComplete="new-password" value={form.secret} disabled={form.clearSecret && form.hasSecret} onChange={(event) => setForm({ ...form, secret: event.target.value, clearSecret: false })} placeholder={usesCredentialCommand(form) ? 'Not needed - using the credential command' : existing && form.hasSecret ? 'Leave blank to keep saved secret' : 'Required by provider'} /></label>}
-            {authUsesSecret && existing && form.hasSecret && !form.secret && !form.clearSecret && <p className="section-hint full">A key is saved{form.secretHint ? ` (ends ${form.secretHint})` : ''}. Leave the field blank to keep it, or type a new value to replace it.</p>}
+            {authUsesSecret && <label>Key or token<input type="password" autoComplete="new-password" value={form.secret} disabled={form.clearSecret && form.hasSecret} onChange={(event) => setForm({ ...form, secret: event.target.value, clearSecret: false })} placeholder={usesCredentialCommand(form) ? 'Not needed - using the credential command' : existing && form.hasSecret ? SAVED_SECRET_PLACEHOLDER : 'Required by provider'} /></label>}
+            {authUsesSecret && existing && form.hasSecret && !form.secret && !form.clearSecret && <p className="section-hint full">A key is saved. Leave the field blank to keep it, or type a new value to replace it.</p>}
         </>}
         {bedrock && <><label>AWS region<input value={form.region} onChange={(event) => set('region', event.target.value)} placeholder="us-east-1" /></label><label>AWS profile<input value={form.awsProfile} onChange={(event) => set('awsProfile', event.target.value)} placeholder="Optional profile" /></label></>}
         <details className="full llm-advanced"><summary>Advanced settings</summary><div className="llm-form-grid">

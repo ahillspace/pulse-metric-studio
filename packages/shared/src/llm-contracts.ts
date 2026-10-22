@@ -49,8 +49,24 @@ export const BLOCKED_LLM_HEADER_NAMES = new Set([
 
 const SAFE_VENDOR_HEADERS = new Set(['anthropic-beta', 'openai-organization', 'openai-project']);
 
+/**
+ * Every saved secret (API key, header value, credential command, Tableau PAT)
+ * is one OS credential store entry, and this is the size both stores accept:
+ * Windows Credential Manager holds 1,280 UTF-16 characters, and the macOS
+ * security tool reads at most a 4 KB command line. Mirrors MAX_STORED_SECRET
+ * in the native credential broker.
+ */
+export const SAVED_SECRET_MAX_BYTES = 1200;
+/** Shown in place of any saved secret; it never reflects the secret's length or content. */
+export const SAVED_SECRET_PLACEHOLDER = '***************';
+
+const savedSecret = <T extends z.ZodString>(schema: T) => schema.refine(
+  (value) => new TextEncoder().encode(value).length <= SAVED_SECRET_MAX_BYTES,
+  { message: `Saved secrets can be at most ${SAVED_SECRET_MAX_BYTES} bytes.` },
+);
+
 const HeaderNameSchema = z.string().trim().min(1).max(80).regex(/^[!#$%&'*+.^_`|~0-9a-z-]+$/i);
-const HeaderValueSchema = z.string().max(1000).refine((value) => !/[\u0000-\u001f\u007f]/.test(value), {
+const HeaderValueSchema = savedSecret(z.string()).refine((value) => !/[\u0000-\u001f\u007f]/.test(value), {
   message: 'Header values cannot contain control characters.',
 }).refine((value) => value !== '[configured]', {
   message: 'Masked header placeholders cannot be saved.',
@@ -73,7 +89,7 @@ export const LlmProfileWriteSchema = z.object({
   baseUrl: z.string().trim().url().max(2000).optional().or(z.literal('')),
   model: z.string().trim().max(240).optional().default(''),
   authMode: z.enum(['none', 'local-account', 'bearer', 'x-api-key', 'aws']).default('none'),
-  secret: z.string().max(16000).optional(),
+  secret: savedSecret(z.string()).optional(),
   clearSecret: z.boolean().optional().default(false),
   headers: HeadersSchema.optional(),
   clearHeaders: z.boolean().optional().default(false),
@@ -82,7 +98,7 @@ export const LlmProfileWriteSchema = z.object({
   awsProfile: z.string().trim().max(120).optional().default(''),
   command: z.string().trim().max(1000).optional().default(''),
   /** Omit to keep the saved command; the API never returns a saved command. */
-  credentialCommand: z.string().trim().max(4000).optional(),
+  credentialCommand: savedSecret(z.string().trim()).optional(),
   clearCredentialCommand: z.boolean().optional().default(false),
 }).superRefine((profile, ctx) => {
   const localAccount = profile.protocol === 'codex-cli' || profile.protocol === 'claude-code';
@@ -153,7 +169,6 @@ export interface LlmProfilePublic {
   model: string;
   authMode: LlmAuthMode;
   hasSecret: boolean;
-  secretHint: string | null;
   headers: Record<string, string>;
   region: string;
   awsProfile: string;

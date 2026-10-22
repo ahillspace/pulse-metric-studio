@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process';
+import { secretVault, SecretVaultError } from '../../secrets/vault.js';
+import type { LlmSecretSource } from '../profiles.js';
 import { LlmProviderError } from '../types.js';
 import { collectProcessOutput, OWN_PROCESS_GROUP, ProcessOutputError } from './process-tree.js';
 
@@ -101,16 +103,54 @@ export async function resolveCredentialCommand(
   return token;
 }
 
+interface ProfileCredentials {
+  secret: LlmSecretSource | null;
+  headers: Record<string, LlmSecretSource>;
+  credentialCommand: LlmSecretSource | null;
+}
+
+/** Saved secrets are read from the vault only when a request needs them. */
+export async function readProfileSecret(source: LlmSecretSource, what: string, provider: string, model: string): Promise<string> {
+  if ('value' in source) return source.value;
+  const vault = secretVault();
+  try {
+    return await vault.resolve(source.ref);
+  } catch (error) {
+    if (!(error instanceof SecretVaultError)) throw error;
+    throw new LlmProviderError({
+      code: error.code === 'not_found' ? 'provider_not_configured' : 'provider_unavailable',
+      message: error.code === 'not_found' ? `The saved ${what} is missing from ${vault.location}. Enter it again in AI settings.` : error.message,
+      provider,
+      model,
+      cause: error,
+    });
+  }
+}
+
 export async function resolveProfileSecret(
-  profile: { secret?: string; credentialCommand?: string },
+  profile: Pick<ProfileCredentials, 'secret' | 'credentialCommand'>,
   provider: string,
   model: string,
   options: CredentialResolutionOptions = {},
 ): Promise<string> {
   options.signal?.throwIfAborted();
-  const command = profile.credentialCommand?.trim();
-  if (command) return resolveCredentialCommand(command, provider, model, options);
-  return (profile.secret ?? '').trim();
+  if (profile.credentialCommand) {
+    const command = (await readProfileSecret(profile.credentialCommand, 'credential command', provider, model)).trim();
+    if (command) return resolveCredentialCommand(command, provider, model, options);
+  }
+  return profile.secret ? (await readProfileSecret(profile.secret, 'API key', provider, model)).trim() : '';
+}
+
+export async function resolveProfileHeaders(
+  profile: Pick<ProfileCredentials, 'headers'>,
+  provider: string,
+  model: string,
+): Promise<Record<string, string>> {
+  const headers: Record<string, string> = {};
+  for (const [name, source] of Object.entries(profile.headers)) {
+    headers[name] = await readProfileSecret(source, `value for the ${name} header`, provider, model);
+  }
+  return headers;
 }
 
 /**

@@ -12,7 +12,7 @@ test('provider mutations freeze every settings control until the saved response 
       id: 'gateway', label: 'Gateway', protocol: 'openai-chat', baseUrl: 'https://example.com', model: 'model', authMode: 'bearer',
       secret: '', hasSecret: true, clearSecret: false, headersText: '{}', headersDirty: false, clearHeaders: false,
       region: '', awsProfile: '', command: '', credentialCommand: '', hasCredentialCommand: false,
-      credentialCommandHint: null, clearCredentialCommand: false, secretHint: null, allowPrivateNetwork: false, source: 'saved',
+      credentialCommandHint: null, clearCredentialCommand: false, allowPrivateNetwork: false, source: 'saved',
     },
     setForm: () => {}, dirty: false, existing: true, busy: true,
     onCheck: async () => {}, onSave: async () => {}, onTest: async () => {}, onSelect: () => {}, onDelete: () => {},
@@ -72,7 +72,7 @@ test('every supported protocol has an explicit provider description and account 
 test('protocol conversion preserves compatible API drafts and clears incompatible credential claims', () => {
   const api: Parameters<typeof ProfileEditor>[0]['form'] = {
     id: 'gateway', label: 'Gateway', protocol: 'openai-chat', baseUrl: 'https://gateway.example.test/v1',
-    model: 'explicit-model', authMode: 'x-api-key', secret: 'new-key', hasSecret: true, secretHint: '1234', clearSecret: false,
+    model: 'explicit-model', authMode: 'x-api-key', secret: 'new-key', hasSecret: true, clearSecret: false,
     headersText: '{"x-route":"draft"}', headersDirty: true, clearHeaders: false,
     region: '', awsProfile: '', command: '', credentialCommand: 'new-command', hasCredentialCommand: true,
     credentialCommandHint: 'saved-command', clearCredentialCommand: false, allowPrivateNetwork: true, source: 'saved',
@@ -83,7 +83,6 @@ test('protocol conversion preserves compatible API drafts and clears incompatibl
     const changed = changeProfileProtocol(api, protocol, true);
     assert.equal(changed.hasSecret, false);
     assert.equal(changed.secret, '');
-    assert.equal(changed.secretHint, null);
     assert.equal(changed.hasCredentialCommand, false);
     assert.equal(changed.credentialCommand, '');
     assert.equal(changed.credentialCommandHint, null);
@@ -106,7 +105,7 @@ for (const protocol of ['codex-cli', 'claude-code'] as const) {
         id: choice.id, label: choice.label, protocol, baseUrl: '', model: 'selected-model', authMode: 'local-account',
         secret: '', hasSecret: false, clearSecret: false, headersText: '{}', headersDirty: false, clearHeaders: false,
         region: '', awsProfile: '', command: choice.command, credentialCommand: '', hasCredentialCommand: false,
-        credentialCommandHint: null, clearCredentialCommand: false, secretHint: null, allowPrivateNetwork: false, source: 'new',
+        credentialCommandHint: null, clearCredentialCommand: false, allowPrivateNetwork: false, source: 'new',
       },
       setForm: () => {}, dirty: true, existing: false, busy: false,
       onCheck: async () => {}, onSave: async () => {}, onTest: async () => {}, onSelect: () => {}, onDelete: () => {},

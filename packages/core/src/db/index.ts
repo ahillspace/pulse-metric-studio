@@ -170,6 +170,32 @@ const MIGRATIONS: string[] = [
   `,
   // 004 - retain undo diagnostics independently from creation/resolution errors.
   `ALTER TABLE run_metrics ADD COLUMN undo_error TEXT;`,
+  // 005 - AI provider profiles keep settings in columns and secrets in the
+  // secret vault, by reference. local_secrets is the vault without an OS store.
+  `
+  CREATE TABLE llm_profiles (
+    id TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    protocol TEXT NOT NULL,
+    base_url TEXT NOT NULL,
+    model TEXT NOT NULL,
+    auth_mode TEXT NOT NULL,
+    secret_ref TEXT,
+    header_refs_json TEXT NOT NULL,
+    region TEXT NOT NULL,
+    aws_profile TEXT NOT NULL,
+    command TEXT NOT NULL,
+    credential_command_ref TEXT,
+    credential_command_hint TEXT,
+    allow_private_network INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE TABLE local_secrets (
+    ref TEXT PRIMARY KEY,
+    secret_enc TEXT NOT NULL
+  );
+  `,
 ];
 
 export function getDb(): Db {

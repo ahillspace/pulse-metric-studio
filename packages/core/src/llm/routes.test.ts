@@ -14,7 +14,6 @@ function publicProfile(id: string) {
     model: 'model-1',
     authMode: 'bearer' as const,
     hasSecret: true,
-    secretHint: '...1234',
     headers: {},
     region: '',
     awsProfile: '',

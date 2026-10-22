@@ -20,28 +20,47 @@ It is an independent tool, not a Tableau or Salesforce product.
 
 ## Install
 
-The repository is private, so installing needs the [GitHub CLI](https://cli.github.com) signed in (`gh auth login`) with an account that can open it.
-Then run one command.
+Run one command.
+The installer picks the right build for your machine, verifies it against the release's `checksums.txt`, installs Pulse Metric Studio, and starts it.
 
-macOS (Terminal):
+Public releases, from [ahillspace/pulse-metric-studio](https://github.com/ahillspace/pulse-metric-studio):
 
 ```bash
+# macOS (Terminal)
+curl -fsSL https://github.com/ahillspace/pulse-metric-studio/releases/latest/download/install.sh | sh
+```
+
+```powershell
+# Windows (PowerShell)
+& ([scriptblock]::Create((irm https://github.com/ahillspace/pulse-metric-studio/releases/latest/download/install.ps1)))
+```
+
+Internal releases, from the private `sfdc-qbranch-emu/pulse-metric-studio` repository, need the [GitHub CLI](https://cli.github.com) signed in (`gh auth login`) with an account that can open it:
+
+```bash
+# macOS (Terminal)
 gh release download --repo sfdc-qbranch-emu/pulse-metric-studio --pattern install.sh -O - | sh
 ```
 
-Windows (PowerShell):
-
 ```powershell
+# Windows (PowerShell)
 & ([scriptblock]::Create((gh release download --repo sfdc-qbranch-emu/pulse-metric-studio --pattern install.ps1 -O - | Out-String)))
 ```
 
-The installer picks the right build for your machine, verifies it against the release's `checksums.txt`, installs Pulse Metric Studio, and starts it.
-Run the same command again to update.
+If the internal command cannot find the release, you are probably signed in with the wrong account; run `gh auth switch`.
 
 - Install a specific version: `... | sh -s -- --version 0.1.0` on macOS, or append `-Version 0.1.0` on Windows.
 - Uninstall (keeps your connections, drafts, and history): `... | sh -s -- uninstall` on macOS, or append `-Action Uninstall` on Windows.
 
-If the command cannot find the release, you are probably signed in with the wrong account; run `gh auth switch`.
+### Updates
+
+The app checks the repository it was installed from when it starts and once a day.
+When a newer release is out, it offers the update, and an **Update to X.Y.Z** button stays above the assistant settings until you install it.
+Updating saves your drafts, closes the app, installs the new release with the same installer, and opens the app again.
+An internal install only ever updates from the internal repository, and a public install only from the public one.
+
+Updates come only to copies installed with the one-line command, which records where it installed from.
+A copy installed by hand from a disk image or setup file does not update itself; run the install command once to turn updates on.
 
 <details>
 <summary>Installing by hand from the Releases page</summary>
@@ -49,7 +68,7 @@ If the command cannot find the release, you are probably signed in with the wron
 Download the latest build from [Releases](../../releases/latest): `Pulse-Metric-Studio_*_x64-setup.exe` on Windows, or the `Pulse-Metric-Studio_*.dmg` for your Mac.
 
 The builds are not signed with a public certificate, so a browser download shows a warning on first launch.
-The one-command installer avoids it.
+The one-command installer avoids it, and only an installed copy updates itself.
 
 - Windows SmartScreen: click "More info", then "Run anyway".
 - macOS "unidentified developer": right-click Pulse Metric Studio in Applications, choose Open, and confirm.
@@ -67,8 +86,9 @@ The one-command installer avoids it.
 
 ## Your data stays on your machine
 
-- Tableau tokens are stored in macOS Keychain or Windows Credential Manager; the app database keeps only a reference.
-- AI provider keys are encrypted in the app database with a key that also lives in Keychain or Credential Manager.
+- Tableau tokens, AI provider keys, custom header values, and credential commands are each stored as their own entry in macOS Keychain or Windows Credential Manager; the app database keeps only a reference.
+  The app reads a secret only when a request needs it, so launching the app or opening Settings never asks for Keychain access.
+- Settings show a saved secret as `***************`, which reveals nothing about its length or content.
 - Local Codex and Claude Code profiles use the account signed into the official CLI.
   The CLI owns login, credential storage, and refresh; Pulse stores only the provider settings.
 - Drafts, settings, and publication receipts live in your user profile: `~/Library/Application Support/com.ahillspace.pulsemetricstudio/` on macOS, `%APPDATA%\com.ahillspace.pulsemetricstudio\` on Windows.
@@ -154,7 +174,7 @@ Thank you to their maintainers.
 | [Zod](https://zod.dev) | MIT | Shared request and metric contracts |
 | [AWS SDK for JavaScript](https://github.com/aws/aws-sdk-js-v3) | Apache-2.0 | Amazon Bedrock provider |
 | [dotenv](https://github.com/motdotla/dotenv) | BSD-2-Clause | Development configuration |
-| [keyring](https://github.com/open-source-cooperative/keyring-rs) | MIT or Apache-2.0 | Keychain and Credential Manager access |
+| [keyring](https://github.com/open-source-cooperative/keyring-rs) | MIT or Apache-2.0 | Credential Manager access on Windows |
 | [reqwest](https://github.com/seanmonstar/reqwest), [Serde](https://serde.rs), [uuid](https://github.com/uuid-rs/uuid), and [RustCrypto `hmac` and `sha2`](https://github.com/RustCrypto) | MIT or Apache-2.0 | Native transport, request signing, and credential broker |
 | [rfd](https://github.com/PolyMeilex/rfd) | MIT | Native dialogs |
 | [Vite](https://vite.dev) and [TypeScript](https://www.typescriptlang.org) | MIT; Apache-2.0 | Build tooling (build time only, not shipped) |

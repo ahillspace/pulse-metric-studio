@@ -18,9 +18,10 @@ import { CodexCliProvider } from './providers/codex-cli.js';
 import { ClaudeCodeProvider } from './providers/claude-code.js';
 import {
   DbLlmRegistryStateStore,
-  EncryptedLlmProfileStore,
+  DbLlmProfileStore,
   type LlmProfileStore,
   type LlmReadinessResult,
+  type LlmSecretSource,
   type LlmRegistryStateStore,
   type StoredLlmProfile,
   type StoredLlmReadiness,
@@ -62,7 +63,7 @@ export class ProviderRegistry {
   constructor(options: ProviderRegistryOptions = {}) {
     this.environment = options.environment ?? process.env;
     this.staticProviders = options.providers ?? null;
-    this.store = options.store ?? new EncryptedLlmProfileStore();
+    this.store = options.store ?? new DbLlmProfileStore();
     this.stateStore = options.stateStore ?? new DbLlmRegistryStateStore();
     this.providerFactory = options.providerFactory ?? providerForProfile;
     this.now = options.now ?? (() => new Date());
@@ -130,10 +131,10 @@ export class ProviderRegistry {
     const before = this.profiles().find((profile) => profile.id === input.id);
     const beforeFingerprint = before ? this.profileFingerprint(input.id, before) : null;
     // Resolve preservation against the effective profile, which can come from
-    // the environment rather than the encrypted store. Clear flags win here.
+    // the environment rather than the saved store. Clear flags win here.
     const prospective = resolveLlmProfile(input, before);
     await this.assertCurrentModel(prospective, this.providerFactory(prospective), true);
-    const saved = this.store.save(prospective);
+    const saved = toPublicProfile(await this.store.save(prospective));
     const after = this.profiles().find((profile) => profile.id === input.id);
     if (!after || beforeFingerprint !== this.profileFingerprint(input.id, after)) {
       this.stateStore.deleteReadiness(input.id);
@@ -143,7 +144,7 @@ export class ProviderRegistry {
 
   async deleteProfile(id: string): Promise<void> {
     const active = this.activePreference(await this.providers());
-    this.store.delete(id);
+    await this.store.delete(id);
     this.stateStore.deleteReadiness(id);
     this.modelCatalogCache.delete(id);
     if (active === id) this.stateStore.setActive('');
@@ -264,7 +265,7 @@ export class ProviderRegistry {
       region: profile.region,
       awsProfile: profile.awsProfile,
       command: profile.command,
-      credentialCommand: profile.credentialCommand ?? '',
+      credentialCommand: profile.credentialCommand,
       allowPrivateNetwork: profile.allowPrivateNetwork ?? false,
       source: profile.source,
     };
@@ -434,29 +435,33 @@ function environmentProfiles(environment: NodeJS.ProcessEnv): StoredLlmProfile[]
   const profiles: StoredLlmProfile[] = [
     {
       id: 'opencode', label: 'OpenCode', protocol: 'opencode', baseUrl: '', model: value('OPENCODE_MODEL'),
-      authMode: 'none', secret: '', headers: {}, region: '', awsProfile: '', command: value('OPENCODE_BIN', 'opencode'), source: 'environment',
+      authMode: 'none', secret: null, headers: {}, region: '', awsProfile: '', command: value('OPENCODE_BIN', 'opencode'), credentialCommand: null, credentialCommandHint: null, source: 'environment',
       allowPrivateNetwork: false,
     },
     {
       id: 'bedrock', label: 'Amazon Bedrock', protocol: 'bedrock-converse', baseUrl: value('AWS_ENDPOINT_URL_BEDROCK'),
-      model: value('BEDROCK_MODEL_ID', config.llm.bedrock.modelId), authMode: 'aws', secret: '', headers: {}, region: value('AWS_REGION', 'us-east-1'),
-      awsProfile: value('AWS_PROFILE'), command: '', source: 'environment',
+      model: value('BEDROCK_MODEL_ID', config.llm.bedrock.modelId), authMode: 'aws', secret: null, headers: {}, region: value('AWS_REGION', 'us-east-1'),
+      awsProfile: value('AWS_PROFILE'), command: '', credentialCommand: null, credentialCommandHint: null, source: 'environment',
       allowPrivateNetwork: enabledFlag('BEDROCK_ALLOW_PRIVATE_NETWORK'),
     },
     {
       id: 'openai-compat', label: 'OpenAI-compatible API', protocol: 'openai-chat', baseUrl: value('OPENAI_COMPAT_BASE_URL'),
-      model: value('OPENAI_COMPAT_MODEL'), authMode: 'bearer', secret: value('OPENAI_COMPAT_API_KEY'),
-      headers: {}, region: '', awsProfile: '', command: '', source: 'environment',
+      model: value('OPENAI_COMPAT_MODEL'), authMode: 'bearer', secret: secretValue(value('OPENAI_COMPAT_API_KEY')),
+      headers: {}, region: '', awsProfile: '', command: '', credentialCommand: null, credentialCommandHint: null, source: 'environment',
       allowPrivateNetwork: enabledFlag('OPENAI_COMPAT_ALLOW_PRIVATE_NETWORK'),
     },
     {
       id: 'anthropic', label: 'Anthropic API', protocol: 'anthropic-messages', baseUrl: value('ANTHROPIC_BASE_URL', 'https://api.anthropic.com/v1'),
-      model: value('ANTHROPIC_MODEL', config.llm.anthropic.model), authMode: 'x-api-key', secret: value('ANTHROPIC_API_KEY'),
-      headers: {}, region: '', awsProfile: '', command: '', source: 'environment',
+      model: value('ANTHROPIC_MODEL', config.llm.anthropic.model), authMode: 'x-api-key', secret: secretValue(value('ANTHROPIC_API_KEY')),
+      headers: {}, region: '', awsProfile: '', command: '', credentialCommand: null, credentialCommandHint: null, source: 'environment',
       allowPrivateNetwork: enabledFlag('ANTHROPIC_ALLOW_PRIVATE_NETWORK'),
     },
   ];
   return profiles.filter(profile => enabled[profile.id]);
+}
+
+function secretValue(value: string): LlmSecretSource | null {
+  return value ? { value } : null;
 }
 
 function providerForProfile(profile: StoredLlmProfile): LlmProvider {
@@ -504,7 +509,6 @@ function fallbackPublicProfile(provider: LlmProvider, health: LlmProviderHealth)
     model: health.resolvedModel ?? '',
     authMode: 'none',
     hasSecret: false,
-    secretHint: null,
     headers: {},
     region: '',
     awsProfile: '',

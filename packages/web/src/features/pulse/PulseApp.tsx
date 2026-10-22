@@ -19,6 +19,7 @@ import { ConfigEditor } from "./components/ConfigEditor";
 import { PublishSection } from "./components/PublishSection";
 import { ExistingMetrics } from "./components/ExistingMetrics";
 import { useNotices } from "./shell/notifications";
+import { UpdateNotice } from "./shell/UpdateNotice";
 import { Modal } from "./components/ui";
 import "./pulse-remediation.css";
 import "./workflows.css";
@@ -203,6 +204,7 @@ export default function PulseApp() {
           ))}
         </nav>
         <div className="pulse-rail-bottom">
+          <UpdateNotice />
           <LlmBadge />
           <button
             className={`pulse-connection-link ${area === "Connections" ? "active" : ""}`}

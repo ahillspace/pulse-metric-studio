@@ -4,7 +4,7 @@ import type { CompleteOptions, CompleteResult, LlmMessage, LlmProviderHealth } f
 import { LLM_REQUEST_TIMEOUT_MS, LlmProviderError, timeoutDescription } from '../types.js';
 import { assertSafeLlmEndpoint, UnsafeLlmEndpointError } from './network-policy.js';
 import { guardedFetch } from './guarded-fetch.js';
-import { resolveProfileSecret } from './credential.js';
+import { resolveProfileHeaders, resolveProfileSecret } from './credential.js';
 import { readProviderErrorDetail, withProviderDetail } from './error-detail.js';
 
 type Fetch = typeof fetch;
@@ -18,11 +18,13 @@ function envOpenAiProfile(): StoredLlmProfile {
     baseUrl: config.llm.openaiCompat.baseUrl,
     model: config.llm.openaiCompat.model,
     authMode: 'bearer',
-    secret: config.llm.openaiCompat.apiKey,
+    secret: config.llm.openaiCompat.apiKey ? { value: config.llm.openaiCompat.apiKey } : null,
     headers: {},
     region: '',
     awsProfile: '',
     command: '',
+    credentialCommand: null,
+    credentialCommandHint: null,
     allowPrivateNetwork: config.llm.openaiCompat.allowPrivateNetwork,
     source: 'environment',
   };
@@ -36,11 +38,13 @@ function envAnthropicProfile(): StoredLlmProfile {
     baseUrl: config.llm.anthropic.baseUrl,
     model: config.llm.anthropic.model,
     authMode: 'x-api-key',
-    secret: config.llm.anthropic.apiKey,
+    secret: config.llm.anthropic.apiKey ? { value: config.llm.anthropic.apiKey } : null,
     headers: {},
     region: '',
     awsProfile: '',
     command: '',
+    credentialCommand: null,
+    credentialCommandHint: null,
     allowPrivateNetwork: config.llm.anthropic.allowPrivateNetwork,
     source: 'environment',
   };
@@ -61,7 +65,7 @@ export class HttpLlmProvider {
 
   async isConfigured(): Promise<boolean> {
     const requiresSecret = this.profile.authMode === 'bearer' || this.profile.authMode === 'x-api-key';
-    return Boolean(this.profile.baseUrl && this.profile.model && (!requiresSecret || Boolean(this.profile.secret) || Boolean(this.profile.credentialCommand)));
+    return Boolean(this.profile.baseUrl && this.profile.model && (!requiresSecret || this.profile.secret !== null || this.profile.credentialCommand !== null));
   }
 
   async getHealth(): Promise<LlmProviderHealth> {
@@ -99,8 +103,9 @@ export class HttpLlmProvider {
     }
     opts.signal?.throwIfAborted();
     const token = await resolveProfileSecret(this.profile, this.id, this.profile.model, { signal: opts.signal });
+    const extraHeaders = await resolveProfileHeaders(this.profile, this.id, this.profile.model);
     opts.signal?.throwIfAborted();
-    const headers: Record<string, string> = { 'Content-Type': 'application/json', ...this.profile.headers };
+    const headers: Record<string, string> = { 'Content-Type': 'application/json', ...extraHeaders };
     if (this.profile.authMode === 'bearer') headers.Authorization = `Bearer ${token}`;
     if (this.profile.authMode === 'x-api-key') headers['x-api-key'] = token;
     if (protocol === 'anthropic-messages') headers['anthropic-version'] = headers['anthropic-version'] || '2023-06-01';
@@ -133,7 +138,7 @@ export class HttpLlmProvider {
         cause: error,
       });
     }
-    if (!response.ok) throw httpProviderError(response, await readProviderErrorDetail(response, [token, this.profile.secret, ...Object.values(this.profile.headers ?? {})]), this.id, this.profile.model, this.label);
+    if (!response.ok) throw httpProviderError(response, await readProviderErrorDetail(response, [token, ...Object.values(extraHeaders)]), this.id, this.profile.model, this.label);
     const data = await readJsonResponse(response, this.id, this.profile.model);
     const text = responseText(protocol, data);
     if (!text) {
