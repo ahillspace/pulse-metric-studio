@@ -2942,7 +2942,7 @@ dependencies = [
 
 [[package]]
 name = "pulse-metric-studio"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "hmac 0.12.1",
  "keyring",
