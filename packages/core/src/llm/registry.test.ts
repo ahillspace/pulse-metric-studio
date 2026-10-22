@@ -383,42 +383,30 @@ function storedProfile(id: string, protocol: StoredLlmProfile['protocol'], model
     baseUrl: protocol === 'opencode' ? '' : 'https://gateway.example.test/v1',
     model,
     authMode: 'none',
-    secret: '',
+    secret: null,
     headers: {},
     region: '',
     awsProfile: '',
     command: protocol === 'opencode' ? 'opencode' : '',
+    credentialCommand: null,
+    credentialCommandHint: null,
     source: 'saved',
   };
 }
 
-function memoryProfiles(initial: StoredLlmProfile[]): LlmProfileStore {
+type MemoryProfileStore = LlmProfileStore & { get(id: string): StoredLlmProfile | null };
+
+function memoryProfiles(initial: StoredLlmProfile[]): MemoryProfileStore {
   let profiles = [...initial];
   return {
     list: () => [...profiles],
     get: (id) => profiles.find((profile) => profile.id === id) ?? null,
-    save: (input) => {
-      const existing = profiles.find((profile) => profile.id === input.id);
-      const saved: StoredLlmProfile = {
-        id: input.id,
-        label: input.label,
-        protocol: input.protocol,
-        baseUrl: input.baseUrl ?? '',
-        model: input.model ?? '',
-        authMode: input.authMode ?? 'none',
-        secret: input.clearSecret ? '' : input.secret ?? existing?.secret ?? '',
-        headers: input.clearHeaders ? {} : input.headers ?? existing?.headers ?? {},
-        region: input.region ?? '',
-        awsProfile: input.awsProfile ?? '',
-        command: input.command ?? '',
-        allowPrivateNetwork: input.allowPrivateNetwork ?? false,
-        source: 'saved',
-      };
-      profiles = [...profiles.filter((profile) => profile.id !== input.id), saved];
-      return toPublicProfile(saved);
+    save: async (profile) => {
+      const saved: StoredLlmProfile = { ...profile, source: 'saved' };
+      profiles = [...profiles.filter((entry) => entry.id !== profile.id), saved];
+      return saved;
     },
-    delete: (id) => { profiles = profiles.filter((profile) => profile.id !== id); },
-    publicList: () => profiles.map(toPublicProfile),
+    delete: async (id) => { profiles = profiles.filter((profile) => profile.id !== id); },
   };
 }
 

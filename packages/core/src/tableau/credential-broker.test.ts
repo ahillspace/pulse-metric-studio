@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   CREDENTIAL_BROKER_DELETE_PATH,
+  CREDENTIAL_BROKER_LEGACY_DATA_KEY_PATH,
   CREDENTIAL_BROKER_RESOLVE_PATH,
+  CREDENTIAL_BROKER_STORE_PATH,
   CredentialBrokerError,
   createCredentialBrokerClient,
   setCredentialBrokerToken,
@@ -158,4 +160,38 @@ test('rejects oversized requests before contacting the broker', async () => {
     (error: unknown) => error instanceof CredentialBrokerError && error.code === 'unavailable',
   );
   assert.equal(called, false);
+});
+
+test('stores a secret of a named kind and returns its reference', async () => {
+  const bodies: unknown[] = [];
+  const client = createCredentialBrokerClient({
+    env: brokerEnv,
+    fetchImpl: async (input, init) => {
+      assert.equal(String(input), `http://127.0.0.1:49152${CREDENTIAL_BROKER_STORE_PATH}`);
+      bodies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ credentialRef: 'llm_0123' }), { status: 200 });
+    },
+  });
+  assert.equal(await client.store('llm-secret', 'sk-test'), 'llm_0123');
+  assert.deepEqual(bodies, [{ kind: 'llm-secret', secret: 'sk-test' }]);
+});
+
+test('reads the legacy data key until the broker reports it gone', async () => {
+  let status = 200;
+  const methods: string[] = [];
+  const client = createCredentialBrokerClient({
+    env: brokerEnv,
+    fetchImpl: async (input, init) => {
+      assert.equal(String(input), `http://127.0.0.1:49152${CREDENTIAL_BROKER_LEGACY_DATA_KEY_PATH}`);
+      methods.push(String(init?.method));
+      return status === 200
+        ? new Response(JSON.stringify({ key: 'AB'.repeat(32), removed: true }), { status })
+        : new Response(JSON.stringify({ error: 'not_found' }), { status });
+    },
+  });
+  assert.equal(await client.legacyDataKey(), 'ab'.repeat(32));
+  await client.deleteLegacyDataKey();
+  status = 404;
+  assert.equal(await client.legacyDataKey(), null);
+  assert.deepEqual(methods, ['POST', 'DELETE', 'POST']);
 });

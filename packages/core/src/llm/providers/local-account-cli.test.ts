@@ -14,7 +14,7 @@ const createClaudeCodeProvider = (profile: StoredLlmProfile, runtime: CodexRunti
 const codexHelp = '--ignore-user-config --ignore-rules --ephemeral --json --skip-git-repo-check --strict-config --sandbox --model';
 const claudeHelp = '--safe-mode --tools --strict-mcp-config --mcp-config --disable-slash-commands --no-session-persistence --output-format --settings --setting-sources --system-prompt --model --disallowedTools --permission-mode --permission-prompts --no-chrome';
 function profile(protocol: 'codex-cli' | 'claude-code'): StoredLlmProfile {
-  return { id: protocol, label: protocol, protocol, command: protocol === 'codex-cli' ? 'codex' : 'claude', model: 'chosen-model', baseUrl: '', authMode: 'local-account', secret: '', headers: {}, region: '', awsProfile: '', source: 'saved' };
+  return { id: protocol, label: protocol, protocol, command: protocol === 'codex-cli' ? 'codex' : 'claude', model: 'chosen-model', baseUrl: '', authMode: 'local-account', secret: null, credentialCommand: null, credentialCommandHint: null, headers: {}, region: '', awsProfile: '', source: 'saved' };
 }
 function fixture(replies: Array<{ stdout: string; code?: number; stderr?: string; delay?: number }>) {
   const calls: Array<{ file: string; args: string[]; options: SpawnOptionsWithoutStdio; input: string }> = [];

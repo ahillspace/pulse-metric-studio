@@ -3,17 +3,19 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import {
-  adoptOsDataKey,
+  BrokerSecretVault,
   CREDENTIAL_BROKER_TOKEN_ENV,
   config,
   createCredentialBrokerClient,
+  type CredentialBrokerVaultClient,
   setCredentialBrokerToken,
   setCredentialCommandApprover,
+  setSecretVault,
 } from "@pulse-metric-studio/core";
 
 export const DESKTOP_PROTOCOL = 1;
 export const DESKTOP_BODY_LIMIT = 16 * 1024 * 1024;
-export type DesktopStartup = { token: string; protocol: number };
+export type DesktopStartup = { token: string; protocol: number; broker: CredentialBrokerVaultClient };
 
 /** The child owns this OS socket until exit, including graceful drain after parent failure. */
 export async function acquireDesktopOwnership(
@@ -50,18 +52,18 @@ export async function readDesktopStartup(): Promise<
     return undefined;
   if (process.env.PULSE_METRIC_STUDIO_DESKTOP_PIPE !== "1")
     throw new Error("Pulse desktop requires its native launcher.");
-  const startup = await new Promise<DesktopStartup>((resolve, reject) => {
+  const token = await new Promise<string>((resolve, reject) => {
     let input = "";
     const timer = setTimeout(
       () => finish(new Error("Desktop startup handshake timed out.")),
       5000,
     );
-    const finish = (error?: Error, startup?: DesktopStartup) => {
+    const finish = (error?: Error, token?: string) => {
       clearTimeout(timer);
       process.stdin.off("data", receive);
       process.stdin.off("end", ended);
       if (error) reject(error);
-      else resolve(startup!);
+      else resolve(token!);
     };
     const ended = () =>
       finish(new Error("Desktop launcher disconnected during startup."));
@@ -82,7 +84,7 @@ export async function readDesktopStartup(): Promise<
           throw new Error();
         // Module state only: children spawned by this server must never inherit it.
         setCredentialBrokerToken(value.brokerToken);
-        finish(undefined, { token: value.token, protocol: DESKTOP_PROTOCOL });
+        finish(undefined, value.token);
       } catch {
         finish(new Error("Incompatible desktop startup handshake."));
       }
@@ -91,28 +93,18 @@ export async function readDesktopStartup(): Promise<
     process.stdin.once("end", ended);
   });
   await acquireDesktopOwnership(config.dataDir);
-  await useNativeCredentialServices();
-  return startup;
+  return { token, protocol: DESKTOP_PROTOCOL, broker: useNativeCredentialServices() };
 }
 
 /**
- * The native host keeps the local data key in the OS credential store and
+ * The native host saves each secret as its own OS credential store entry and
  * approves credential commands. Both are wired before any request is served.
  */
-async function useNativeCredentialServices(): Promise<void> {
+function useNativeCredentialServices(): CredentialBrokerVaultClient {
   const broker = createCredentialBrokerClient();
   setCredentialCommandApprover((command) => broker.approveCredentialCommand(command));
-  try {
-    const outcome = await adoptOsDataKey(broker);
-    if (outcome === "kept-file")
-      console.warn("The OS credential store holds a different data key; the existing key file stays in use.");
-  } catch (error) {
-    // Before migration the key file still works; after it, saved secrets stay
-    // locked (never re-keyed) until the OS store is available again.
-    console.warn(
-      `The OS credential store could not provide the data key. ${error instanceof Error ? error.message : ""}`.trim(),
-    );
-  }
+  setSecretVault(new BrokerSecretVault(broker));
+  return broker;
 }
 
 const REQUEST_SIGNATURE_WINDOW_MS = 120_000;

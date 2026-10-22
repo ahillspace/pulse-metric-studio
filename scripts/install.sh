@@ -1,12 +1,17 @@
 #!/bin/sh
 # Pulse Metric Studio installer for macOS.
 #
-# One-line install (the repository is private, so this needs the GitHub CLI
-# signed in with an account that can read it):
+# One-line install, if this repository is public:
+#   curl -fsSL https://github.com/sfdc-qbranch-emu/pulse-metric-studio/releases/latest/download/install.sh | sh
+#
+# If it is private, with the GitHub CLI signed in to an account that can read it:
 #   gh release download --repo sfdc-qbranch-emu/pulse-metric-studio --pattern install.sh -O - | sh
 #
 # Pass options through sh -s, for example:
-#   gh release download --repo sfdc-qbranch-emu/pulse-metric-studio --pattern install.sh -O - | sh -s -- uninstall
+#   ... | sh -s -- uninstall
+#
+# The installer records the repository it installed from, and Pulse Metric
+# Studio checks that repository for updates and runs this script to apply them.
 
 set -eu
 
@@ -18,21 +23,35 @@ main() {
     version=${PULSE_METRIC_STUDIO_VERSION:-latest}
     install_dir=${PULSE_METRIC_STUDIO_INSTALL_DIR:-/Applications}
     launch=1
+    update=0
     app_name='Pulse Metric Studio.app'
+    app_path=''
     process_name='pulse-metric-studio'
     bundle_id='com.ahillspace.pulsemetricstudio'
+    data_dir="${HOME}/Library/Application Support/${bundle_id}"
+    # The app runs this script with the minimal PATH that Finder gives it.
+    PATH="${PATH}:/opt/homebrew/bin:/usr/local/bin"
+    export PATH
 
     usage() {
-        printf '%s\n' 'Usage: install.sh [install|uninstall] [--version VERSION] [--install-dir DIRECTORY] [--repo OWNER/NAME] [--no-launch]'
+        printf '%s\n' 'Usage: install.sh [install|uninstall|latest-version] [--version VERSION] [--install-dir DIRECTORY] [--repo OWNER/NAME] [--no-launch]'
+        printf '%s\n' '  latest-version           print the version of the latest release and exit'
         printf '%s\n' '  --version VERSION        install an exact release such as 0.1.0; default: latest'
         printf '%s\n' '  --install-dir DIRECTORY  where Pulse Metric Studio.app goes; default: /Applications'
         printf '%s\n' '  --repo OWNER/NAME        release repository; default: sfdc-qbranch-emu/pulse-metric-studio'
         printf '%s\n' '  --no-launch              do not open Pulse Metric Studio after installing'
+        printf '%s\n' '  --update                 used by Pulse Metric Studio when it updates itself'
         printf '%s\n' 'Uninstall removes the app but keeps your connections, drafts, and publication history.'
     }
 
     fail() {
         printf 'Pulse Metric Studio installer error: %s\n' "$1" >&2
+        if [ "$update" -eq 1 ]; then
+            # The app closed itself for this update: tell it why the update
+            # did not happen, and bring it back.
+            { mkdir -p "$data_dir" && printf '%s\n' "$1" > "${data_dir}/update-error"; } || true
+            if [ -d "$app_path" ]; then open "$app_path" || true; fi
+        fi
         exit 1
     }
 
@@ -42,7 +61,7 @@ main() {
 
     while [ "$#" -gt 0 ]; do
         case "$1" in
-            install|uninstall)
+            install|uninstall|latest-version)
                 action=$1
                 shift
                 ;;
@@ -63,6 +82,11 @@ main() {
                 ;;
             --no-launch)
                 launch=0
+                shift
+                ;;
+            --update)
+                update=1
+                launch=1
                 shift
                 ;;
             -h|--help)
@@ -118,12 +142,10 @@ main() {
         else
             info "Pulse Metric Studio is not installed at ${app_path}."
         fi
+        rm -f "${data_dir}/update-channel"
         info "Your data is kept in ~/Library/Application Support/${bundle_id}, and saved Tableau tokens stay in your Keychain."
         exit 0
     fi
-
-    command -v gh >/dev/null 2>&1 || fail 'The GitHub CLI (gh) is required. Install it with: brew install gh'
-    gh auth status --hostname github.com >/dev/null 2>&1 || fail 'The GitHub CLI is not signed in. Run: gh auth login'
 
     case "$(uname -m)" in
         arm64) arch='aarch64' ;;
@@ -131,11 +153,40 @@ main() {
         *) fail "Unsupported Mac architecture: $(uname -m)" ;;
     esac
 
+    # A public repository serves its releases over plain HTTPS. Anything else
+    # (a private repository, or one without releases yet) needs the GitHub CLI.
+    public_latest_tag() {
+        url=$(curl -fsSIL --max-time 30 -o /dev/null -w '%{url_effective}' \
+            "https://github.com/${repository}/releases/latest" 2>/dev/null) || return 1
+        case $url in
+            */releases/tag/v*) printf '%s\n' "${url##*/}" ;;
+            *) return 1 ;;
+        esac
+    }
+
+    if latest=$(public_latest_tag); then
+        access='https'
+    else
+        access='gh'
+        latest=''
+        command -v gh >/dev/null 2>&1 \
+            || fail "${repository} has no public release, and the GitHub CLI (gh) that private repositories need is not installed. Install it with: brew install gh"
+        gh auth status --hostname github.com >/dev/null 2>&1 || fail 'The GitHub CLI is not signed in. Run: gh auth login'
+    fi
+
     if [ "$version" = 'latest' ]; then
-        tag=$(gh release view --repo "$repository" --json tagName --jq .tagName 2>/dev/null) \
-            || fail "Could not find the latest release of ${repository}. Check that your GitHub account can open https://github.com/${repository}."
+        if [ -z "$latest" ]; then
+            latest=$(gh release view --repo "$repository" --json tagName --jq .tagName 2>/dev/null) \
+                || fail "Could not find the latest release of ${repository}. Check that your GitHub account can open https://github.com/${repository}."
+        fi
+        tag=$latest
     else
         tag="v${version#v}"
+    fi
+
+    if [ "$action" = 'latest-version' ]; then
+        printf '%s\n' "${tag#v}"
+        exit 0
     fi
 
     work_dir=$(mktemp -d "${TMPDIR:-/tmp}/pulse-metric-studio-install.XXXXXX")
@@ -148,21 +199,22 @@ main() {
     }
     trap cleanup EXIT INT TERM
 
+    dmg_name="Pulse-Metric-Studio_${tag#v}_${arch}.dmg"
+    dmg_path="${work_dir}/${dmg_name}"
     info "Downloading Pulse Metric Studio ${tag} for ${arch}..."
-    gh release download "$tag" --repo "$repository" --dir "$work_dir" \
-        --pattern "Pulse-Metric-Studio_*_${arch}.dmg" --pattern 'checksums.txt' >/dev/null 2>&1 \
-        || fail "Could not download Pulse Metric Studio ${tag} from ${repository}."
-
-    dmg_path=''
-    for candidate in "$work_dir"/Pulse-Metric-Studio_*_"${arch}".dmg; do
-        [ -f "$candidate" ] || continue
-        [ -z "$dmg_path" ] || fail 'The release contains more than one matching disk image.'
-        dmg_path=$candidate
-    done
-    [ -n "$dmg_path" ] || fail "Release ${tag} has no macOS ${arch} disk image."
+    if [ "$access" = 'https' ]; then
+        for asset in "$dmg_name" checksums.txt; do
+            curl -fsSL -o "${work_dir}/${asset}" "https://github.com/${repository}/releases/download/${tag}/${asset}" \
+                || fail "Could not download ${asset} for Pulse Metric Studio ${tag} from ${repository}."
+        done
+    else
+        gh release download "$tag" --repo "$repository" --dir "$work_dir" \
+            --pattern "$dmg_name" --pattern 'checksums.txt' >/dev/null 2>&1 \
+            || fail "Could not download Pulse Metric Studio ${tag} from ${repository}."
+    fi
+    [ -f "$dmg_path" ] || fail "Release ${tag} has no macOS ${arch} disk image."
     [ -f "${work_dir}/checksums.txt" ] || fail "Release ${tag} has no checksums.txt, so the download cannot be verified."
 
-    dmg_name=$(basename "$dmg_path")
     verify_checksum "$dmg_path"
     info 'Checksum verified.'
 
@@ -197,11 +249,16 @@ main() {
         fail "Could not move Pulse Metric Studio into ${install_dir}. The previous version was put back."
     fi
     rm -rf "$old_app"
-    # gh does not quarantine downloads, but strip the flag anyway so Gatekeeper
+    # Neither gh nor curl quarantines downloads, but strip the flag anyway so Gatekeeper
     # never blocks the self-signed app on first launch.
     xattr -dr com.apple.quarantine "$app_path" >/dev/null 2>&1 || true
 
     info "Installed Pulse Metric Studio ${tag} to ${app_path}."
+
+    # Pulse Metric Studio checks this repository for updates.
+    rm -f "${data_dir}/update-error"
+    { mkdir -p "$data_dir" && printf '%s\n' "$repository" > "${data_dir}/update-channel"; } \
+        || info "Could not record ${repository} for in-app updates. Run this installer again to update."
 
     if [ "$launch" -eq 1 ]; then
         open "$app_path"

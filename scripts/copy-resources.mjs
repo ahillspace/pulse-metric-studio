@@ -27,6 +27,17 @@ export function copyNodeRuntime(resourcesDir, nodeExecutable = process.execPath,
   return destination;
 }
 
+/** The app runs the installer it shipped with to update itself. */
+export function copyInstallers(resourcesDir, rootDir = root) {
+  const installerDir = path.join(resourcesDir, 'installer');
+  fs.mkdirSync(installerDir, { recursive: true });
+  return ['install.sh', 'install.ps1'].map((script) => {
+    const destination = path.join(installerDir, script);
+    fs.copyFileSync(path.join(rootDir, 'scripts', script), destination);
+    return destination;
+  });
+}
+
 export async function composeResources(rootDir = root) {
   assertSupportedNode();
   assertMacRuntime();
@@ -36,7 +47,7 @@ export async function composeResources(rootDir = root) {
     throw new Error(`Missing ${webSource}. Run npm run build before packaging.`);
   }
 
-  for (const directory of ['server', 'web', 'runtime']) {
+  for (const directory of ['server', 'web', 'runtime', 'installer']) {
     fs.rmSync(path.join(resourcesDir, directory), { recursive: true, force: true });
   }
 
@@ -44,6 +55,9 @@ export async function composeResources(rootDir = root) {
   fs.mkdirSync(path.dirname(webDestination), { recursive: true });
   fs.cpSync(webSource, webDestination, { recursive: true });
   console.log('copied packages/web/dist -> src-tauri/resources/web/dist');
+
+  copyInstallers(resourcesDir, rootDir);
+  console.log('copied scripts/install.sh and scripts/install.ps1 -> src-tauri/resources/installer');
 
   const runtime = copyNodeRuntime(resourcesDir);
   console.log(`copied Node runtime -> ${path.relative(rootDir, runtime)}`);

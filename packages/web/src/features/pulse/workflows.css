@@ -90,6 +90,7 @@
 .pulse-nav-collapsed .pulse-navigation-rail nav span,
 .pulse-nav-collapsed .pulse-connection-link > span,
 .pulse-nav-collapsed .pulse-rail-bottom .llm-settings-button > span,
+.pulse-nav-collapsed .pulse-update-button > span,
 .pulse-nav-collapsed .pulse-navigation-toggle span,
 .pulse-nav-collapsed .pulse-disconnect {
   display: none;
@@ -155,6 +156,19 @@
   width: 6px;
   height: 6px;
   box-shadow: none;
+}
+.pulse-rail-bottom > .pulse-update-button,
+.pulse-rail-bottom > .pulse-update-button svg {
+  color: var(--green);
+}
+.pulse-rail-bottom > .pulse-update-button:hover {
+  background: rgba(61, 220, 151, 0.1);
+  color: var(--green);
+}
+.pulse-app .update-error {
+  padding: 9px 12px;
+  border-left: 3px solid var(--red);
+  background: rgba(255, 107, 94, 0.06);
 }
 .pulse-navigation-rail .pulse-disconnect {
   font-size: 12px;
@@ -1244,7 +1258,8 @@
   background: #202022;
 }
 @media (max-width: 820px) {
-  .pulse-rail-bottom > .llm-settings-button > span:not(.llm-readiness-dot) {
+  .pulse-rail-bottom > .llm-settings-button > span:not(.llm-readiness-dot),
+  .pulse-rail-bottom > .pulse-update-button > span {
     display: none;
   }
 }

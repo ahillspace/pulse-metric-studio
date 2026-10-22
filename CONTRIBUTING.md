@@ -37,15 +37,18 @@ Desktop and live Tableau workflows need manual verification on the platforms you
 
 ## Publish a release
 
-Releases are assembled locally and published by hand.
+Releases are assembled locally and published by hand, to two separate channels from the same build.
+Internal releases go to `sfdc-qbranch-emu/pulse-metric-studio` (private), and public releases to `ahillspace/pulse-metric-studio`.
+The installer records the repository it installed from, and the app only ever updates from that repository, so the two channels never mix.
 
-1. Bump the version in `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`.
+1. Bump the version in `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, and `src-tauri/tauri.conf.json`.
 2. Build the macOS DMG on a Mac with `APPLE_SIGNING_IDENTITY="<identity>" npm run tauri:build`.
 3. Take the Windows installer from the CI run for the same commit: the `native` job uploads it as the `pulse-metric-studio-windows-2022-x64` artifact. Download it with `gh run download <run-id> --name pulse-metric-studio-windows-2022-x64 --dir windows-artifacts`.
-4. Run `sh scripts/stage-release.sh release-assets "windows-artifacts/nsis/Pulse Metric Studio_X.Y.Z_x64-setup.exe"`, which renames the installers, adds the install scripts, and writes `checksums.txt`.
-   The staged install scripts default to `sfdc-qbranch-emu/pulse-metric-studio`; add `--repo OWNER/NAME` before the output directory to publish elsewhere.
-5. Upload a draft with `gh release create vX.Y.Z release-assets/* --draft --repo sfdc-qbranch-emu/pulse-metric-studio`, then publish it with `gh release edit vX.Y.Z --draft=false --repo sfdc-qbranch-emu/pulse-metric-studio`.
-   The one-line installers install the latest published release, so drafts stay invisible to them.
+4. Stage the release once per channel, so each copy of the install scripts defaults to its own repository:
+   `sh scripts/stage-release.sh --repo OWNER/NAME release-assets-NAME "windows-artifacts/nsis/Pulse Metric Studio_X.Y.Z_x64-setup.exe"`.
+   This renames the installers, adds the install scripts, and writes `checksums.txt`.
+5. For each channel, upload a draft with `gh release create vX.Y.Z release-assets-NAME/* --draft --repo OWNER/NAME`, then publish it with `gh release edit vX.Y.Z --draft=false --latest --repo OWNER/NAME`.
+   The one-line installers and the in-app update check use the latest published release, so drafts stay invisible to them.
 
 `checksums.txt` confirms a download is intact; it does not prove who published it.
 
@@ -53,7 +56,7 @@ Releases are assembled locally and published by hand.
 
 `bundle.macOS.signingIdentity` in `src-tauri/tauri.conf.json` stays at the ad-hoc `"-"` identity as a safe default.
 Set `APPLE_SIGNING_IDENTITY` to sign with a real identity; the maintainer's builds use the same self-signed identity as the maintainer's other apps.
-A stable identity matters here because macOS ties Keychain access to the app's signature: with it, approving Keychain access once survives updates.
+Keychain access does not depend on the signature: the app saves each secret through the system `security` tool, so Keychain trusts that tool rather than the app, and updates never ask again.
 Notarization additionally needs an Apple Developer ID; without it, a browser download hits the Gatekeeper prompt once, which the one-line installer avoids.
 Windows installers are unsigned, so a browser download shows a SmartScreen warning.
 

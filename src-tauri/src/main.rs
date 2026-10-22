@@ -2,6 +2,7 @@
 
 mod credential_broker;
 mod pulse_transport;
+mod updater;
 
 use std::collections::HashSet;
 use std::fs::OpenOptions;
@@ -24,6 +25,7 @@ use credential_broker::{
     tableau_replace_credential, tableau_store_credential, CredentialBrokerHandle,
     CredentialContext,
 };
+use updater::{pulse_update_apply, pulse_update_status, Updater};
 use uuid::Uuid;
 
 struct ServerHandle(Mutex<Option<Child>>);
@@ -67,7 +69,10 @@ fn pulse_shutdown(
             state.approved.store(true, Ordering::Release);
             window.app_handle().exit(0);
         }
-        ShutdownAction::Cancel => state.requested.store(false, Ordering::Release),
+        ShutdownAction::Cancel => {
+            state.requested.store(false, Ordering::Release);
+            window.app_handle().state::<Updater>().cancel();
+        }
     }
     Ok(())
 }
@@ -257,7 +262,9 @@ fn main() {
             tableau_replace_credential,
             tableau_delete_credential,
             pulse_api_request,
-            pulse_shutdown
+            pulse_shutdown,
+            pulse_update_status,
+            pulse_update_apply
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -326,6 +333,7 @@ fn main() {
             let credential_broker_token = credential_broker.token().to_string();
             app.manage(credential_context);
             app.manage(credential_broker);
+            app.manage(Updater::new(app.handle(), &data_directory, &identity.log_slug));
             log_line(
                 app.handle(),
                 &identity,
@@ -427,6 +435,8 @@ fn main() {
             let _ = window.set_focus();
             log_line(app.handle(), &identity, "window created");
             monitor_pulse_child(app.handle().clone());
+            let (update_log_app, update_log_identity) = (app.handle().clone(), identity.clone());
+            Updater::start(app.handle().clone(), move |message| log_line(&update_log_app, &update_log_identity, message));
             Ok(())
         })
         .build(tauri::generate_context!());
@@ -453,7 +463,12 @@ fn main() {
                 let _ = app_handle.emit_to("main", "pulse-shutdown-requested", ());
             }
         }
-        RunEvent::Exit => stop_services(app_handle),
+        RunEvent::Exit => {
+            stop_services(app_handle);
+            if let Err(error) = app_handle.state::<Updater>().launch_pending() {
+                log_line(app_handle, &DesktopIdentity::from_app(app_handle), &format!("updates: {error}"));
+            }
+        }
         _ => {}
     });
 }

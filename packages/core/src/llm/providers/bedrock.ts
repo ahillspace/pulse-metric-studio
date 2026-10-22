@@ -6,7 +6,7 @@ import type { CompleteOptions, CompleteResult, LlmMessage, LlmProviderHealth } f
 import { LLM_REQUEST_TIMEOUT_MS, LlmProviderError, timeoutDescription } from '../types.js';
 import { assertSafeLlmEndpoint, UnsafeLlmEndpointError } from './network-policy.js';
 import { guardedFetch, publicOnlyAgent } from './guarded-fetch.js';
-import { resolveProfileSecret } from './credential.js';
+import { resolveProfileHeaders, resolveProfileSecret } from './credential.js';
 import { readProviderErrorDetail, withProviderDetail } from './error-detail.js';
 
 type EndpointPolicy = (endpoint: string, allowPrivateNetwork: boolean) => Promise<void>;
@@ -19,11 +19,13 @@ function envBedrockProfile(): StoredLlmProfile {
     baseUrl: config.llm.bedrock.endpointOverride,
     model: config.llm.bedrock.modelId,
     authMode: 'aws',
-    secret: '',
+    secret: null,
     headers: {},
     region: config.llm.bedrock.region,
     awsProfile: config.llm.bedrock.awsProfile,
     command: '',
+    credentialCommand: null,
+    credentialCommandHint: null,
     allowPrivateNetwork: config.llm.bedrock.allowPrivateNetwork,
     source: 'environment',
   };
@@ -52,7 +54,7 @@ export class BedrockProvider {
       return { installed: true, configured: false, healthy: false, reasonCode: 'not_configured', reason: 'AWS region and model are required.', resolvedModel: this.profile.model || null };
     }
     if (this.profile.authMode === 'bearer') {
-      const configured = Boolean(this.profile.secret) || Boolean(this.profile.credentialCommand);
+      const configured = this.profile.secret !== null || this.profile.credentialCommand !== null;
       return {
         installed: true,
         configured,
@@ -140,6 +142,7 @@ export class BedrockProvider {
     }
     opts.signal?.throwIfAborted();
     const token = await resolveProfileSecret(this.profile, this.id, this.profile.model, { signal: opts.signal });
+    const extraHeaders = await resolveProfileHeaders(this.profile, this.id, this.profile.model);
     opts.signal?.throwIfAborted();
     let response: Response;
     try {
@@ -147,7 +150,7 @@ export class BedrockProvider {
       const send = this.fetchImpl ?? guardedFetch(this.profile.allowPrivateNetwork ?? false);
       response = await send(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...this.profile.headers, Authorization: `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json', ...extraHeaders, Authorization: `Bearer ${token}` },
         body: JSON.stringify({
           system: opts.system ? [{ text: opts.system }] : undefined,
           messages: opts.messages.map((message) => ({
@@ -179,7 +182,7 @@ export class BedrockProvider {
     if (!response.ok) {
       const requestId = response.headers.get('x-amzn-requestid');
       const reference = requestId && /^[a-z0-9._:-]{1,160}$/i.test(requestId) ? requestId : undefined;
-      const detail = await readProviderErrorDetail(response, [token, this.profile.secret, ...Object.values(this.profile.headers ?? {})]);
+      const detail = await readProviderErrorDetail(response, [token, ...Object.values(extraHeaders)]);
       throw new LlmProviderError({
         code: response.status === 401 || response.status === 403 ? 'provider_authentication' : response.status === 429 ? 'provider_quota' : response.status >= 500 ? 'provider_unavailable' : 'provider_execution',
         message: withProviderDetail(`Amazon Bedrock request failed with HTTP ${response.status}.`, detail),

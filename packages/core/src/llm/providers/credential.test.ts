@@ -34,7 +34,7 @@ test('cancelling native credential approval never starts the command afterward',
   const controller = new AbortController();
   let calls = 0;
   try {
-    const pending = resolveProfileSecret({ credentialCommand: 'mint' }, 'provider', 'model', {
+    const pending = resolveProfileSecret({ secret: null, credentialCommand: { value: 'mint' } }, 'provider', 'model', {
       runner: async () => { calls++; return 'token'; }, signal: controller.signal,
     });
     const rejected = assert.rejects(pending, { name: 'AbortError' });
@@ -98,7 +98,7 @@ test('a runner rejection propagates from resolveCredentialCommand', async () => 
 test('resolveProfileSecret prefers the credential command over a static secret', async () => {
   const runner = async () => 'MINTED-TOKEN';
   const token = await resolveProfileSecret(
-    { secret: 'static-secret', credentialCommand: 'mint' },
+    { secret: { value: 'static-secret' }, credentialCommand: { value: 'mint' } },
     'provider',
     'model',
     { runner },
@@ -111,7 +111,7 @@ test('resolveProfileSecret trims the static secret when no credential command is
     throw new Error('runner must not run');
   };
   const token = await resolveProfileSecret(
-    { secret: '  static-secret  ', credentialCommand: '' },
+    { secret: { value: '  static-secret  ' }, credentialCommand: null },
     'provider',
     'model',
     { runner },

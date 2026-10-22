@@ -22,7 +22,8 @@
     "resources": [
       "resources/server",
       "resources/web",
-      "resources/runtime"
+      "resources/runtime",
+      "resources/installer"
     ],
     "windows": {
       "webviewInstallMode": {
