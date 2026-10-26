@@ -2,8 +2,8 @@ import React from 'react';
 import type { LlmAuthMode, LlmProfilePublic, LlmProtocol } from '@pulse-metric-studio/shared';
 
 export const PROVIDER_CHOICES = [
-  { id: 'codex', label: 'Codex account', access: 'Current Codex CLI account', description: 'Use your account signed in through the installed Codex CLI. Usage and charges follow your account settings.', protocol: 'codex-cli', authMode: 'local-account', baseUrl: '', command: 'codex', modelMode: 'manual' },
-  { id: 'claude', label: 'Claude account', access: 'Current Claude Code account', description: 'Run your installed Claude Code with its signed-in account. Usage and charges follow your account settings, including enabled usage credits.', protocol: 'claude-code', authMode: 'local-account', baseUrl: '', command: 'claude', modelMode: 'manual' },
+  { id: 'codex', label: 'Codex account', access: 'Current Codex CLI account', description: 'Run Codex with your launch options and native configuration. Usage and charges follow the credentials and provider configured in your CLI.', protocol: 'codex-cli', authMode: 'local-account', baseUrl: '', command: 'codex', modelMode: 'manual' },
+  { id: 'claude', label: 'Claude account', access: 'Current Claude Code account', description: 'Run Claude Code with your launch options and native configuration. Usage and charges follow your CLI settings, including enabled usage credits.', protocol: 'claude-code', authMode: 'local-account', baseUrl: '', command: 'claude', modelMode: 'manual' },
   { id: 'opencode', label: 'OpenCode', access: 'Configured accounts', description: 'Use accounts and models configured in OpenCode, including subscription access supported by OpenCode. Direct subscription sign-in is not available here.', protocol: 'opencode', authMode: 'none', baseUrl: '', command: 'opencode', modelMode: 'catalog' },
   { id: 'openai', label: 'OpenAI-compatible API', access: 'API key and endpoint', description: 'Use an OpenAI API key or a compatible API gateway. A ChatGPT subscription does not provide an API key.', protocol: 'openai-chat', authMode: 'bearer', baseUrl: 'https://api.openai.com/v1', command: '', modelMode: 'manual' },
   { id: 'anthropic', label: 'Anthropic API', access: 'API key', description: 'Use an Anthropic API key to access Claude models. API billing is separate from your Claude subscription.', protocol: 'anthropic-messages', authMode: 'x-api-key', baseUrl: 'https://api.anthropic.com/v1', command: '', modelMode: 'manual' },
@@ -63,7 +63,7 @@ export function newProviderId(base: string, profiles: Pick<LlmProfilePublic, 'id
 export function ProviderSetupChoices({ onChoose }: { onChoose: (choice: ProviderChoice) => void }) {
   return <section className="llm-setup-choices" aria-labelledby="llm-setup-heading">
     <h2 id="llm-setup-heading">Choose an assistant provider</h2>
-    <p className="section-hint">Use an installed CLI account or add an API provider. Sign in through the provider's own terminal tools.</p>
+    <p className="section-hint">Use an installed CLI or add an API provider. Local providers inherit your CLI configuration and launch options.</p>
     <div className="llm-choice-grid">{PROVIDER_CHOICES.map(choice => <button type="button" className="llm-choice" key={choice.id} onClick={() => onChoose(choice)}>
       <strong>{choice.label}</strong><span>{choice.access}</span><small>{choice.description}</small>
     </button>)}</div>

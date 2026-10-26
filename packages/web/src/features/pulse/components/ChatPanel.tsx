@@ -155,9 +155,10 @@ export function ChatPanel({ collapsed = false }: { collapsed?: boolean }) {
         <details className="pulse-assistant-disclosure">
           <summary>About this assistant</summary>
           <p>
-            Your AI provider receives field metadata, metric settings, and this
-            conversation. Row data and credentials are not included. Proposed
-            changes require your acceptance.
+            The app sends field metadata, metric settings, and this conversation
+            to your AI provider. Local agents can retrieve additional data and
+            act through their configured tools. Draft proposals require your
+            acceptance; direct tool actions take effect outside app review.
           </p>
         </details>
       </div>

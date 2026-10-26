@@ -228,7 +228,7 @@ export function LlmBadge() {
         <span className="sr-only">{readinessLabel}</span>
       </button>
       {open && (
-        <WorkbenchModal title="Assistant provider settings" onClose={() => setOpen(false)}>
+        <WorkbenchModal className="llm-settings-modal" title="Assistant provider settings" onClose={() => setOpen(false)}>
           <p className="section-hint">Configure a local CLI account or an API provider, test its connection, then select it for Pulse Metric Studio.</p>
           <div className="llm-settings-layout">
             <fieldset className="llm-profile-list" aria-label="Saved providers" disabled={busy}>
@@ -276,6 +276,7 @@ export function ProfileEditor({
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState<string | null>(null);
   const modelRequestSequence = useRef(0);
+  const initialModelDefinition = useRef(existing ? { protocol: form.protocol, command: form.command } : null);
   const set = <K extends keyof ProfileForm>(key: K, value: ProfileForm[K]) => setForm({ ...form, [key]: value });
   const http = ['openai-chat', 'openai-responses', 'anthropic-messages'].includes(form.protocol);
   const choice = providerChoice(form.protocol);
@@ -294,12 +295,13 @@ export function ProfileEditor({
     && (catalogSelection ? selectedModelIsCurrent && !modelsLoading && !modelsError : form.model.trim())
     && (!http || form.baseUrl.trim()),
   );
-  const modelOptions = buildModelOptions(modelCatalog?.models ?? [], form.model);
+  const modelOptions = modelCatalog ? buildModelOptions(modelCatalog.models, form.model)
+    : form.model.trim() ? [{ id: form.model, label: form.model, unavailable: false }] : [];
 
-  const loadModels = useCallback(async () => {
+  const loadModels = useCallback(async (protocol: LlmProtocol, command: string) => {
     const requestSequence = ++modelRequestSequence.current;
     setModelResponse(null);
-    if (!localCli) {
+    if (!providerChoice(protocol).command) {
       setModelsError(null);
       setModelsLoading(false);
       return;
@@ -307,17 +309,25 @@ export function ProfileEditor({
     setModelsLoading(true);
     setModelsError(null);
     try {
-      const catalog = await llmApi.setupModels(form.protocol, form.command);
-      if (requestSequence === modelRequestSequence.current) setModelResponse({ command: form.command, catalog });
+      const catalog = await llmApi.setupModels(protocol, command);
+      if (requestSequence === modelRequestSequence.current) setModelResponse({ command, catalog });
     } catch (error) {
       if (requestSequence === modelRequestSequence.current) setModelsError(error instanceof Error ? error.message : String(error));
     } finally {
       if (requestSequence === modelRequestSequence.current) setModelsLoading(false);
     }
-  }, [form.protocol, form.command, localCli]);
+  }, []);
 
   useEffect(() => {
-    void loadModels();
+    modelRequestSequence.current += 1;
+    setModelResponse(null);
+    setModelsError(null);
+    setModelsLoading(false);
+  }, [form.protocol, form.command]);
+
+  useEffect(() => {
+    const initial = initialModelDefinition.current;
+    if (initial) void loadModels(initial.protocol, initial.command);
     return () => { modelRequestSequence.current += 1; };
   }, [loadModels]);
 
@@ -334,11 +344,11 @@ export function ProfileEditor({
       <p className="section-hint">{providerDescription(form.protocol, form.authMode)}</p>
       <div className="llm-form-grid">
         <label>Display name<input value={form.label} onChange={(event) => set('label', event.target.value)} placeholder={choice.label} /></label>
-        {localCli && <label>CLI executable<input value={form.command} onChange={(event) => set('command', event.target.value)} placeholder={choice.command} autoCorrect="off" autoCapitalize="off" spellCheck={false} /><span className="section-hint">Enter the command name or its full executable path.</span></label>}
+        {localCli && <label className="full">Launch command<input value={form.command} onChange={(event) => set('command', event.target.value)} placeholder={choice.command} autoCorrect="off" autoCapitalize="off" spellCheck={false} /><span className="section-hint">Enter an executable and prefix options, for example <code>{form.protocol === 'codex-cli' ? 'codex --sandbox read-only' : form.protocol === 'claude-code' ? 'claude --safe-mode' : 'opencode'}</code>. The app adds headless, model, and response-format options. Quote paths or arguments containing spaces. Shell expansion is unavailable.</span></label>}
         {(http || bedrock) && <label className="full">Endpoint<input value={form.baseUrl} onChange={(event) => set('baseUrl', event.target.value)} placeholder="https://gateway.example.com/v1" /></label>}
         {catalogSelection ? (
           <>
-            <label>
+            <label className="full">
               Model
               <select value={form.model} disabled={modelsLoading} onChange={(event) => set('model', event.target.value)}>
                 <option value="" disabled>Select a model</option>
@@ -346,18 +356,19 @@ export function ProfileEditor({
               </select>
             </label>
             <div className="full llm-model-catalog-status" role="status">
-              {modelsLoading ? `Loading models from ${choice.label}...` : modelsError ? `Models could not be loaded: ${modelsError}` : modelCatalog?.models.length ? `${modelCatalog.models.length} current model${modelCatalog.models.length === 1 ? '' : 's'} reported by ${choice.label}.` : `${choice.label} reported no current models.`}
-              {!modelsLoading && <button className="btn small" type="button" onClick={() => void loadModels()}>Reload models</button>}
+              {modelsLoading ? `Loading models from ${choice.label}...` : modelsError ? `Models could not be loaded: ${modelsError}` : !modelCatalog ? 'Reload models to check this launch command.' : modelCatalog.models.length ? `${modelCatalog.models.length} current model${modelCatalog.models.length === 1 ? '' : 's'} reported by ${choice.label}.` : `${choice.label} reported no current models.`}
+              {!modelsLoading && <button className="btn small" type="button" onClick={() => void loadModels(form.protocol, form.command)}>Reload models</button>}
             </div>
           </>
         ) : <label>Model<input value={form.model} onChange={(event) => set('model', event.target.value)} placeholder={form.protocol === 'claude-code' ? 'For example, sonnet' : 'Provider model ID'} />{localAccount && <span className="section-hint">No supported model catalog is available. Enter a model ID or alias supported by your CLI account.</span>}</label>}
         {localCli && <section className="full llm-account-setup" aria-label="CLI setup">
-          <p className="section-hint">Check setup detects the installed CLI and its current account configuration. It does not send a model request.</p>
-          {localAccount && <p className="section-hint">Sign in through the provider's own terminal flow: <code>{form.protocol === 'codex-cli' ? 'codex login' : 'claude auth login'}</code>. Pulse does not sign you in or out.</p>}
+          <p className="section-hint">Local providers inherit your CLI credentials, instructions, tools, skills, hooks, and MCP servers unless your launch options change them. Tool actions take effect directly, outside draft review.</p>
+          <p className="section-hint">Check setup verifies installation and native CLI configuration. It does not send a model request.</p>
+          {localAccount && <p className="section-hint">Configure authentication through your CLI, for example <code>{form.protocol === 'codex-cli' ? 'codex login' : 'claude auth login'}</code>. Pulse does not sign you in or out or change your billing route.</p>}
           <button className="btn" type="button" onClick={() => void onCheck()}>Check setup</button>
           {detectedSetup && <div className="llm-setup-result" role="status">
             <span>CLI: {detectedSetup.installed ? 'Installed' : 'Not found'}</span>
-            <span>{localAccount ? 'Account' : 'Configuration'}: {detectedSetup.configured ? 'Configured in CLI' : 'Not configured'}</span>
+            <span>Configuration: {detectedSetup.configured ? 'Ready for test' : 'Not configured'}</span>
             <p>{detectedSetup.reason ?? 'Setup detected. Test the connection to verify a model response.'}</p>
           </div>}
         </section>}

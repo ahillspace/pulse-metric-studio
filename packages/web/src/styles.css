@@ -720,30 +720,6 @@ tr.flash-apply td { animation: flashRow 900ms ease-out; }
 .celebrate-line { color: var(--cyan); font-weight: 600; letter-spacing: 0.02em; margin: 4px 0 10px; }
 .section-hint.warn { color: #f59a4a; }
 
-/* ============ shared assistant provider settings ============ */
-.llm-settings-layout { display: grid; grid-template-columns: minmax(170px, 0.7fr) minmax(0, 2fr); gap: 18px; min-height: 350px; }
-.llm-profile-list { display: flex; flex-direction: column; gap: 8px; }
-.llm-profile-card { display: flex; flex-direction: column; gap: 4px; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-md); background: rgba(255, 255, 255, 0.02); color: var(--text); text-align: left; }
-.llm-profile-card.active { border-color: var(--cyan-dim); background: var(--cyan-glow); }
-.llm-profile-card span { color: var(--text-faint); font-size: 10.5px; overflow-wrap: anywhere; }
-.llm-health.healthy { color: var(--green); }
-.llm-health.unhealthy { color: var(--red); }
-.llm-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.llm-form-grid label { display: flex; flex-direction: column; gap: 5px; color: var(--text-dim); font-size: 11.5px; }
-.llm-form-grid .full { grid-column: 1 / -1; }
-.llm-clear-secret { flex-direction: row !important; align-items: center; }
-.llm-clear-secret input { width: auto; }
-.llm-editor-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
-.llm-model-catalog-status { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--text-faint); font-size: 10.5px; }
-.llm-feedback { margin-top: 14px; padding: 9px 12px; border-left: 3px solid var(--green); background: rgba(61, 220, 151, 0.06); }
-.llm-feedback.error { border-left-color: var(--red); background: rgba(255, 107, 94, 0.06); }
-
-@media (max-width: 1050px) { .llm-settings-layout { grid-template-columns: 1fr; } }
-@media (max-width: 700px) {
-  .llm-form-grid { grid-template-columns: 1fr; }
-  .llm-form-grid .full { grid-column: auto; }
-}
-
 @media (max-width: 800px) {
   .sidebar { display: none; }
   .main-col { padding: 16px 14px 32px; }

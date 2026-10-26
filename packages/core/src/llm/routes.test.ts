@@ -34,7 +34,14 @@ test('local account profiles accept explicit models and reject cloud credentials
     }
     assert.equal(LlmProfileWriteSchema.safeParse({ ...profile, model: '' }).success, false);
     assert.equal(LlmProfileWriteSchema.safeParse({ ...profile, authMode: 'bearer' }).success, false);
-    assert.equal(LlmProfileWriteSchema.safeParse({ ...profile, command: 'other-cli' }).success, false);
+    for (const launch of ['other-cli', 'other-cli --config "native settings.json"', 'pwsh -File "agent wrapper.ps1"']) {
+      const parsed = LlmProfileWriteSchema.safeParse({ ...profile, command: launch });
+      assert.equal(parsed.success, true, launch);
+      if (parsed.success) assert.equal(parsed.data.command, launch);
+    }
+    for (const launch of ['other-cli "unclosed', '"" --flag', 'other-cli\n--flag', 'other-cli\0']) {
+      assert.equal(LlmProfileWriteSchema.safeParse({ ...profile, command: launch }).success, false, launch);
+    }
   }
   assert.equal(LlmProfileWriteSchema.safeParse({ id: 'api', label: 'API', protocol: 'openai-chat', model: 'm', baseUrl: 'https://api.example.test', authMode: 'local-account' }).success, false);
 });

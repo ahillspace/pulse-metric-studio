@@ -15,11 +15,13 @@ export function WorkbenchModal({
   children,
   actions,
   onClose,
+  className,
 }: {
   title: string;
   children: ReactNode;
   actions?: ReactNode;
   onClose: () => void;
+  className?: string;
 }) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
@@ -51,11 +53,11 @@ export function WorkbenchModal({
     };
   }, []);
   return (
-    <div className="overlay-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+    <div className={`overlay-backdrop ${className ?? ''}`} onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <div ref={dialogRef} className="modal-card" role="dialog" aria-modal="true" aria-labelledby={titleId}>
         <div className="modal-header" id={titleId}>
           {title}
-          <button className="linkish modal-close" type="button" onClick={onClose} aria-label="Close dialog">Close</button>
+          <button className="btn modal-close" type="button" onClick={onClose} aria-label="Close dialog">Close</button>
         </div>
         <div className="modal-body">{children}</div>
         {actions && <div className="modal-actions">{actions}</div>}

@@ -7,6 +7,7 @@ import {
   classifyGraphqlNodes,
   detectBlendedRef,
   fetchFieldsViaMetadataGraphql,
+  fetchCaptionMap,
   isTableCalcFormula,
   requiresUserAggFromFormula,
 } from './metadata-fallback.js';
@@ -29,6 +30,41 @@ function session(): TableauSession {
 
 const byName = (rows: ReturnType<typeof classifyGraphqlNodes>, name: string) =>
   rows.find((r) => r.caption === name);
+
+test('authoritative metadata rejects missing and repeated continuation cursors', async () => {
+  const field = { __typename: 'ColumnField', name: 'Sales', fullyQualifiedName: '[Sales]', role: 'MEASURE', dataType: 'REAL' };
+  for (const cursor of [null, 'repeat']) {
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      if (calls > 2) throw new Error('Metadata repeated a page beyond the test budget.');
+      return Response.json({ data: { publishedDatasources: [{ fieldsConnection: { nodes: [field], pageInfo: { hasNextPage: true, endCursor: cursor } } }] } });
+    };
+    await assert.rejects(fetchFieldsViaMetadataGraphql(session(), 'ds', { luid: 'ds', name: 'DS' }), /pagination is incomplete/);
+    assert.equal(calls, cursor === null ? 1 : 2);
+  }
+});
+
+test('valid metadata pagination stays complete and caption enrichment remains best-effort', async () => {
+  const field = (name: string) => ({ __typename: 'ColumnField', name, fullyQualifiedName: `[${name}]`, role: 'MEASURE', dataType: 'REAL' });
+  const cursors: unknown[] = [];
+  globalThis.fetch = async (_input, init) => {
+    const after = JSON.parse(String(init?.body)).variables.after;
+    cursors.push(after);
+    return Response.json({ data: { publishedDatasources: [{ fieldsConnection: {
+      nodes: [field(after ? 'Profit' : 'Sales')],
+      pageInfo: { hasNextPage: !after, endCursor: after ? null : 'next' },
+    } }] } });
+  };
+  const catalog = await fetchFieldsViaMetadataGraphql(session(), 'ds', { luid: 'ds', name: 'DS' });
+  assert.deepEqual(cursors, [null, 'next']);
+  assert.deepEqual(catalog.measures.map(item => item.id).sort(), ['Profit', 'Sales']);
+
+  globalThis.fetch = async () => Response.json({ data: { publishedDatasources: [{ fieldsConnection: {
+    nodes: [field('Sales')], pageInfo: { hasNextPage: true, endCursor: null },
+  } }] } });
+  assert.equal((await fetchCaptionMap(session(), 'ds')).size, 0);
+});
 
 test('table-calc detection covers the full function list', () => {
   assert.equal(isTableCalcFormula('WINDOW_SUM([Sales])'), true);

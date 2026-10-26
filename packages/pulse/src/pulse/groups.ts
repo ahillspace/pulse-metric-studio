@@ -3,8 +3,10 @@ import {
   TableauError,
   apiPath,
   classifyStatus,
+  DEFAULT_MAX_RESPONSE_BYTES,
   getJson,
   isPastEndError,
+  readBoundedBody,
   tableauFetch,
 } from "@pulse-metric-studio/core";
 
@@ -103,7 +105,10 @@ export async function ensureGroup(
       timeoutMs: 20_000,
     },
   );
-  const text = await resp.text().catch(() => "");
+  const text = await readBoundedBody(resp, DEFAULT_MAX_RESPONSE_BYTES, 20_000).catch((error) => {
+    if (resp.ok) throw error;
+    return "";
+  });
   if (!resp.ok) {
     throw new TableauError(
       `Group create failed (${resp.status})`,
@@ -139,7 +144,7 @@ export async function addUserToGroup(
     },
   );
   if (resp.ok || resp.status === 409) return; // 409 = already a member
-  const text = await resp.text().catch(() => "");
+  const text = await readBoundedBody(resp, DEFAULT_MAX_RESPONSE_BYTES, 20_000).catch(() => "");
   throw new TableauError(
     `Add user to group failed (${resp.status})`,
     resp.status,
@@ -167,7 +172,7 @@ export async function deleteGroup(
     { method: "DELETE", timeoutMs: 20_000 },
   );
   if (response.ok || response.status === 404) return;
-  const body = await response.text().catch(() => "");
+  const body = await readBoundedBody(response, DEFAULT_MAX_RESPONSE_BYTES, 20_000).catch(() => "");
   throw new TableauError(
     `Group deletion failed (${response.status})`,
     response.status,

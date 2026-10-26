@@ -3,16 +3,20 @@ import { test } from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import type { StoredLlmProfile } from '../profiles.js';
 import {
   buildOpenCodeChildEnv,
-  buildOpenCodeRequestEnv,
-  assertOpenCodeRequestConfig,
   classifyOpenCodeFailure,
   OpencodeCliProvider,
   parseOpenCodeVerboseModels,
   type OpencodeRuntime,
 } from './opencode-cli.js';
+
+const processProfile: StoredLlmProfile = {
+  id: 'opencode', label: 'OpenCode', protocol: 'opencode', command: 'opencode', model: 'provider/model', baseUrl: '', authMode: 'none',
+  secret: null, credentialCommand: null, credentialCommandHint: null, headers: {}, region: '', awsProfile: '', source: 'saved',
+};
 
 test('OpenCode discovery retries an executable that was installed after a failed lookup', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pulse-opencode-install-'));
@@ -53,9 +57,84 @@ test('OpenCode sends prompts separately from shell-free process arguments and re
   assert.equal(result.text, '{"ok":true}');
   const invocation = invocations[0];
   assert.ok(invocation);
-  assert.deepEqual(invocation.args, ['--pure', 'run', '--model', 'provider/model-1']);
+  assert.deepEqual(invocation.args, ['run', '--format', 'json', '--title', 'Pulse Metric Studio', '--model', 'provider/model-1']);
   assert.equal(invocation.args.includes('value & whoami'), false);
   assert.match(invocation.prompt, /value & whoami/);
+});
+
+test('OpenCode preserves a quoted executable launch command and user prefix arguments for completion and models', async () => {
+  const profile: StoredLlmProfile = { ...processProfile, command: '"C:\\Program Files\\Custom Agent\\launch.exe" --company-mode "project one" --auto' };
+  const calls: Array<{ file: string; args: string[] }> = [];
+  const runtime: OpencodeRuntime = {
+    resolve: async (file) => { assert.equal(file, 'C:\\Program Files\\Custom Agent\\launch.exe'); return { file }; },
+    run: async (bin, args) => { calls.push({ file: bin.file, args }); return 'answer'; },
+    listModels: async (bin, args) => { calls.push({ file: bin.file, args }); return ''; },
+  };
+  const provider = new OpencodeCliProvider(profile, runtime);
+  assert.equal((await provider.getHealth()).installed, true);
+  assert.equal((await provider.complete({ messages: [] })).text, 'answer');
+  await provider.listModels();
+  assert.deepEqual(calls, [
+    { file: 'C:\\Program Files\\Custom Agent\\launch.exe', args: ['--company-mode', 'project one', '--auto', 'run', '--format', 'json', '--title', 'Pulse Metric Studio', '--model', 'provider/model'] },
+    { file: 'C:\\Program Files\\Custom Agent\\launch.exe', args: ['--company-mode', 'project one', '--auto', 'models', '--verbose'] },
+  ]);
+});
+
+test('OpenCode supports an explicit executable interpreter wrapper without launching an implicit shell', async () => {
+  const profile: StoredLlmProfile = { ...processProfile, command: 'pwsh -NoProfile -File "C:\\Agent Scripts\\company-opencode.ps1"' };
+  const calls: string[][] = [];
+  const provider = new OpencodeCliProvider(profile, {
+    resolve: async (file) => { assert.equal(file, 'pwsh'); return { file: 'C:\\tools\\pwsh.exe' }; },
+    run: async (_bin, args) => { calls.push(args); return 'answer'; },
+  });
+  await provider.complete({ messages: [] });
+  assert.deepEqual(calls[0], ['-NoProfile', '-File', 'C:\\Agent Scripts\\company-opencode.ps1', 'run', '--format', 'json', '--title', 'Pulse Metric Studio', '--model', 'provider/model']);
+});
+
+test('native OpenCode options follow run and only catalog-supported options reach models', async () => {
+  const profile = { ...processProfile, command: 'opencode --auto --pure --agent company --variant high --log-level WARN --dir "project one"' };
+  const calls: string[][] = [];
+  const provider = new OpencodeCliProvider(profile, {
+    resolve: async (file) => { assert.equal(file, 'opencode'); return { file: 'C:\\tools\\opencode.exe' }; },
+    run: async (_bin, args) => { calls.push(args); return 'answer'; },
+    listModels: async (_bin, args) => { calls.push(args); return ''; },
+  });
+  await provider.complete({ messages: [] });
+  await provider.listModels();
+  assert.deepEqual(calls, [
+    ['run', '--auto', '--pure', '--agent', 'company', '--variant', 'high', '--log-level', 'WARN', '--dir', 'project one', '--format', 'json', '--title', 'Pulse Metric Studio', '--model', 'provider/model'],
+    ['models', '--pure', '--log-level', 'WARN', '--verbose'],
+  ]);
+});
+
+test('native OpenCode model discovery uses the configured local run directory', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pulse-opencode-catalog-'));
+  try {
+    const runtime = processFixture(verboseModel('company/model', { id: 'model', name: 'Model', providerID: 'company' }), 0, `
+      assert.equal(process.cwd(), ${JSON.stringify(directory)});
+      assert.deepEqual(process.argv.slice(1), ['models', '--pure', '--verbose']);
+    `);
+    const profile = { ...processProfile, command: `opencode --auto --pure --dir "${directory}"` };
+    const result = await new OpencodeCliProvider(profile, runtime).listModels();
+    assert.deepEqual(result, [{ id: 'company/model', label: 'Model' }]);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('OpenCode reports malformed or conflicting native launch options without running a provider', async () => {
+  for (const command of ['opencode "unfinished', 'opencode --interactive', 'opencode --format=text', 'opencode --model other/model']) {
+    let invocations = 0;
+    const provider = new OpencodeCliProvider({ ...processProfile, command }, {
+      resolve: async () => ({ file: 'opencode' }),
+      run: async () => { invocations += 1; return 'must not run'; },
+    });
+    const health = await provider.getHealth();
+    assert.equal(health.configured, false);
+    assert.equal(health.reasonCode, 'not_configured');
+    await assert.rejects(provider.complete({ messages: [] }), (error: any) => error.code === 'provider_not_configured');
+    assert.equal(invocations, 0);
+  }
 });
 
 test('OpenCode rejects a blank model instead of using an inherited default', async () => {
@@ -77,24 +156,24 @@ test('OpenCode rejects a blank model instead of using an inherited default', asy
   );
 });
 
-test('OpenCode child environment excludes unrelated application secrets and enforces isolation config', () => {
-  const env = buildOpenCodeChildEnv({
-    PATH: 'C:\\tools',
-    APPDATA: 'C:\\appdata',
-    ANTHROPIC_API_KEY: 'allowed-provider-secret',
-    SF_OAUTH_CLIENT_SECRET: 'salesforce-secret',
-    PULSE_METRIC_STUDIO_MACHINE_KEY: 'pulse-metric-studio-secret',
-    OPENCODE_CONFIG_CONTENT: '{"provider":{"company":{"npm":"@ai-sdk/anthropic"}},"permission":{"*":"allow"}}',
-  });
-  assert.equal(env.SF_OAUTH_CLIENT_SECRET, undefined);
-  assert.equal(env.PULSE_METRIC_STUDIO_MACHINE_KEY, undefined);
-  assert.equal(env.ANTHROPIC_API_KEY, 'allowed-provider-secret');
-  assert.equal(env.PATH, 'C:\\tools');
-  assert.deepEqual(JSON.parse(String(env.OPENCODE_CONFIG_CONTENT)), {
-    provider: { company: { npm: '@ai-sdk/anthropic' } },
-    permission: { '*': 'deny' },
-    share: 'disabled',
-  });
+test('OpenCode preserves native user configuration and tool credentials without app-internal secrets', () => {
+  const source = {
+    PATH: 'C:\\tools', APPDATA: 'C:\\appdata', XDG_DATA_HOME: '/native/account-data',
+    ANTHROPIC_API_KEY: 'provider-secret', SF_OAUTH_CLIENT_SECRET: 'user-tool-secret',
+    PULSE_METRIC_STUDIO_MACHINE_KEY: 'internal-secret', pulse_metric_studio_desktop_token: 'internal-token',
+    OPENCODE_CONFIG: 'user-config.json', OPENCODE_CONFIG_DIR: 'user-config-dir', OPENCODE_PERMISSION: '{"*":"allow"}',
+    OPENCODE_CONFIG_CONTENT: '{"instructions":["USER.md"],"mcp":{"company":{"enabled":true}},"plugin":["company-tools"]}',
+    NODE_OPTIONS: '--max-old-space-size=4096', PWD: '/user/project',
+  };
+  const env = buildOpenCodeChildEnv(source);
+  for (const [name, value] of Object.entries(source)) {
+    assert.equal(env[name], name.toUpperCase().startsWith('PULSE_METRIC_STUDIO_') ? undefined : value);
+  }
+  assert.equal(env.OPENCODE_DISABLE_PROJECT_CONFIG, undefined);
+  assert.equal(env.OPENCODE_DISABLE_CLAUDE_CODE, undefined);
+  assert.equal(env.OPENCODE_DISABLE_EXTERNAL_SKILLS, undefined);
+  assert.equal(env.OPENCODE_DB, undefined);
+  assert.equal(source.OPENCODE_PERMISSION, '{"*":"allow"}');
 });
 
 test('OpenCode classifies upstream errors and retains only a safe provider reference', () => {
@@ -171,7 +250,7 @@ test('OpenCode model discovery uses the resolved executable and exact non-refres
 
   const models = await new OpencodeCliProvider(profile, runtime).listModels();
   assert.deepEqual(models, [{ id: 'opencode/free', label: 'Free' }]);
-  assert.deepEqual(invocations, [{ file: 'C:\\tools\\opencode.exe', args: ['--pure', 'models', '--verbose'] }]);
+  assert.deepEqual(invocations, [{ file: 'C:\\tools\\opencode.exe', args: ['models', '--verbose'] }]);
 });
 
 function verboseModel(header: string, model: Record<string, unknown>): string {
@@ -188,47 +267,14 @@ test('OpenCode identifies the free-tier restriction without exposing process dia
   assert.equal(failure.reason?.includes('fixture-private-value'), false);
 });
 
-test('OpenCode completion selects an app-owned approval agent and disables every inherited MCP server', () => {
-  const env = buildOpenCodeChildEnv({ OPENCODE_CONFIG_CONTENT: JSON.stringify({ provider: { local: { name: 'Local' } } }) });
-  const request = buildOpenCodeRequestEnv(env, {
-    permission: { '*': 'allow' },
-    agent: { build: { permission: { '*': 'allow' } } },
-    mcp: { local: { enabled: true, command: ['unsafe'] }, remote: { url: 'https://example.test' } },
-  }, 'pulse-metric-studio-test');
-  const config = JSON.parse(request.OPENCODE_CONFIG_CONTENT!);
-  assert.deepEqual(config.agent, { 'pulse-metric-studio-test': { mode: 'primary', permission: { '*': 'ask' } } });
-  assert.deepEqual(config.mcp, { local: { enabled: false }, remote: { enabled: false } });
-  assert.deepEqual(config.provider, { local: { name: 'Local' } });
-  assert.equal(request.OPENCODE_DISABLE_PROJECT_CONFIG, '1');
-  assert.doesNotThrow(() => assertOpenCodeRequestConfig(config, 'pulse-metric-studio-test'));
-});
-
-test('OpenCode refuses a completion when effective configuration overrides its restrictions', () => {
-  const valid = {
-    agent: { 'pulse-metric-studio-test': { mode: 'primary', permission: { '*': 'ask' } } },
-    mcp: { local: { enabled: false } }, share: 'disabled',
-  };
-  for (const changed of [
-    { ...valid, agent: {} },
-    { ...valid, agent: { 'pulse-metric-studio-test': { ...valid.agent['pulse-metric-studio-test'], disable: true } } },
-    { ...valid, agent: { 'pulse-metric-studio-test': { ...valid.agent['pulse-metric-studio-test'], hidden: true } } },
-    { ...valid, agent: { 'pulse-metric-studio-test': { mode: 'primary', permission: { '*': 'ask', bash: 'allow' } } } },
-    { ...valid, agent: { 'pulse-metric-studio-test': { mode: 'primary', permission: { '*': 'allow' } } } },
-    { ...valid, mcp: { injected: { command: ['unsafe'] } } },
-    { ...valid, mcp: { injected: { enabled: true } } },
-    { ...valid, share: 'auto' },
-  ]) assert.throws(() => assertOpenCodeRequestConfig(changed, 'pulse-metric-studio-test'), /tool restrictions/);
-});
-
-test('OpenCode preserves Windows environment casing for executable lookup and required system paths', () => {
-  const child = buildOpenCodeChildEnv({ Path: 'C:\\Windows;C:\\tools', SystemRoot: 'C:\\Windows', ComSpec: 'C:\\Windows\\System32\\cmd.exe', Temp: 'C:\\temp', PULSE_METRIC_STUDIO_MACHINE_KEY: 'fixture-private-value' }, 'win32');
+test('OpenCode preserves Windows environment casing and user runtime configuration', () => {
+  const child = buildOpenCodeChildEnv({ Path: 'C:\\Windows;C:\\tools', SystemRoot: 'C:\\Windows', Temp: 'C:\\temp', NODE_OPTIONS: '--require=hook', PULSE_METRIC_STUDIO_MACHINE_KEY: 'fixture-private-value' });
   assert.equal(child.Path, 'C:\\Windows;C:\\tools');
   assert.equal(child.SystemRoot, 'C:\\Windows');
-  assert.equal(child.ComSpec, 'C:\\Windows\\System32\\cmd.exe');
   assert.equal(child.Temp, 'C:\\temp');
   assert.equal(child.PULSE_METRIC_STUDIO_MACHINE_KEY, undefined);
-  assert.deepEqual(JSON.parse(child.OPENCODE_CONFIG_CONTENT!).permission, { '*': 'deny' });
-  assert.equal(buildOpenCodeChildEnv({ path: '/untrusted', PATH: '/usr/bin' }, 'darwin').path, undefined);
+  assert.equal(child.NODE_OPTIONS, '--require=hook');
+  assert.equal(child.OPENCODE_PERMISSION, undefined);
 });
 
 test('OpenCode passive setup checks installation without pretending to verify account or model access', async () => {
@@ -276,4 +322,108 @@ test('OpenCode model discovery forwards the owned operation signal', async () =>
   assert.deepEqual(await provider.listModels(controller.signal), []);
   controller.abort();
   await assert.rejects(provider.listModels(controller.signal), (error: any) => error.name === 'AbortError');
+});
+
+function processFixture(stdout: string, code = 0, checks = ''): OpencodeRuntime {
+  return {
+    resolve: async () => ({ file: 'opencode' }),
+    env: {
+      ...process.env,
+      OPENCODE_CONFIG_CONTENT: '{"mcp":{"company":{"enabled":true}},"plugin":["company-tools"]}',
+      CUSTOM_TOOL_TOKEN: 'fixture-tool-token',
+      PULSE_METRIC_STUDIO_MACHINE_KEY: 'internal-secret',
+    },
+    spawn: (_file, args, options) => spawn(process.execPath, ['-e', `
+      const assert = require('node:assert/strict');
+      let input = '';
+      process.stdin.on('data', (chunk) => input += chunk);
+      process.stdin.on('end', () => {
+        ${checks}
+        process.stdout.write(${JSON.stringify(stdout)});
+        process.exitCode = ${code};
+      });
+    `, '--', ...args], options),
+  };
+}
+
+const events = (...values: unknown[]) => values.map((value) => JSON.stringify(value)).join('\n') + '\n';
+
+test('OpenCode uses native configuration, tool events, and reconciled final text without adding permission flags', async () => {
+  const runtime = processFixture(events(
+    { type: 'step_start', part: { messageID: 'tool-step' } },
+    { type: 'text', part: { messageID: 'tool-step', text: 'Checking with a user tool.' } },
+    { type: 'tool_use', part: { tool: 'read', state: { status: 'completed', output: 'user tool output' } } },
+    { type: 'step_finish', part: { messageID: 'tool-step', reason: 'tool-calls' } },
+    { type: 'step_start', part: { messageID: 'final-step' } },
+    { type: 'reasoning', part: { text: 'private reasoning' } },
+    { type: 'text', part: { id: 'live-part-id', messageID: 'final-step', text: 'Final answer:\nna' } },
+    { type: 'step_finish', part: { messageID: 'final-step', reason: 'stop' } },
+    // Native reconciliation runs after the terminal event and changes part IDs.
+    { type: 'text', part: { id: 'tool-step:text-0', messageID: 'tool-step', text: ' Earlier tool-step suffix.' } },
+    { type: 'tool_use', part: { tool: 'read', state: { status: 'completed', output: 'late tool reconciliation' } } },
+    { type: 'text', part: { id: 'final-step:text-0', messageID: 'final-step', text: 'tive text' } },
+  ), 0, `
+    assert.equal(process.cwd(), ${JSON.stringify(os.homedir())});
+    assert.deepEqual(process.argv.slice(1), ['run', '--format', 'json', '--title', 'Pulse Metric Studio', '--model', 'provider/model']);
+    assert.equal(process.env.CUSTOM_TOOL_TOKEN, 'fixture-tool-token');
+    assert.equal(process.env.PULSE_METRIC_STUDIO_MACHINE_KEY, undefined);
+    const config = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT);
+    assert.deepEqual(config.mcp, {company:{enabled:true}});
+    assert.deepEqual(config.plugin, ['company-tools']);
+    assert.equal(process.env.OPENCODE_DISABLE_PROJECT_CONFIG, undefined);
+    assert.match(input, /private & prompt/);
+  `);
+  const result = await new OpencodeCliProvider(processProfile, runtime).complete({ messages: [{ role: 'user', content: 'private & prompt' }] });
+  assert.equal(result.text, 'Final answer:\nnative text');
+});
+
+test('OpenCode rejects failed or unfinished requests instead of returning partial answers', async () => {
+  for (const fixture of [
+    { output: events({ type: 'text', part: { text: 'partial answer' } }), code: 0, expected: 'provider_execution' },
+    { output: events({ type: 'text', part: { text: 'partial answer' } }, { type: 'error', error: { message: 'invalid API key fixture-secret' } }), code: 0, expected: 'provider_authentication' },
+    { output: events({ type: 'error', error: { data: { message: 'rate limit reached' } } }), code: 1, expected: 'provider_quota' },
+    { output: events({ type: 'text', part: { messageID: 'final', text: 'answer' } }, { type: 'step_finish', part: { messageID: 'final', reason: 'stop' } }), code: 1, expected: 'provider_execution' },
+    { output: events({ type: 'text', part: { messageID: 'final', text: 'answer' } }, { type: 'step_finish', part: { messageID: 'final', reason: 'length' } }), code: 0, expected: 'provider_execution' },
+    { output: 'unrecognized output\n', code: 0, expected: 'provider_execution' },
+  ]) {
+    const provider = new OpencodeCliProvider(processProfile, processFixture(fixture.output, fixture.code));
+    await assert.rejects(provider.complete({ messages: [] }), (error: any) => {
+      assert.equal(error.code, fixture.expected);
+      assert.doesNotMatch(error.message, /fixture-secret|partial answer/);
+      return true;
+    });
+  }
+});
+
+test('OpenCode keeps a completed answer after recoverable tool errors and plugin diagnostics', async () => {
+  const stdout = 'Company plugin initialized\n' + events(
+    { type: 'step_start', part: { messageID: 'tool' } },
+    { type: 'tool_use', part: { tool: 'read', state: { status: 'error', error: 'Permission rejected for optional file' } } },
+    { type: 'step_finish', part: { messageID: 'tool', reason: 'tool-calls' } },
+    { type: 'step_start', part: { messageID: 'answer' } },
+    { type: 'text', part: { messageID: 'answer', text: 'Completed without that file.' } },
+    { type: 'step_finish', part: { messageID: 'answer', reason: 'stop' } },
+  );
+  const result = await new OpencodeCliProvider(processProfile, processFixture(stdout)).complete({ messages: [] });
+  assert.equal(result.text, 'Completed without that file.');
+});
+
+test('OpenCode reports unavailable headless tool approval without silently changing user permissions', async () => {
+  const stdout = events(
+    { type: 'step_start', part: { messageID: 'tool' } },
+    { type: 'tool_use', part: { tool: 'bash', state: { status: 'error', error: 'Permission request rejected because no interactive approval is available' } } },
+    { type: 'step_finish', part: { messageID: 'tool', reason: 'tool-calls' } },
+  );
+  const runtime = processFixture(stdout);
+  const originalSpawn = runtime.spawn!;
+  runtime.spawn = (file, args, options) => {
+    assert.equal(args.includes('--auto'), false);
+    assert.equal(args.includes('--pure'), false);
+    return originalSpawn(file, args, options);
+  };
+  await assert.rejects(new OpencodeCliProvider(processProfile, runtime).complete({ messages: [] }), (error: any) => {
+    assert.match(error.message, /needs tool approval.*headless/);
+    assert.equal(error.retryable, false);
+    return true;
+  });
 });

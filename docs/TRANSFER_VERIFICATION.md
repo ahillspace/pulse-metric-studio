@@ -1,5 +1,8 @@
 # New Pulse version transfer
 
+This is the historical 0.1.0 transfer record, not current-release qualification.
+Use the [maintainer guide](PULSE_MAINTAINER_GUIDE.md) for current architecture and the [architecture audit](ARCHITECTURE_AUDIT.md) for its examined snapshot and limits.
+
 ## Scope
 
 The rebuilt Pulse app from the final local juju-local working tree replaces the older app in this repository.

@@ -7,15 +7,14 @@ import type { StoredLlmProfile } from '../profiles.js';
 import type { CompleteOptions, CompleteResult, LlmProvider, LlmProviderHealth } from '../types.js';
 import { LLM_REQUEST_TIMEOUT_MS, LlmProviderError, timeoutDescription } from '../types.js';
 import { collectProcessOutput, OWN_PROCESS_GROUP, ProcessOutputError } from './process-tree.js';
+import { buildLocalAgentEnv, localAgentCwd, resolveLaunchCommand } from './local-agent-runtime.js';
 
 export interface ClaudeCodeRuntime {
   resolve(command: string): Promise<{ file: string } | null>;
   spawn(file: string, args: string[], options: SpawnOptionsWithoutStdio): ChildProcessWithoutNullStreams;
   env?: NodeJS.ProcessEnv;
 }
-const REQUIRED_FLAGS = ['--safe-mode', '--tools', '--strict-mcp-config', '--mcp-config', '--disable-slash-commands', '--no-session-persistence', '--output-format', '--settings', '--setting-sources', '--system-prompt', '--model', '--disallowedTools', '--permission-mode', '--permission-prompts', '--no-chrome'];
-// A boolean flag terminates --mcp-config's variadic values before an auth subcommand.
-const ISOLATION_ARGS = ['--setting-sources', '', '--settings', '{"disableAllHooks":true}', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--safe-mode'];
+const REQUIRED_FLAGS = ['--output-format', '--model'];
 
 export class ClaudeCodeProvider implements LlmProvider {
   readonly id: string;
@@ -24,23 +23,23 @@ export class ClaudeCodeProvider implements LlmProvider {
   async isConfigured(): Promise<boolean> { return (await this.getHealth()).configured; }
   async getHealth(signal?: AbortSignal): Promise<LlmProviderHealth> {
     const account = await this.getSetupHealth(signal);
-    if (account.configured && !this.profile.model.trim()) return this.health(true, false, 'not_configured', 'Claude Code is signed in with Claude. Enter a model ID available to that account.');
+    if (account.configured && !this.profile.model.trim()) return this.health(true, false, 'not_configured', 'Enter a model ID available to the configured Claude Code CLI.');
     return account;
   }
   async getSetupHealth(signal?: AbortSignal): Promise<LlmProviderHealth> {
     try {
       await this.withContext(15_000, signal, async (context) => { await this.check(context); });
-      return this.health(true, true, 'not_tested', 'Claude Code is signed in with Claude. Test the connection to verify this model.');
+      return this.health(true, true, 'not_tested', 'The Claude launch command is available. Test the connection to verify model access.');
     } catch (error) {
       if (!(error instanceof LlmProviderError)) throw error;
-      return this.health(error.code !== 'provider_not_installed', false, error.code === 'provider_not_installed' ? 'not_installed' : error.code === 'provider_authentication' ? 'authentication_failed' : 'transport_failed', error.message);
+      return this.health(error.code !== 'provider_not_installed', false, error.code === 'provider_not_installed' ? 'not_installed' : error.code === 'provider_authentication' ? 'authentication_failed' : error.code === 'provider_not_configured' ? 'not_configured' : 'transport_failed', error.message);
     }
   }
   async complete(options: CompleteOptions): Promise<CompleteResult> {
-    if (!this.profile.model.trim()) throw this.error('provider_not_configured', 'Enter a Claude Code model ID available to your account.');
+    if (!this.profile.model.trim()) throw this.error('provider_not_configured', 'Enter a Claude Code model ID available to your CLI configuration.');
     return this.withContext(options.timeoutMs ?? LLM_REQUEST_TIMEOUT_MS, options.signal, async (context) => {
       await this.check(context);
-      const args = [...ISOLATION_ARGS, '-p', '--tools', '', '--disallowedTools', 'mcp__*', '--permission-mode', 'dontAsk', '--permission-prompts', 'none', '--no-chrome', '--disable-slash-commands', '--no-session-persistence', '--output-format', 'json', '--model', this.profile.model.trim(), '--system-prompt', 'Answer the supplied conversation as a text completion. Do not use tools. Follow the supplied system instructions.'];
+      const args = ['-p', '--output-format', 'json', '--model', this.profile.model.trim()];
       const result = await this.run(context, args, JSON.stringify({ system: options.system ?? '', messages: options.messages }));
       let envelope: unknown;
       try { envelope = JSON.parse(result.stdout); } catch { if (result.code !== 0) throw this.failure(result.stderr); throw this.error('invalid_provider_response', 'Claude Code returned invalid JSON.'); }
@@ -53,27 +52,24 @@ export class ClaudeCodeProvider implements LlmProvider {
   }
   private async check(context: Context): Promise<void> {
     const help = await this.run(context, ['--help']);
-    if (help.code !== 0 || !REQUIRED_FLAGS.every((flag) => help.stdout.includes(flag))) throw this.error('provider_execution', 'Update Claude Code. This version does not support the required isolated completion options.');
-    const status = await this.run(context, [...ISOLATION_ARGS, 'auth', 'status']);
-    let account: unknown;
-    try { account = JSON.parse(status.stdout); } catch { throw this.error('provider_execution', 'Claude Code could not report its account status as JSON. Update Claude Code and check its configuration.'); }
-    if (status.code !== 0 || !record(account) || account.loggedIn !== true || account.authMethod !== 'claude.ai' || (account.apiProvider !== undefined && account.apiProvider !== 'firstParty')) throw this.error('provider_authentication', 'Sign in to Claude Code with your Claude account, then test again. API-key, injected OAuth-token, and cloud-provider accounts are not accepted by this provider.');
+    if (help.code !== 0) throw this.error('provider_not_configured', 'Claude Code could not check its launch options. Check Launch command and verify it works in your terminal.');
+    if (!REQUIRED_FLAGS.every((flag) => help.stdout.includes(flag))) throw this.error('provider_execution', 'The Claude Code CLI does not support the required noninteractive JSON protocol. Update Claude Code or check the configured executable.');
   }
   private async withContext<T>(timeoutMs: number, signal: AbortSignal | undefined, work: (context: Context) => Promise<T>): Promise<T> {
     signal?.throwIfAborted();
-    const command = this.profile.command || 'claude';
-    if (!allowed(command)) throw this.error('provider_not_installed', 'Select a directly executable Claude Code binary. Shell scripts and command wrappers are not supported on Windows.');
-    const bin = await this.runtime.resolve(command);
-    if (!bin || !allowed(bin.file)) throw this.error('provider_not_installed', 'Claude Code is not installed or is not directly executable.');
-    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'pulse-claude-'));
-    try { return await work({ bin: bin.file, cwd, env: buildClaudeCodeChildEnv(this.runtime.env ?? process.env), deadline: Date.now() + timeoutMs, timeoutMs, signal }); }
-    finally { await fs.rm(cwd, { recursive: true, force: true }); }
+    const deadline = Date.now() + timeoutMs;
+    let launch: { file: string; args: string[] } | null;
+    try { launch = await resolveLaunchCommand(this.profile.command || 'claude', command => this.runtime.resolve(command)); }
+    catch { throw this.error('provider_not_configured', 'Enter a valid Claude launch command with an executable and optional arguments.'); }
+    signal?.throwIfAborted();
+    if (!launch) throw this.error('provider_not_installed', 'The Claude launch executable is not installed or cannot run directly. Use an explicit interpreter for script wrappers.');
+    return work({ bin: launch.file, args: launch.args, cwd: localAgentCwd(), env: buildClaudeCodeChildEnv(this.runtime.env ?? process.env), deadline, timeoutMs, signal });
   }
   private async run(context: Context, args: string[], input = '') {
     context.signal?.throwIfAborted();
     if (context.deadline <= Date.now()) throw this.error('provider_timeout', `Claude Code did not respond within ${timeoutDescription(context.timeoutMs)}.`, true);
     try {
-      const child = this.runtime.spawn(context.bin, args, { cwd: context.cwd, shell: false, windowsHide: true, detached: OWN_PROCESS_GROUP, env: context.env });
+      const child = this.runtime.spawn(context.bin, [...context.args, ...args], { cwd: context.cwd, shell: false, windowsHide: true, detached: OWN_PROCESS_GROUP, env: context.env });
       return await collectProcessOutput(child, { input, timeoutMs: context.deadline - Date.now(), signal: context.signal });
     } catch (error) {
       if (error instanceof LlmProviderError || (error instanceof Error && error.name === 'AbortError')) throw error;
@@ -82,31 +78,35 @@ export class ClaudeCodeProvider implements LlmProvider {
     }
   }
   private failure(diagnostics: string): LlmProviderError {
-    if (/unauth|not logged|sign.?in|authentication|token.*expired|401|403/i.test(diagnostics)) return this.error('provider_authentication', 'Claude Code rejected the saved account. Sign in through Claude Code again.');
-    if (/quota|rate.?limit|usage.?limit|429|credits/i.test(diagnostics)) return this.error('provider_quota', 'Claude account usage or rate limits prevented the request.', true);
-    if (/model.*(?:not|unavailable|unsupported)|unsupported.*model/i.test(diagnostics)) return this.error('provider_unavailable', 'This model is not available to the Claude account.');
-    return this.error('provider_execution', 'Claude Code reported a failed request. Update Claude Code and test the connection again.');
+    if (/unauth|not logged|sign.?in|authentication|token.*expired|401|403/i.test(diagnostics)) return this.error('provider_authentication', 'The configured Claude Code CLI rejected authentication. Check its sign-in or credential configuration.');
+    if (/quota|rate.?limit|usage.?limit|429|credits/i.test(diagnostics)) return this.error('provider_quota', 'Claude Code usage or rate limits prevented the request.', true);
+    if (/model.*(?:not|unavailable|unsupported)|unsupported.*model/i.test(diagnostics)) return this.error('provider_unavailable', 'This model is not available to the configured Claude Code CLI.');
+    return this.error('provider_execution', 'Claude Code reported a failed request. Check the launch command and CLI configuration.');
   }
   private error(code: ConstructorParameters<typeof LlmProviderError>[0]['code'], message: string, retryable = false) { return new LlmProviderError({ code, message, provider: this.id, model: this.profile.model, retryable }); }
   private health(installed: boolean, configured: boolean, reasonCode: LlmProviderHealth['reasonCode'], reason: string): LlmProviderHealth { return { installed, configured, healthy: configured ? null : false, reasonCode, reason, resolvedModel: this.profile.model.trim() || null }; }
 }
-interface Context { bin: string; cwd: string; env: NodeJS.ProcessEnv; deadline: number; timeoutMs: number; signal?: AbortSignal }
+interface Context { bin: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv; deadline: number; timeoutMs: number; signal?: AbortSignal }
 function record(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value); }
-function allowed(command: string): boolean { return !/^[\\/]{2}/.test(command) && /^(claude|claude\.exe)$/i.test(command.replace(/\\/g, '/').split('/').at(-1) ?? ''); }
-export function buildClaudeCodeChildEnv(source: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
-  const names = new Set(['PATH', 'PATHEXT', 'SYSTEMROOT', 'WINDIR', 'TMP', 'TEMP', 'TMPDIR', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'LANG', 'LC_ALL', 'CLAUDE_CONFIG_DIR', 'SSL_CERT_FILE', 'SSL_CERT_DIR'].map((key) => platform === 'win32' ? key.toUpperCase() : key));
-  return Object.fromEntries(Object.entries(source).filter(([key, value]) => value !== undefined && names.has(platform === 'win32' ? key.toUpperCase() : key)));
-}
+export function buildClaudeCodeChildEnv(source: NodeJS.ProcessEnv, _platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv { return buildLocalAgentEnv(source); }
+
 async function resolveClaude(command: string): Promise<{ file: string } | null> {
-  const candidates = path.isAbsolute(command) ? [command] : [];
-  if (!candidates.length && /^(claude|claude\.exe)$/i.test(command)) {
+  const candidates: string[] = [];
+  if (path.isAbsolute(command) || /[\\/]/.test(command)) candidates.push(path.resolve(localAgentCwd(), command));
+  else {
     const searchPath = Object.entries(process.env).find(([key]) => key.toUpperCase() === 'PATH')?.[1] ?? '';
-    for (const directory of searchPath.split(path.delimiter).filter((entry) => path.isAbsolute(entry) && !/^[\\/]{2}/.test(entry))) candidates.push(path.join(directory, process.platform === 'win32' ? 'claude.exe' : 'claude'));
-    candidates.push(path.join(os.homedir(), '.local', 'bin', process.platform === 'win32' ? 'claude.exe' : 'claude'));
-    if (process.platform !== 'win32') candidates.push('/opt/homebrew/bin/claude', '/usr/local/bin/claude');
+    const extensions = process.platform === 'win32' && !path.extname(command) ? ['.exe', '.com'] : [''];
+    for (const directory of searchPath.split(path.delimiter).filter(entry => path.isAbsolute(entry))) for (const extension of extensions) candidates.push(path.join(directory, command + extension));
+    if (/^claude(?:\.exe)?$/i.test(command)) {
+      candidates.push(path.join(os.homedir(), '.local', 'bin', process.platform === 'win32' ? 'claude.exe' : 'claude'));
+      if (process.platform !== 'win32') candidates.push('/opt/homebrew/bin/claude', '/usr/local/bin/claude');
+    }
   }
   for (const file of candidates) {
-    try { if (allowed(file) && !/^[\\/]{2}/.test(await fs.realpath(file)) && (await fs.stat(file)).isFile()) { await fs.access(file, constants.X_OK); return { file: path.resolve(file) }; } } catch {}
+    try {
+      if (process.platform === 'win32' && !/\.(exe|com)$/i.test(file)) continue;
+      if ((await fs.stat(file)).isFile()) { await fs.access(file, constants.X_OK); return { file: path.resolve(file) }; }
+    } catch {}
   }
   return null;
 }

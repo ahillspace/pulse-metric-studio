@@ -33,7 +33,7 @@ export async function discoverRestApiVersion(serverUrl: string): Promise<string>
       signal: AbortSignal.timeout(10_000),
     });
     if (!resp.ok) return FALLBACK_API_VERSION;
-    const data = (await resp.json()) as {
+    const data = JSON.parse(await readBoundedBody(resp, MAX_SIGNIN_RESPONSE_BYTES, 10_000)) as {
       serverInfo?: { restApiVersion?: { number?: string; legacyUrl?: string } };
     };
     const number = data?.serverInfo?.restApiVersion?.number;

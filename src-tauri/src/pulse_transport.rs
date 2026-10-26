@@ -329,12 +329,30 @@ mod tests {
 
     #[test]
     fn only_assistant_routes_get_the_long_timeout() {
-        assert_eq!(request_timeout("POST", "/api/pulse/drafts/abc/proposals"), Duration::from_secs(330));
-        assert_eq!(request_timeout("POST", "/api/llm/author"), Duration::from_secs(330));
-        assert_eq!(request_timeout("POST", "/api/llm/profiles/gateway/test"), Duration::from_secs(330));
-        assert_eq!(request_timeout("POST", "/api/pulse/publish"), Duration::from_secs(300));
-        assert_eq!(request_timeout("GET", "/api/pulse/drafts"), Duration::from_secs(120));
-        assert_eq!(request_timeout("GET", "/api/tableau/status?x=/proposals"), Duration::from_secs(120));
+        assert_eq!(
+            request_timeout("POST", "/api/pulse/drafts/abc/proposals"),
+            Duration::from_secs(330)
+        );
+        assert_eq!(
+            request_timeout("POST", "/api/llm/author"),
+            Duration::from_secs(330)
+        );
+        assert_eq!(
+            request_timeout("POST", "/api/llm/profiles/gateway/test"),
+            Duration::from_secs(330)
+        );
+        assert_eq!(
+            request_timeout("POST", "/api/pulse/publish"),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            request_timeout("GET", "/api/pulse/drafts"),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            request_timeout("GET", "/api/tableau/status?x=/proposals"),
+            Duration::from_secs(120)
+        );
     }
 
     #[test]
@@ -356,13 +374,23 @@ mod tests {
             };
             let expected = readiness_proof(
                 &secret,
-                &request_message("GET", "/api/pulse/status?q=a%20b", &header("x-pulse-nonce"), &header("x-pulse-timestamp")),
+                &request_message(
+                    "GET",
+                    "/api/pulse/status?q=a%20b",
+                    &header("x-pulse-nonce"),
+                    &header("x-pulse-timestamp"),
+                ),
             );
             assert_eq!(header("x-pulse-signature"), expected);
             "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".into()
         });
         let response = PulseTransport { port, token }
-            .send("GET", "/api/pulse/status?q=a%20b", None, Duration::from_secs(2))
+            .send(
+                "GET",
+                "/api/pulse/status?q=a%20b",
+                None,
+                Duration::from_secs(2),
+            )
             .unwrap();
         assert_eq!(response.status, 200);
         handle.join().unwrap();

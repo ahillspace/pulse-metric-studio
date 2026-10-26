@@ -4,7 +4,8 @@ Pulse Metric Studio is a desktop workbench for building and managing Tableau Pul
 Pick a published datasource, shape metric definitions and filters with an AI assistant or by hand, and publish a whole set of metrics in one step.
 Manage what you published afterwards: variants, followers, previews, and clean deletion.
 
-It runs on macOS and Windows and connects only to your Tableau Cloud site and the AI provider you configure.
+It runs on macOS and Windows and connects to your Tableau Cloud site and the AI provider you configure.
+Local CLI providers use your native configuration and the launch options you choose.
 
 Owner and maintainer: Andrew Hill (`andrew-hill_sfemu`).
 Pulse Metric Studio is open source under the [Apache 2.0 license](LICENSE).
@@ -12,7 +13,8 @@ It is an independent tool, not a Tableau or Salesforce product.
 
 ## What you get
 
-- **AI-assisted authoring.** Describe the audience and the assistant proposes metrics and slicers from the datasource's real fields; you review every change before it applies.
+- **AI-assisted authoring.** Describe the audience and the assistant proposes metrics and slicers from the datasource's real fields; you review proposed draft changes before applying them.
+  Local agents can also read documents, inspect Tableau, and act through tools available in their native configuration.
 - **A full metric editor.** Edit names, descriptions, formats, sentiment, time dimensions, and granularity directly in the table, and lock what the assistant must not touch.
 - **One-step publishing.** Publish a reviewed set of metric definitions, optionally followed by a digest group, and see each metric's preview and Pulse link afterwards.
 - **Metric Manager.** Search definitions, create filtered or retimed variants in bulk, manage followers, preview metric cards, and delete with a reviewed list of exactly what goes.
@@ -57,18 +59,22 @@ If the internal command cannot find the release, you are probably signed in with
 The app checks the repository it was installed from when it starts and once a day.
 When a newer release is out, it offers the update, and an **Update to X.Y.Z** button stays above the assistant settings until you install it.
 Updating saves your drafts, closes the app, installs the new release with the same installer, and opens the app again.
-An internal install only ever updates from the internal repository, and a public install only from the public one.
+Update checks and installation use the recorded repository.
+Reinstalling through another channel's helper replaces that record.
 
-Updates come only to copies installed with the one-line command, which records where it installed from.
-A copy installed by hand from a disk image or setup file does not update itself; run the install command once to turn updates on.
+The one-line command records the repository used for updates.
+Installing a disk image or setup file by hand does not create that record, but it preserves an existing update channel.
+Run the install command to enable updates when no channel is recorded.
 
 <details>
 <summary>Installing by hand from the Releases page</summary>
 
 Download the latest build from [Releases](../../releases/latest): `Pulse-Metric-Studio_*_x64-setup.exe` on Windows, or the `Pulse-Metric-Studio_*.dmg` for your Mac.
 
-The builds are not signed with a public certificate, so a browser download shows a warning on first launch.
-The one-command installer avoids it, and only an installed copy updates itself.
+Default build configuration uses ad-hoc macOS signing and has no Windows signing configuration.
+Browser downloads can show operating-system trust prompts.
+The one-command installer downloads without a browser and records the update channel.
+Operating-system trust prompts still depend on the signing, quarantine, and local policy of the installed artifact.
 
 - Windows SmartScreen: click "More info", then "Run anyway".
 - macOS "unidentified developer": right-click Pulse Metric Studio in Applications, choose Open, and confirm.
@@ -79,47 +85,66 @@ The one-command installer avoids it, and only an installed copy updates itself.
 ## Get started
 
 1. Create a Personal Access Token in Tableau Cloud (your account settings), then connect with your site URL, the token name, and its secret.
-2. Optionally set up an AI provider in Settings: a local Codex or Claude Code account, OpenCode CLI, Amazon Bedrock, an OpenAI-compatible gateway, or the Anthropic API.
+2. Optionally set up an AI provider in **Settings**: Codex CLI, Claude Code, OpenCode CLI, Amazon Bedrock, an OpenAI-compatible gateway, or the Anthropic API.
    Choose an explicit model and run **Test connection**.
 3. Open **Author**, pick a published datasource, and either ask the assistant for a draft or add metrics yourself.
 4. Review the result and publish. **Activity** keeps the receipt, and **Metric Manager** takes it from there.
 
-## Your data stays on your machine
+## Your data and connections
 
 - Tableau tokens, AI provider keys, custom header values, and credential commands are each stored as their own entry in macOS Keychain or Windows Credential Manager; the app database keeps only a reference.
-  The app reads a secret only when a request needs it, so launching the app or opening Settings never asks for Keychain access.
+  Profile listings use stored references without reading secret values.
+  Connection restoration, provider requests, and legacy-secret migration can access the credential store.
 - Settings show a saved secret as `***************`, which reveals nothing about its length or content.
-- Local Codex and Claude Code profiles use the account signed into the official CLI.
-  The CLI owns login, credential storage, and refresh; Pulse stores only the provider settings.
+- Local providers inherit native CLI credentials and configuration, including API keys, account sign-in, and configured provider routes.
+  The CLI owns authentication; Pulse stores the launch command and model settings and does not choose a different billing route automatically.
+- Local providers inherit native instructions, tools, skills, hooks, plugins, and MCP servers unless your launch options change them.
+  Tool actions take effect directly, outside app proposal review, publication receipts, and undo.
 - Drafts, settings, and publication receipts live in your user profile: `~/Library/Application Support/com.ahillspace.pulsemetricstudio/` on macOS, `%APPDATA%\com.ahillspace.pulsemetricstudio\` on Windows.
 - The app's backend only listens on `127.0.0.1` and accepts requests signed by its own window.
 - A provider can mint short-lived tokens with a credential command; the first time a new command runs, the app shows the exact command and asks you to allow it. Saved commands are never shown again in Settings, because their arguments can contain secrets.
 - The backend trusts your operating system's certificate store so that corporate TLS inspection works, which means any root certificate your system trusts can inspect Tableau and AI traffic.
-- Datasource metadata sent to the AI provider is limited to field names, captions, types, and calculated-field formulas, never row data.
+- The app sends datasource field names, captions, types, and calculated-field formulas to the AI provider, without querying row data for the prompt.
+  The assistant also receives your conversation, pasted content, and current draft context.
+  Local agents can retrieve additional data through tools and include it in requests to their provider.
 
-### Use a local account
+### Configure a local CLI
 
-Install the official [Codex CLI](https://learn.chatgpt.com/docs/cli) or [Claude Code](https://code.claude.com/docs/en/setup) separately.
-Complete sign-in through the CLI's own terminal flow:
-
-```sh
-codex login
-```
+Install Codex CLI, [Claude Code](https://code.claude.com/docs/en/setup), or OpenCode separately.
+Configure authentication through the CLI's own supported flow, for example:
 
 ```sh
 claude auth login
 ```
 
-In **Settings**, choose the corresponding local account provider and enter a model supported by your account.
-Use **Check setup** to check installation and sign-in without sending a model request.
+In **Settings**, choose the corresponding local provider and enter a model supported by your CLI configuration.
+Use **Launch command** for an executable and optional prefix arguments.
+For a new or edited OpenCode launch command, use **Reload models** before selecting a model and saving the profile.
+Editing the command does not execute it.
+The app adds the headless command, selected model, and response format; do not include those options yourself.
+Quote paths or arguments containing spaces.
+Shell expansion and implicit script invocation are unavailable; use an explicit interpreter command for scripts.
+Use **Check setup** to check launch configuration without sending a model request.
 Use **Test connection** to verify the selected model; this consumes account usage.
 For account profiles, a successful test verifies that request.
 The readiness indicator stays yellow when the CLI does not expose a stable account identity between runs.
 If discovery cannot find your installation, provide the executable location.
-The app reports unsupported CLI capabilities instead of dropping required request restrictions.
+The app reports unsupported CLI capabilities instead of silently changing the requested execution mode.
 
-Multiple profiles for one CLI share its current signed-in account.
-Switch accounts through the CLI, then check setup again.
+Launch options control native behavior, for example:
+
+```sh
+codex --sandbox read-only
+claude --safe-mode
+```
+
+Pulse does not add safe mode, unrestricted access, auto-approval, or isolated configuration flags automatically.
+Native headless permission handling applies; the app does not provide an interactive CLI approval terminal.
+The app validates final structured proposals against its operation schema.
+Catalog fields remain authoritative for proposed metrics and slicers.
+
+Multiple profiles for one CLI share its native configuration unless their launch options select different settings.
+Switch credentials through the CLI, then test the profile again.
 Pulse does not automatically sign you in, sign you out, or select another provider after a failure.
 Usage and charges follow your vendor account settings, including any enabled extra credits.
 Subscription sign-in does not guarantee that every request uses included subscription allocation.
@@ -155,7 +180,7 @@ The package includes its own Node runtime and native SQLite module, so end users
 | `src-tauri` | Desktop shell and OS credential broker |
 | `scripts` | Development, packaging, install, release, and unit-test commands |
 
-Maintenance guidance and the SQLite contract are in the `docs` directory.
+Read the [maintainer guide](docs/PULSE_MAINTAINER_GUIDE.md) for architecture and operation flows, the [SQLite contract](docs/PULSE_SQLITE.md) for state and recovery, and the [architecture audit](docs/ARCHITECTURE_AUDIT.md) for findings and coverage limits.
 The Windows target is Windows 11 x64.
 macOS targets include Apple silicon and Intel, with a declared minimum of macOS 11.0.
 
@@ -172,6 +197,7 @@ Thank you to their maintainers.
 | [better-sqlite3](https://github.com/WiseLibs/better-sqlite3) and [SQLite](https://sqlite.org) | MIT; public domain | Local storage |
 | [React](https://react.dev) and [Zustand](https://github.com/pmndrs/zustand) | MIT | User interface and state |
 | [Zod](https://zod.dev) | MIT | Shared request and metric contracts |
+| [pngjs](https://github.com/pngjs/pngjs) | MIT | Preview image decoding and CRC validation |
 | [AWS SDK for JavaScript](https://github.com/aws/aws-sdk-js-v3) | Apache-2.0 | Amazon Bedrock provider |
 | [dotenv](https://github.com/motdotla/dotenv) | BSD-2-Clause | Development configuration |
 | [keyring](https://github.com/open-source-cooperative/keyring-rs) | MIT or Apache-2.0 | Credential Manager access on Windows |

@@ -66,12 +66,14 @@ impl Updater {
         let channel = if cfg!(debug_assertions) {
             None
         } else {
-            read_channel(data_dir).zip(bundled_installer(app)).map(|(repository, installer)| Channel {
-                repository,
-                installer,
-                data_dir: data_dir.to_path_buf(),
-                log_path: data_dir.join(format!("{log_slug}-update.log")),
-            })
+            read_channel(data_dir)
+                .zip(bundled_installer(app))
+                .map(|(repository, installer)| Channel {
+                    repository,
+                    installer,
+                    data_dir: data_dir.to_path_buf(),
+                    log_path: data_dir.join(format!("{log_slug}-update.log")),
+                })
         };
         Self {
             channel,
@@ -90,7 +92,12 @@ impl Updater {
 
     /// Checks at launch and then once a day, telling the main window whenever the answer changes.
     pub fn start(app: AppHandle, log: impl Fn(&str) + Send + 'static) {
-        let Some(channel) = app.state::<Updater>().channel.as_ref().map(|channel| channel.repository.clone()) else {
+        let Some(channel) = app
+            .state::<Updater>()
+            .channel
+            .as_ref()
+            .map(|channel| channel.repository.clone())
+        else {
             log("updates: no update channel; this copy was not installed by the installer");
             return;
         };
@@ -117,7 +124,10 @@ impl Updater {
     }
 
     fn latest_version(&self) -> Result<String, String> {
-        let channel = self.channel.as_ref().ok_or("No update channel is recorded.")?;
+        let channel = self
+            .channel
+            .as_ref()
+            .ok_or("No update channel is recorded.")?;
         let child = installer_command(channel, InstallerAction::LatestVersion)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -151,7 +161,9 @@ impl Updater {
 
     /// Runs the installer once the app has stopped its services and is exiting.
     pub fn launch_pending(&self) -> Result<(), String> {
-        let Some(channel) = self.channel.as_ref() else { return Ok(()) };
+        let Some(channel) = self.channel.as_ref() else {
+            return Ok(());
+        };
         if !self.pending.swap(false, Ordering::AcqRel) {
             return Ok(());
         }
@@ -177,7 +189,10 @@ impl Updater {
 }
 
 fn read_channel(data_dir: &Path) -> Option<String> {
-    let repository = std::fs::read_to_string(data_dir.join(CHANNEL_FILE)).ok()?.trim().to_string();
+    let repository = std::fs::read_to_string(data_dir.join(CHANNEL_FILE))
+        .ok()?
+        .trim()
+        .to_string();
     valid_repository(&repository).then_some(repository)
 }
 
@@ -187,7 +202,9 @@ fn valid_repository(repository: &str) -> bool {
         part.is_some_and(|part| {
             !part.is_empty()
                 && !part.starts_with(['.', '-'])
-                && part.chars().all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
+                && part
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
         })
     };
     valid_part(parts.next()) && valid_part(parts.next()) && parts.next().is_none()
@@ -195,7 +212,11 @@ fn valid_repository(repository: &str) -> bool {
 
 fn bundled_installer(app: &AppHandle) -> Option<PathBuf> {
     let resources = app.path().resource_dir().ok()?;
-    let script = if cfg!(windows) { "install.ps1" } else { "install.sh" };
+    let script = if cfg!(windows) {
+        "install.ps1"
+    } else {
+        "install.sh"
+    };
     [
         resources.join("resources").join("installer").join(script),
         resources.join("installer").join(script),
@@ -233,7 +254,13 @@ fn installer_command(channel: &Channel, action: InstallerAction) -> Command {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let mut command = Command::new("powershell.exe");
     command
-        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
         .arg(&channel.installer)
         .args(match action {
             InstallerAction::LatestVersion => &["-Action", "LatestVersion"][..],
@@ -245,7 +272,10 @@ fn installer_command(channel: &Channel, action: InstallerAction) -> Command {
     command
 }
 
-fn wait_with_timeout(mut child: Child, timeout: Duration) -> Result<(bool, String, String), String> {
+fn wait_with_timeout(
+    mut child: Child,
+    timeout: Duration,
+) -> Result<(bool, String, String), String> {
     // Drain both pipes while waiting so a chatty installer cannot fill one and stall.
     let drain = |pipe: Option<Box<dyn Read + Send>>| {
         std::thread::spawn(move || {
@@ -256,8 +286,18 @@ fn wait_with_timeout(mut child: Child, timeout: Duration) -> Result<(bool, Strin
             text
         })
     };
-    let stdout = drain(child.stdout.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
-    let stderr = drain(child.stderr.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
+    let stdout = drain(
+        child
+            .stdout
+            .take()
+            .map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
+    );
+    let stderr = drain(
+        child
+            .stderr
+            .take()
+            .map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
+    );
     let deadline = Instant::now() + timeout;
     let status = loop {
         if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
@@ -287,17 +327,25 @@ fn newer(candidate: &str, current: &str) -> bool {
 }
 
 fn main_window(window: &tauri::WebviewWindow) -> Result<(), String> {
-    (window.label() == "main").then_some(()).ok_or_else(|| "This window cannot manage updates.".to_string())
+    (window.label() == "main")
+        .then_some(())
+        .ok_or_else(|| "This window cannot manage updates.".to_string())
 }
 
 #[tauri::command]
-pub fn pulse_update_status(window: tauri::WebviewWindow, updater: tauri::State<'_, Updater>) -> Result<UpdateStatus, String> {
+pub fn pulse_update_status(
+    window: tauri::WebviewWindow,
+    updater: tauri::State<'_, Updater>,
+) -> Result<UpdateStatus, String> {
     main_window(&window)?;
     Ok(updater.status())
 }
 
 #[tauri::command]
-pub fn pulse_update_apply(window: tauri::WebviewWindow, updater: tauri::State<'_, Updater>) -> Result<(), String> {
+pub fn pulse_update_apply(
+    window: tauri::WebviewWindow,
+    updater: tauri::State<'_, Updater>,
+) -> Result<(), String> {
     main_window(&window)?;
     updater.request(window.app_handle())
 }
@@ -322,7 +370,10 @@ mod tests {
     #[test]
     fn a_long_installer_output_does_not_stall_the_check() {
         let child = Command::new("/bin/sh")
-            .args(["-c", "head -c 200000 /dev/zero | tr '\\0' x >&2; echo 0.1.2"])
+            .args([
+                "-c",
+                "head -c 200000 /dev/zero | tr '\\0' x >&2; echo 0.1.2",
+            ])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -346,11 +397,21 @@ mod tests {
 
     #[test]
     fn the_recorded_channel_is_read_and_validated() {
-        let directory = std::env::temp_dir().join(format!("pulse-update-channel-{}", uuid::Uuid::new_v4().simple()));
+        let directory = std::env::temp_dir().join(format!(
+            "pulse-update-channel-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
         std::fs::create_dir_all(&directory).unwrap();
         assert_eq!(read_channel(&directory), None);
-        std::fs::write(directory.join(CHANNEL_FILE), "ahillspace/pulse-metric-studio\r\n").unwrap();
-        assert_eq!(read_channel(&directory).as_deref(), Some("ahillspace/pulse-metric-studio"));
+        std::fs::write(
+            directory.join(CHANNEL_FILE),
+            "ahillspace/pulse-metric-studio\r\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_channel(&directory).as_deref(),
+            Some("ahillspace/pulse-metric-studio")
+        );
         std::fs::write(directory.join(CHANNEL_FILE), "--repo/x").unwrap();
         assert_eq!(read_channel(&directory), None);
         std::fs::remove_dir_all(&directory).unwrap();

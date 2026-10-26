@@ -12,7 +12,7 @@ process.env.PULSE_METRIC_STUDIO_DATA_DIR = dataDir;
 const sessions = await import('./session.js');
 const { closeDb } = await import('../db/index.js');
 const { registerTableauRoutes } = await import('./routes.js');
-const { tableauFetch } = await import('./rest-client.js');
+const { tableauFetch, DEFAULT_MAX_RESPONSE_BYTES } = await import('./rest-client.js');
 const { patSignin } = await import('./signin.js');
 
 test.after(() => { sessions.clearSession(); closeDb(); rmSync(dataDir, { recursive: true, force: true }); });
@@ -68,6 +68,30 @@ async function until(condition: () => boolean) {
   const deadline = Date.now() + 3000;
   while (!condition()) { assert.ok(Date.now() < deadline, 'Timed out waiting for remote request'); await new Promise((resolve) => setTimeout(resolve, 5)); }
 }
+
+test('status and activation discard oversized display-name responses without losing the session', async () => {
+  for (const operation of ['status', 'activate'] as const) {
+    const profile = sessions.saveConnection({ label: 'Bounded name', serverUrl: 'https://bounded.example.test', siteContentUrl: '', patName: 'test', storageKind: 'encrypted', patSecret: 'test-pat' });
+    const session = { serverUrl: profile.serverUrl, siteContentUrl: '', siteId: 'site', userId: 'user', token: 'test-token', apiVersion: '3.27' };
+    sessions.setSession(session, { connectionId: profile.id, patSecret: 'test-pat' });
+    const app = Fastify();
+    await app.register(sensible);
+    registerTableauRoutes(app, {
+      discoverRestApiVersion: async () => '3.27',
+      patSignin: async () => ({ token: 'test-token', siteId: 'site', userId: 'user' }),
+      fetchImpl: async () => Response.json({ user: { fullName: 'Unbounded name' } }, { headers: { 'content-length': String(DEFAULT_MAX_RESPONSE_BYTES + 1) } }),
+    });
+    try {
+      const result = await app.inject({ method: operation === 'status' ? 'GET' : 'POST', url: operation === 'status' ? '/api/tableau/status' : `/api/tableau/connections/${profile.id}/activate` });
+      assert.equal(result.statusCode, 200);
+      assert.ok(result.json().connected === true || result.json().ok === true);
+      assert.equal(sessions.getSession()?.userName, undefined);
+    } finally {
+      sessions.clearSession();
+      await app.close();
+    }
+  }
+});
 function reject(res: ServerResponse) { res.statusCode = 401; res.end('{}'); }
 
 for (const action of ['switch', 'disconnect'] as const) {
