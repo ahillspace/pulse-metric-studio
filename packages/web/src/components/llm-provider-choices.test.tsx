@@ -30,6 +30,8 @@ test('clean-install setup renders choices without broken or configured profile c
   for (const choice of PROVIDER_CHOICES) assert.ok(html.includes(choice.label));
   assert.match(html, /Choose an assistant provider/);
   assert.match(html, /subscription access supported by OpenCode/);
+  assert.match(html, /Local providers inherit your CLI configuration and launch options/);
+  assert.doesNotMatch(html, /disabled=""|Codex CLI is unavailable/);
   assert.doesNotMatch(html, /unhealthy|Not tested|Chat Completions|Converse/);
 });
 
@@ -97,6 +99,24 @@ test('protocol conversion preserves compatible API drafts and clears incompatibl
   }
 });
 
+test('an unchecked OpenCode launch command cannot save an unverified catalog model or claim it is unavailable', () => {
+  const props: Parameters<typeof ProfileEditor>[0] = {
+    form: {
+      id: 'opencode', label: 'OpenCode', protocol: 'opencode', baseUrl: '', model: 'opencode/current-model', authMode: 'none',
+      secret: '', hasSecret: false, clearSecret: false, headersText: '{}', headersDirty: false, clearHeaders: false,
+      region: '', awsProfile: '', command: 'opencode --pure', credentialCommand: '', hasCredentialCommand: false,
+      credentialCommandHint: null, clearCredentialCommand: false, allowPrivateNetwork: false, source: 'saved',
+    },
+    setForm: () => {}, dirty: true, existing: true, busy: false,
+    onCheck: async () => {}, onSave: async () => {}, onTest: async () => {}, onSelect: () => {}, onDelete: () => {},
+  };
+  const html = renderToStaticMarkup(<ProfileEditor {...props} />);
+  assert.match(html, /opencode\/current-model/);
+  assert.match(html, /<button[^>]*disabled=""[^>]*>Save profile/);
+  assert.doesNotMatch(html, /currently configured, unavailable|reported no current models/);
+  assert.match(html, /<button[^>]*>Reload models/);
+});
+
 for (const protocol of ['codex-cli', 'claude-code'] as const) {
   test(`${protocol} setup exposes its executable, manual model, and passive account check without API credentials`, () => {
     const choice = providerChoice(protocol);
@@ -114,7 +134,13 @@ for (const protocol of ['codex-cli', 'claude-code'] as const) {
     assert.match(html, /Check setup/);
     assert.match(html, /does not send a model request/);
     assert.match(html, /Test connection sends a model request/);
-    assert.match(html, /CLI executable/);
+    assert.match(html, /inherit your CLI credentials, instructions, tools, skills, hooks, and MCP servers/);
+    assert.match(html, /unless your launch options change them/);
+    assert.match(html, /outside draft review/);
+    assert.match(html, /Launch command/);
+    assert.match(html, /app adds headless, model, and response-format options/);
+    assert.match(html, /Shell expansion is unavailable/);
+    assert.match(html, protocol === 'codex-cli' ? /codex --sandbox read-only/ : /claude --safe-mode/);
     assert.match(html, new RegExp(`${choice.command} (?:auth )?login`));
     assert.match(html, /No supported model catalog/);
     assert.doesNotMatch(html, /Key or token|Credential command|Safe custom headers|AWS region|Endpoint<input|Authentication<select/);
@@ -126,7 +152,7 @@ for (const protocol of ['codex-cli', 'claude-code'] as const) {
       reason: 'Install the CLI, then check setup again.', resolvedModel: null,
     }} />);
     assert.match(missing, /CLI: Not found/);
-    assert.match(missing, /Account: Not configured/);
+    assert.match(missing, /Configuration: Not configured/);
     assert.match(missing, /Install the CLI/);
     const configured = renderToStaticMarkup(<ProfileEditor {...props} busy={true} setupStatus={{
       installed: true, configured: true, healthy: null, reasonCode: 'not_tested',
@@ -134,13 +160,20 @@ for (const protocol of ['codex-cli', 'claude-code'] as const) {
     }} />);
     assert.match(configured, /^<fieldset[^>]*disabled=""/);
     assert.match(configured, /CLI: Installed/);
-    assert.match(configured, /Account: Configured in CLI/);
+    assert.match(configured, /Configuration: Ready for test/);
     assert.match(configured, /Account detected. No model request was sent/);
     assert.doesNotMatch(configured, />Connected</);
     const edited = renderToStaticMarkup(<ProfileEditor {...props} existing={true} status={{
       ...props.form, source: 'saved', headers: {}, installed: true, configured: true, available: true,
       healthy: true, reasonCode: 'ready', reason: 'Old saved executable was verified.', resolvedModel: 'old-model',
     }} />);
-    assert.doesNotMatch(edited, /Old saved executable was verified|Account: Configured in CLI/);
+    assert.doesNotMatch(edited, /Old saved executable was verified|Configuration: Ready for test/);
+    const saved = renderToStaticMarkup(<ProfileEditor {...props} existing={true} dirty={false} status={{
+      ...props.form, source: 'saved', headers: {}, installed: true, configured: true, available: true,
+      healthy: true, reasonCode: 'ready', reason: 'Previously verified.', resolvedModel: 'selected-model',
+    }} />);
+    assert.doesNotMatch(saved, /<button[^>]*disabled=""[^>]*>Test connection/);
+    assert.doesNotMatch(saved, /<button[^>]*disabled=""[^>]*>Use provider/);
+    assert.match(saved, /<button[^>]*>Save profile/);
   });
 }

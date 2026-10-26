@@ -117,7 +117,7 @@ export async function readBoundedBody(resp: Response, maxBytes: number, timeoutM
 export async function tableauFetch(
   session: TableauSession,
   path: string,
-  init: RequestInit & { timeoutMs?: number } = {},
+  init: RequestInit & { timeoutMs?: number; maxResponseBytes?: number } = {},
 ): Promise<Response> {
   const requestToken = session.token;
   const context = getSessionContext(session);
@@ -134,7 +134,8 @@ export async function tableauFetch(
   // "Unknown resource" (404003) for a versioned path, retry with the next
   // known-good candidate and keep it for the rest of the session.
   if (resp.status === 404 && /^\/api\/\d+\.\d+\//.test(path)) {
-    const text = await resp.clone().text().catch(() => '');
+    const text = await readBoundedBody(resp, init.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES, init.timeoutMs ?? 30_000);
+    resp = new Response(text, { status: resp.status, statusText: resp.statusText, headers: resp.headers });
     if (text.includes('404003') || /Unknown resource/i.test(text)) {
       const next = nextVersionCandidate(session.apiVersion);
       if (next) {
@@ -296,7 +297,7 @@ function validationDetail(resp: Response): string {
 
 /** GET expecting JSON; throws typed TableauError on failure. */
 export async function getJson<T>(session: TableauSession, path: string, accept?: string, timeoutMs?: number, maxResponseBytes?: number): Promise<T> {
-  const resp = await tableauFetch(session, path, { method: 'GET', headers: { Accept: accept ?? 'application/json' }, timeoutMs });
+  const resp = await tableauFetch(session, path, { method: 'GET', headers: { Accept: accept ?? 'application/json' }, timeoutMs, maxResponseBytes });
   const body = await parseBody(resp, maxResponseBytes, timeoutMs);
   if (!resp.ok) {
     const snippet = redactCredentials(typeof body === 'string' ? body : JSON.stringify(body) ?? '', [session.token]).slice(0, 500);
@@ -324,6 +325,7 @@ export async function postJson<T>(
     },
     body: typeof body === 'string' ? body : JSON.stringify(body),
     timeoutMs: opts.timeoutMs,
+    maxResponseBytes: opts.maxResponseBytes,
   });
   const respBody = await parseBody(resp, opts.maxResponseBytes, opts.timeoutMs);
   if (!resp.ok) {

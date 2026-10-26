@@ -50,15 +50,14 @@ fn pulse_shutdown(
     state: tauri::State<'_, ShutdownState>,
     action: ShutdownAction,
 ) -> Result<(), String> {
-    if window.label() != "main"
-        || !is_pulse_identifier(&window.app_handle().config().identifier)
-    {
+    if window.label() != "main" || !is_pulse_identifier(&window.app_handle().config().identifier) {
         return Err("This window cannot close Pulse Metric Studio.".into());
     }
     match action {
         ShutdownAction::Ready => {
             if state.requested.load(Ordering::Acquire) {
-                window.emit("pulse-shutdown-requested", ())
+                window
+                    .emit("pulse-shutdown-requested", ())
                     .map_err(|_| "The desktop shutdown listener is unavailable.".to_string())?;
             }
         }
@@ -152,15 +151,28 @@ fn unix_timestamp() -> String {
         .unwrap_or_else(|_| "?".into())
 }
 
-fn node_version(version: &str) -> Option<(u32, u32)> {
+fn node_version(version: &str) -> Option<(u32, u32, u32)> {
     let mut parts = version.trim().trim_start_matches('v').split('.');
-    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+    let version = (
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+    );
+    parts.next().is_none().then_some(version)
 }
 
-// 22.15 is the first Node 22 release with --use-system-ca, which the server needs
-// to trust corporate gateways whose certificates chain to the OS trust store.
+fn minimum_node_version() -> (u32, u32, u32) {
+    let package: serde_json::Value = serde_json::from_str(include_str!("../../package.json"))
+        .expect("The compiled package manifest must be valid JSON.");
+    let requirement = package["engines"]["node"]
+        .as_str()
+        .and_then(|value| value.strip_prefix(">="))
+        .expect("The package Node.js requirement must declare a minimum version.");
+    node_version(requirement).expect("The package Node.js minimum must have three version parts.")
+}
+
 fn supported_node_runtime(version: &str) -> bool {
-    node_version(version).is_some_and(|version| version >= (22, 15))
+    node_version(version).is_some_and(|version| version >= minimum_node_version())
 }
 
 fn bundled_node_candidates(app: &AppHandle) -> Vec<PathBuf> {
@@ -224,30 +236,38 @@ fn resolve_node_runtime(app: &AppHandle) -> Result<PathBuf, String> {
     }
 
     let mut checked = HashSet::new();
-    let mut old_versions = Vec::new();
+    let mut unsupported = Vec::new();
     for candidate in candidates {
         if !candidate.exists() || !checked.insert(candidate.clone()) {
             continue;
         }
-        let Ok(output) = Command::new(&candidate).arg("--version").output() else {
+        let Ok(output) = Command::new(&candidate)
+            .args(["--use-system-ca", "--version"])
+            .output()
+        else {
             continue;
         };
         if !output.status.success() {
+            unsupported.push(format!(
+                "{} (required startup options unavailable)",
+                candidate.display()
+            ));
             continue;
         }
         let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if supported_node_runtime(&version) {
             return Ok(candidate);
         }
-        old_versions.push(format!("{} ({version})", candidate.display()));
+        unsupported.push(format!("{} ({version})", candidate.display()));
     }
 
-    if old_versions.is_empty() {
-        Err("Node.js 22.15 or newer is unavailable. Reinstall the desktop app or set PULSE_METRIC_STUDIO_NODE_RUNTIME.".to_string())
+    let (major, minor, patch) = minimum_node_version();
+    if unsupported.is_empty() {
+        Err(format!("Node.js {major}.{minor}.{patch} or newer with --use-system-ca is unavailable. Reinstall the desktop app or set PULSE_METRIC_STUDIO_NODE_RUNTIME."))
     } else {
         Err(format!(
-            "Node.js 22.15 or newer is required. Unsupported runtimes: {}",
-            old_versions.join(", ")
+            "Node.js {major}.{minor}.{patch} or newer with --use-system-ca is required. Unsupported runtimes: {}",
+            unsupported.join(", ")
         ))
     }
 }
@@ -466,7 +486,11 @@ fn main() {
         RunEvent::Exit => {
             stop_services(app_handle);
             if let Err(error) = app_handle.state::<Updater>().launch_pending() {
-                log_line(app_handle, &DesktopIdentity::from_app(app_handle), &format!("updates: {error}"));
+                log_line(
+                    app_handle,
+                    &DesktopIdentity::from_app(app_handle),
+                    &format!("updates: {error}"),
+                );
             }
         }
         _ => {}
@@ -627,8 +651,11 @@ mod tests {
     }
     #[test]
     fn node_versions_are_parsed() {
-        assert_eq!(node_version("v22.23.2\n"), Some((22, 23)));
+        assert_eq!(node_version("v22.23.2\n"), Some((22, 23, 2)));
         assert_eq!(node_version("not-node"), None);
+        assert_eq!(node_version("v22.15"), None);
+        assert_eq!(node_version("v22.15.0-preview"), None);
+        assert_eq!(minimum_node_version(), (22, 15, 0));
         assert!(!supported_node_runtime("v20.20.2"));
         assert!(!supported_node_runtime("v22.14.0"));
         assert!(supported_node_runtime("v22.15.0"));

@@ -62,7 +62,7 @@ export function ProposalReview({ entry }: { entry: DraftEditor }) {
           ))}
         </ul>
       </details>
-      <details open className="pulse-proposal-result">
+      <details className="pulse-proposal-result">
         <summary>Review resulting metrics</summary>
         <ul>
           {Object.values(merged.document.metrics)

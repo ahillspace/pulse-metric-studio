@@ -64,11 +64,36 @@ test('resource composition bundles the installers the app updates itself with', 
   }
 });
 
-test('unsupported runtimes fail with the supported SQLite runtime floor', () => {
-  for (const version of ['v20.20.2', '21.7.3', 'not-node']) {
-    assert.throws(() => assertSupportedNode(version), /Node.js 22 or newer is required/);
+test('unsupported runtimes fail with the package runtime floor', () => {
+  for (const version of ['22.14.0', 'v20.20.2', '21.7.3', 'v22.0.0', '22.14.99', 'not-node']) {
+    assert.throws(() => assertSupportedNode(version), /Node.js 22\.15\.0 or newer is required/);
   }
-  for (const version of ['v22.23.2', '24.0.0', '25.6.1']) assertSupportedNode(version);
+  for (const version of ['22.15.0', 'v22.23.2', '24.0.0', '25.6.1']) assertSupportedNode(version);
+});
+
+test('runtime inspection rejects an executable without the required startup capability', () => {
+  const calls = [];
+  const runtime = (_file, args) => {
+    calls.push(args);
+    return args.includes('--use-system-ca')
+      ? { status: 9, stdout: '', stderr: 'unsupported startup option' }
+      : { status: 0, stdout: 'v24.0.0', stderr: '' };
+  };
+  assert.throws(() => validateNodeExecutable(process.execPath, runtime), /Cannot inspect Node runtime/);
+  assert.deepEqual(calls, [['--use-system-ca', '--version']]);
+});
+
+test('packaged SQLite is exercised with the same required startup capability', () => {
+  const calls = [];
+  const runtime = (_file, args) => {
+    calls.push(args);
+    return args.includes('--use-system-ca')
+      ? { status: 0, stdout: args.includes('--version') ? 'v24.0.0' : '', stderr: '' }
+      : { status: 9, stdout: '', stderr: 'startup capability not enabled' };
+  };
+  verifyPackagedSqlite(process.execPath, path.join(root, 'scripts'), runtime);
+  assert.equal(calls.length, 2);
+  assert.ok(calls[1].includes('-e'));
 });
 
 test('packaged SQLite check cannot fall back to a working repository dependency', () => {

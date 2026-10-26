@@ -4,6 +4,7 @@ export * from './ops.js';
 export * from './timeframes.js';
 export * from './dimensional-fork.js';
 export * from './llm-contracts.js';
+export * from './local-launch-command.js';
 export * from './pulse-contracts.js';
 export * from './pulse-domain.js';
 export * from './pulse-proposal.js';

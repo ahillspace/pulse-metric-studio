@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { parseLaunchCommand } from './local-launch-command.js';
 
 export const LLM_PROTOCOLS = [
   'opencode',
@@ -103,12 +104,10 @@ export const LlmProfileWriteSchema = z.object({
 }).superRefine((profile, ctx) => {
   const localAccount = profile.protocol === 'codex-cli' || profile.protocol === 'claude-code';
   if (localAccount) {
-    if (profile.authMode !== 'local-account') ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['authMode'], message: 'This provider requires a locally signed-in account.' });
+    if (profile.authMode !== 'local-account') ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['authMode'], message: 'This provider uses authentication managed by the local CLI.' });
     if (profile.baseUrl || profile.secret || Object.keys(profile.headers ?? {}).length || profile.credentialCommand || profile.region || profile.awsProfile || profile.allowPrivateNetwork) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['protocol'], message: 'Local account profiles use only the command and model fields.' });
     }
-    const executable = profile.protocol === 'codex-cli' ? 'codex' : 'claude';
-    if (profile.command && !isCliCommand(profile.command, executable)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['command'], message: `The command must resolve to a ${executable} executable.` });
   } else if (profile.authMode === 'local-account') {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['authMode'], message: 'This protocol does not use a local account.' });
   }
@@ -148,8 +147,11 @@ export const LlmProfileWriteSchema = z.object({
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['baseUrl'], message: 'Endpoint URLs cannot contain query strings or fragments.' });
     }
   }
-  if (profile.protocol === 'opencode' && profile.command && !isCliCommand(profile.command, 'opencode')) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['command'], message: 'The OpenCode command must resolve to an opencode executable.' });
+  if ((localAccount || profile.protocol === 'opencode') && profile.command) {
+    try { parseLaunchCommand(profile.command); }
+    catch (error) {
+      if (!isLegacyAbsoluteExecutablePath(profile.command)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['command'], message: error instanceof Error ? error.message : 'Enter a valid local launch command.' });
+    }
   }
   if (profile.protocol === 'opencode' && profile.credentialCommand) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['credentialCommand'], message: 'OpenCode profiles authenticate through the OpenCode CLI, not a credential command.' });
@@ -160,6 +162,13 @@ export const LlmProfileWriteSchema = z.object({
 });
 
 export type LlmProfileWrite = z.input<typeof LlmProfileWriteSchema>;
+
+/** Legacy saved paths are resolved as whole files before launch-command tokenization. */
+function isLegacyAbsoluteExecutablePath(command: string): boolean {
+  if (/["\u0000-\u001f\u007f]/.test(command) || /\.exe\s|\s-{1,2}\S|\s'/i.test(command)) return false;
+  const absolute = /^(?:[a-z]:[\\/]|[\\/]{2}|\/)/i.test(command);
+  return absolute && /[\\/][a-z0-9_.-]+$/i.test(command);
+}
 
 export interface LlmProfilePublic {
   id: string;
@@ -229,10 +238,4 @@ export interface LlmErrorResponse {
     retryable: boolean;
     reference: string;
   };
-}
-
-function isCliCommand(command: string, executable: string): boolean {
-  const normalized = command.replace(/\\/g, '/');
-  const basename = normalized.slice(normalized.lastIndexOf('/') + 1).toLowerCase();
-  return basename === executable || basename === `${executable}.exe`;
 }

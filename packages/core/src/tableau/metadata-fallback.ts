@@ -335,6 +335,7 @@ async function fetchGraphqlNodes(
   luid: string,
 ): Promise<{ name?: string; nodes: GraphqlNode[] } | null> {
   const nodes: GraphqlNode[] = [];
+  const seenCursors = new Set<string>();
   let hasNextPage = true;
   let after: string | null = null;
   let dsName: string | undefined;
@@ -357,8 +358,12 @@ async function fetchGraphqlNodes(
     for (const node of (conn.nodes ?? []) as GraphqlNode[]) nodes.push(node);
     const pageInfo = conn.pageInfo ?? {};
     hasNextPage = pageInfo.hasNextPage === true;
-    after = pageInfo.endCursor ?? null;
-    if (hasNextPage && !after) break; // malformed pagination guard
+    const next = pageInfo.endCursor;
+    if (hasNextPage && (typeof next !== 'string' || !next || seenCursors.has(next))) {
+      throw new TableauError('Field metadata pagination is incomplete.', 502);
+    }
+    if (hasNextPage) seenCursors.add(next);
+    after = next ?? null;
   }
 
   return { name: dsName, nodes };

@@ -5,7 +5,7 @@ import {
   CredentialBrokerError,
   type CredentialBrokerClient,
 } from './credential-broker.js';
-import { apiPath, TableauError, type TableauSession } from './rest-client.js';
+import { apiPath, DEFAULT_MAX_RESPONSE_BYTES, readBoundedBody, TableauError, type TableauSession } from './rest-client.js';
 import { invalidateFieldsCache, listDatasources } from './vds-fields.js';
 import { discoverRestApiVersion, patSignin } from './signin.js';
 import {
@@ -175,7 +175,7 @@ export function registerTableauRoutes(
         },
       );
       if (!response.ok) throw new Error(String(response.status));
-      captureCurrentUserName(session, await response.json().catch(() => null));
+      captureCurrentUserName(session, await readBoundedBody(response, DEFAULT_MAX_RESPONSE_BYTES, 10_000).then(text => JSON.parse(text)).catch(() => null));
       if (!isSessionCurrent(session)) return { connected: false, hasStoredProfile: getStoredConnection() != null };
       return { connected: true, restored: false, session: publicSession(session) };
     } catch {
@@ -655,7 +655,7 @@ async function ensureCurrentUserName(
       },
     );
     if (!response.ok) return;
-    captureCurrentUserName(session, await response.json().catch(() => null));
+    captureCurrentUserName(session, await readBoundedBody(response, DEFAULT_MAX_RESPONSE_BYTES, 10_000).then(text => JSON.parse(text)).catch(() => null));
   } catch {
     // display name is best-effort; the picker falls back to a generic "(you)" label
   }

@@ -60,29 +60,45 @@ mod security_tool {
     const SECURITY_TOOL: &str = "/usr/bin/security";
     const ITEM_NOT_FOUND: i32 = 44;
 
-    fn run(arguments: &[&str], keychain: Option<&Path>, input: Option<&str>) -> Result<Output, StoreError> {
+    fn run(
+        arguments: &[&str],
+        keychain: Option<&Path>,
+        input: Option<&str>,
+    ) -> Result<Output, StoreError> {
         let mut command = Command::new(SECURITY_TOOL);
         command.args(arguments);
         if let Some(keychain) = keychain {
             command.arg(keychain);
         }
         let mut child = command
-            .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|_| StoreError::Unavailable)?;
         if let Some(input) = input {
             let mut stdin = child.stdin.take().ok_or(StoreError::Unavailable)?;
-            stdin.write_all(input.as_bytes()).map_err(|_| StoreError::Unavailable)?;
+            stdin
+                .write_all(input.as_bytes())
+                .map_err(|_| StoreError::Unavailable)?;
         }
-        child.wait_with_output().map_err(|_| StoreError::Unavailable)
+        child
+            .wait_with_output()
+            .map_err(|_| StoreError::Unavailable)
     }
 
     /// Service and account names are app-generated; the interactive command line
     /// quotes them, so they must not contain quoting or whitespace characters.
     fn plain_name(value: &str) -> Result<&str, StoreError> {
-        if value.is_empty() || value.chars().any(|c| c == '"' || c == '\\' || c.is_whitespace() || c.is_control()) {
+        if value.is_empty()
+            || value
+                .chars()
+                .any(|c| c == '"' || c == '\\' || c.is_whitespace() || c.is_control())
+        {
             return Err(StoreError::Unavailable);
         }
         Ok(value)
@@ -105,23 +121,48 @@ mod security_tool {
     /// `-g` prints `password: "text"` for plain text and `password: 0x<hex>  "..."`
     /// otherwise, so the value reads back exactly whatever bytes it holds.
     pub(super) fn parse_password(diagnostics: &str) -> Option<String> {
-        let value = diagnostics.lines().find_map(|line| line.strip_prefix("password: "))?;
+        let value = diagnostics
+            .lines()
+            .find_map(|line| line.strip_prefix("password: "))?;
         if let Some(encoded) = value.strip_prefix("0x") {
             let digits = encoded.split_whitespace().next()?;
             return String::from_utf8(unhex(digits)?).ok();
         }
-        value.strip_prefix('"')?.strip_suffix('"').map(str::to_string)
+        value
+            .strip_prefix('"')?
+            .strip_suffix('"')
+            .map(str::to_string)
     }
 
     pub(super) fn available(keychain: Option<&Path>) -> bool {
-        let arguments: &[&str] = if keychain.is_some() { &["show-keychain-info"] } else { &["default-keychain"] };
+        let arguments: &[&str] = if keychain.is_some() {
+            &["show-keychain-info"]
+        } else {
+            &["default-keychain"]
+        };
         run(arguments, keychain, None).is_ok_and(|output| output.status.success())
     }
 
-    pub(super) fn get(keychain: Option<&Path>, service: &str, account: &str) -> Result<String, StoreError> {
-        let output = run(&["find-generic-password", "-s", plain_name(service)?, "-a", plain_name(account)?, "-g"], keychain, None)?;
+    pub(super) fn get(
+        keychain: Option<&Path>,
+        service: &str,
+        account: &str,
+    ) -> Result<String, StoreError> {
+        let output = run(
+            &[
+                "find-generic-password",
+                "-s",
+                plain_name(service)?,
+                "-a",
+                plain_name(account)?,
+                "-g",
+            ],
+            keychain,
+            None,
+        )?;
         match output.status.code() {
-            Some(0) => parse_password(&String::from_utf8_lossy(&output.stderr)).ok_or(StoreError::Unavailable),
+            Some(0) => parse_password(&String::from_utf8_lossy(&output.stderr))
+                .ok_or(StoreError::Unavailable),
             Some(ITEM_NOT_FOUND) => Err(StoreError::NotFound),
             _ => Err(StoreError::Unavailable),
         }
@@ -129,10 +170,18 @@ mod security_tool {
 
     /// The secret travels on stdin, never in argv: every local user can read
     /// other processes' arguments on macOS.
-    pub(super) fn set(keychain: Option<&Path>, service: &str, account: &str, secret: &str) -> Result<(), StoreError> {
+    pub(super) fn set(
+        keychain: Option<&Path>,
+        service: &str,
+        account: &str,
+        secret: &str,
+    ) -> Result<(), StoreError> {
         let target = match keychain {
             None => String::new(),
-            Some(path) => format!(" \"{}\"", plain_name(path.to_str().ok_or(StoreError::Unavailable)?)?),
+            Some(path) => format!(
+                " \"{}\"",
+                plain_name(path.to_str().ok_or(StoreError::Unavailable)?)?
+            ),
         };
         let line = format!(
             "add-generic-password -s \"{}\" -a \"{}\" -X {}{target}\n",
@@ -149,8 +198,22 @@ mod security_tool {
         }
     }
 
-    pub(super) fn delete(keychain: Option<&Path>, service: &str, account: &str) -> Result<bool, StoreError> {
-        let output = run(&["delete-generic-password", "-s", plain_name(service)?, "-a", plain_name(account)?], keychain, None)?;
+    pub(super) fn delete(
+        keychain: Option<&Path>,
+        service: &str,
+        account: &str,
+    ) -> Result<bool, StoreError> {
+        let output = run(
+            &[
+                "delete-generic-password",
+                "-s",
+                plain_name(service)?,
+                "-a",
+                plain_name(account)?,
+            ],
+            keychain,
+            None,
+        )?;
         match output.status.code() {
             Some(0) => Ok(true),
             Some(ITEM_NOT_FOUND) => Ok(false),
@@ -183,7 +246,10 @@ impl CredentialStore for SecurityToolStore {
 struct CredentialManagerStore;
 
 #[cfg(target_os = "windows")]
-fn credential_manager_entry(service: &str, account: &str) -> Result<keyring::v1::Entry, StoreError> {
+fn credential_manager_entry(
+    service: &str,
+    account: &str,
+) -> Result<keyring::v1::Entry, StoreError> {
     keyring::v1::Entry::new(service, account).map_err(|_| StoreError::Unavailable)
 }
 
@@ -354,7 +420,10 @@ impl CommandApprovals {
     /// Holds the lock while asking, so concurrent requests for one command show one dialog.
     fn approve(&self, command: &str) -> bool {
         let hash = Self::hash(command);
-        let mut approved = self.approved.lock().unwrap_or_else(|error| error.into_inner());
+        let mut approved = self
+            .approved
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         if approved.contains(&hash) {
             return true;
         }
@@ -410,7 +479,8 @@ impl CredentialContext {
 
     fn store_secret(&self, kind: CredentialKind, secret: &str) -> Result<String, StoreError> {
         let credential_ref = kind.new_ref();
-        self.store.set(&self.service(kind), &credential_ref, secret)?;
+        self.store
+            .set(&self.service(kind), &credential_ref, secret)?;
         Ok(credential_ref)
     }
 
@@ -550,7 +620,9 @@ fn validate_coordinates(
         return Err("The PAT secret is required.".to_string());
     }
     if pat_secret.len() > MAX_STORED_SECRET {
-        return Err(format!("The PAT secret is longer than {MAX_STORED_SECRET} bytes."));
+        return Err(format!(
+            "The PAT secret is longer than {MAX_STORED_SECRET} bytes."
+        ));
     }
     if server_url.len() > MAX_SERVER_URL
         || site_content_url.len() > MAX_NAME
@@ -600,7 +672,9 @@ pub fn tableau_replace_credential(
     if parse_ref(old_credential_ref) != Some(CredentialKind::TableauPat) {
         return Err(store_error_message(StoreError::NotFound));
     }
-    context.get_secret(old_credential_ref).map_err(store_error_message)?;
+    context
+        .get_secret(old_credential_ref)
+        .map_err(store_error_message)?;
     let credential_ref = context
         .store_secret(CredentialKind::TableauPat, &request.pat_secret)
         .map_err(store_error_message)?;
@@ -618,7 +692,9 @@ pub fn tableau_delete_credential(
     if parse_ref(credential_ref) != Some(CredentialKind::TableauPat) {
         return Ok(DeleteCredentialResponse { removed: false });
     }
-    let removed = context.delete_secret(credential_ref).map_err(store_error_message)?;
+    let removed = context
+        .delete_secret(credential_ref)
+        .map_err(store_error_message)?;
     Ok(DeleteCredentialResponse { removed })
 }
 
@@ -896,7 +972,11 @@ fn store_response(request: &ParsedRequest, context: &CredentialContext) -> Broke
         return BrokerResponse::bad_request();
     }
     match context.store_secret(body.kind, &body.secret) {
-        Ok(credential_ref) => BrokerResponse::json(200, "OK", serde_json::json!({ "credentialRef": credential_ref })),
+        Ok(credential_ref) => BrokerResponse::json(
+            200,
+            "OK",
+            serde_json::json!({ "credentialRef": credential_ref }),
+        ),
         Err(_) => BrokerResponse::unavailable(),
     }
 }
@@ -916,7 +996,10 @@ fn delete_response(request: &ParsedRequest, context: &CredentialContext) -> Brok
 }
 
 fn legacy_data_key_response(context: &CredentialContext) -> BrokerResponse {
-    match context.store.get(&context.legacy_data_key_service(), LEGACY_DATA_KEY_ACCOUNT) {
+    match context
+        .store
+        .get(&context.legacy_data_key_service(), LEGACY_DATA_KEY_ACCOUNT)
+    {
         Ok(key) => BrokerResponse::json(200, "OK", serde_json::json!({ "key": key.trim() })),
         Err(StoreError::NotFound) => BrokerResponse::not_found(),
         Err(StoreError::Unavailable) => BrokerResponse::unavailable(),
@@ -924,13 +1007,19 @@ fn legacy_data_key_response(context: &CredentialContext) -> BrokerResponse {
 }
 
 fn delete_legacy_data_key_response(context: &CredentialContext) -> BrokerResponse {
-    match context.store.delete(&context.legacy_data_key_service(), LEGACY_DATA_KEY_ACCOUNT) {
+    match context
+        .store
+        .delete(&context.legacy_data_key_service(), LEGACY_DATA_KEY_ACCOUNT)
+    {
         Ok(removed) => BrokerResponse::json(200, "OK", serde_json::json!({ "removed": removed })),
         Err(_) => BrokerResponse::unavailable(),
     }
 }
 
-fn approve_command_response(request: &ParsedRequest, context: &CredentialContext) -> BrokerResponse {
+fn approve_command_response(
+    request: &ParsedRequest,
+    context: &CredentialContext,
+) -> BrokerResponse {
     let Ok(body) = serde_json::from_slice::<ApproveCommandRequest>(&request.body) else {
         return BrokerResponse::bad_request();
     };
@@ -1014,12 +1103,19 @@ mod tests {
 
     impl TestStore {
         fn context(available: bool) -> (Arc<TestStore>, CredentialContext) {
-            let store = Arc::new(Self { available, values: Mutex::new(HashMap::new()) });
+            let store = Arc::new(Self {
+                available,
+                values: Mutex::new(HashMap::new()),
+            });
             (store.clone(), test_context(store, None, true))
         }
 
         fn value(&self, service: &str, account: &str) -> Option<String> {
-            self.values.lock().unwrap().get(&(service.to_string(), account.to_string())).cloned()
+            self.values
+                .lock()
+                .unwrap()
+                .get(&(service.to_string(), account.to_string()))
+                .cloned()
         }
     }
 
@@ -1039,10 +1135,10 @@ mod tests {
             if !self.available {
                 return Err(StoreError::Unavailable);
             }
-            self.values
-                .lock()
-                .unwrap()
-                .insert((service.to_string(), account.to_string()), secret.to_string());
+            self.values.lock().unwrap().insert(
+                (service.to_string(), account.to_string()),
+                secret.to_string(),
+            );
             Ok(())
         }
 
@@ -1050,7 +1146,12 @@ mod tests {
             if !self.available {
                 return Err(StoreError::Unavailable);
             }
-            Ok(self.values.lock().unwrap().remove(&(service.to_string(), account.to_string())).is_some())
+            Ok(self
+                .values
+                .lock()
+                .unwrap()
+                .remove(&(service.to_string(), account.to_string()))
+                .is_some())
         }
     }
 
@@ -1107,35 +1208,97 @@ mod tests {
     fn stored_secrets_resolve_and_delete_under_their_kind_service() {
         let (store, context) = TestStore::context(true);
         let stored = broker_response(
-            &post(STORE_PATH, serde_json::json!({ "kind": "llm-secret", "secret": "sk-test" })),
+            &post(
+                STORE_PATH,
+                serde_json::json!({ "kind": "llm-secret", "secret": "sk-test" }),
+            ),
             "token",
             &context,
         );
         assert_eq!(stored.status, 200);
         let credential_ref = json(&stored)["credentialRef"].as_str().unwrap().to_string();
         assert!(credential_ref.starts_with("llm_"));
-        assert_eq!(store.value(&format!("{APP}.llm-secret"), &credential_ref).as_deref(), Some("sk-test"));
+        assert_eq!(
+            store
+                .value(&format!("{APP}.llm-secret"), &credential_ref)
+                .as_deref(),
+            Some("sk-test")
+        );
 
-        let resolved = broker_response(&post(RESOLVE_PATH, serde_json::json!({ "credentialRef": credential_ref })), "token", &context);
+        let resolved = broker_response(
+            &post(
+                RESOLVE_PATH,
+                serde_json::json!({ "credentialRef": credential_ref }),
+            ),
+            "token",
+            &context,
+        );
         assert_eq!(json(&resolved), serde_json::json!({ "secret": "sk-test" }));
 
-        let delete = call("DELETE", DELETE_PATH, serde_json::json!({ "credentialRef": credential_ref }));
-        assert_eq!(json(&broker_response(&delete, "token", &context))["removed"], true);
-        assert_eq!(json(&broker_response(&delete, "token", &context))["removed"], false);
-        assert_eq!(broker_response(&post(RESOLVE_PATH, serde_json::json!({ "credentialRef": credential_ref })), "token", &context).status, 404);
+        let delete = call(
+            "DELETE",
+            DELETE_PATH,
+            serde_json::json!({ "credentialRef": credential_ref }),
+        );
+        assert_eq!(
+            json(&broker_response(&delete, "token", &context))["removed"],
+            true
+        );
+        assert_eq!(
+            json(&broker_response(&delete, "token", &context))["removed"],
+            false
+        );
+        assert_eq!(
+            broker_response(
+                &post(
+                    RESOLVE_PATH,
+                    serde_json::json!({ "credentialRef": credential_ref })
+                ),
+                "token",
+                &context
+            )
+            .status,
+            404
+        );
     }
 
     #[test]
     fn store_route_rejects_empty_oversized_and_unknown_secrets() {
         let (_store, context) = TestStore::context(true);
-        let store = |body: serde_json::Value| broker_response(&post(STORE_PATH, body), "token", &context).status;
-        assert_eq!(store(serde_json::json!({ "kind": "llm-secret", "secret": " " })), 400);
-        assert_eq!(store(serde_json::json!({ "kind": "llm-secret", "secret": "s".repeat(MAX_STORED_SECRET + 1) })), 400);
-        assert_eq!(store(serde_json::json!({ "kind": "llm-secret", "secret": "s".repeat(MAX_STORED_SECRET) })), 200);
-        assert_eq!(store(serde_json::json!({ "kind": "data-key", "secret": "s" })), 400);
+        let store = |body: serde_json::Value| {
+            broker_response(&post(STORE_PATH, body), "token", &context).status
+        };
+        assert_eq!(
+            store(serde_json::json!({ "kind": "llm-secret", "secret": " " })),
+            400
+        );
+        assert_eq!(
+            store(
+                serde_json::json!({ "kind": "llm-secret", "secret": "s".repeat(MAX_STORED_SECRET + 1) })
+            ),
+            400
+        );
+        assert_eq!(
+            store(
+                serde_json::json!({ "kind": "llm-secret", "secret": "s".repeat(MAX_STORED_SECRET) })
+            ),
+            200
+        );
+        assert_eq!(
+            store(serde_json::json!({ "kind": "data-key", "secret": "s" })),
+            400
+        );
         let (_store, unavailable) = TestStore::context(false);
         assert_eq!(
-            broker_response(&post(STORE_PATH, serde_json::json!({ "kind": "tableau-pat", "secret": "s" })), "token", &unavailable).status,
+            broker_response(
+                &post(
+                    STORE_PATH,
+                    serde_json::json!({ "kind": "tableau-pat", "secret": "s" })
+                ),
+                "token",
+                &unavailable
+            )
+            .status,
             503
         );
     }
@@ -1143,30 +1306,60 @@ mod tests {
     #[test]
     fn legacy_data_key_is_read_until_deleted() {
         let (store, context) = TestStore::context(true);
-        let read = || broker_response(&post(LEGACY_DATA_KEY_PATH, serde_json::json!({})), "token", &context);
+        let read = || {
+            broker_response(
+                &post(LEGACY_DATA_KEY_PATH, serde_json::json!({})),
+                "token",
+                &context,
+            )
+        };
         assert_eq!(read().status, 404);
-        store.set(&format!("{APP}.data-key"), LEGACY_DATA_KEY_ACCOUNT, "ab".repeat(32).as_str()).unwrap();
+        store
+            .set(
+                &format!("{APP}.data-key"),
+                LEGACY_DATA_KEY_ACCOUNT,
+                "ab".repeat(32).as_str(),
+            )
+            .unwrap();
         assert_eq!(json(&read())["key"], "ab".repeat(32));
         let delete = call("DELETE", LEGACY_DATA_KEY_PATH, serde_json::json!({}));
-        assert_eq!(json(&broker_response(&delete, "token", &context))["removed"], true);
+        assert_eq!(
+            json(&broker_response(&delete, "token", &context))["removed"],
+            true
+        );
         assert_eq!(read().status, 404);
         let (_store, unavailable) = TestStore::context(false);
-        assert_eq!(broker_response(&post(LEGACY_DATA_KEY_PATH, serde_json::json!({})), "token", &unavailable).status, 503);
+        assert_eq!(
+            broker_response(
+                &post(LEGACY_DATA_KEY_PATH, serde_json::json!({})),
+                "token",
+                &unavailable
+            )
+            .status,
+            503
+        );
     }
 
     #[test]
     fn command_approval_asks_once_and_persists_only_hashes() {
-        let directory = std::env::temp_dir().join(format!("pms-approvals-{}", Uuid::new_v4().simple()));
+        let directory =
+            std::env::temp_dir().join(format!("pms-approvals-{}", Uuid::new_v4().simple()));
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("approved.json");
-        let approver = Arc::new(CountingApprover { answer: true, asked: Mutex::new(Vec::new()) });
+        let approver = Arc::new(CountingApprover {
+            answer: true,
+            asked: Mutex::new(Vec::new()),
+        });
         let approvals = CommandApprovals::load(Some(path.clone()), approver.clone());
         assert!(approvals.approve("mint-token --secret abc"));
         assert!(approvals.approve("mint-token --secret abc"));
         assert_eq!(approver.asked.lock().unwrap().len(), 1);
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(!saved.contains("mint-token"));
-        let reloaded_approver = Arc::new(CountingApprover { answer: false, asked: Mutex::new(Vec::new()) });
+        let reloaded_approver = Arc::new(CountingApprover {
+            answer: false,
+            asked: Mutex::new(Vec::new()),
+        });
         let reloaded = CommandApprovals::load(Some(path.clone()), reloaded_approver.clone());
         assert!(reloaded.approve("mint-token --secret abc"));
         assert!(!reloaded.approve("mint-token --secret changed"));
@@ -1177,25 +1370,75 @@ mod tests {
     #[test]
     fn approval_route_validates_input_and_reports_denial() {
         let context = test_context(Arc::new(PanicOnReadStore), None, false);
-        let denied = broker_response(&post(APPROVE_COMMAND_PATH, serde_json::json!({ "command": "mint" })), "token", &context);
+        let denied = broker_response(
+            &post(
+                APPROVE_COMMAND_PATH,
+                serde_json::json!({ "command": "mint" }),
+            ),
+            "token",
+            &context,
+        );
         assert_eq!(json(&denied)["approved"], false);
         assert_eq!(
-            broker_response(&post(APPROVE_COMMAND_PATH, serde_json::json!({ "command": " " })), "token", &context).status,
+            broker_response(
+                &post(APPROVE_COMMAND_PATH, serde_json::json!({ "command": " " })),
+                "token",
+                &context
+            )
+            .status,
             400
         );
         assert_eq!(
-            broker_response(&post(APPROVE_COMMAND_PATH, serde_json::json!({ "command": "x".repeat(MAX_COMMAND_CHARS + 1) })), "token", &context).status,
+            broker_response(
+                &post(
+                    APPROVE_COMMAND_PATH,
+                    serde_json::json!({ "command": "x".repeat(MAX_COMMAND_CHARS + 1) })
+                ),
+                "token",
+                &context
+            )
+            .status,
             400
         );
     }
 
     #[test]
     fn connection_fields_are_bounded() {
-        assert!(validate_coordinates("https://tableau.example", "site", "pat", None, "secret").is_ok());
-        assert!(validate_coordinates(&"h".repeat(MAX_SERVER_URL + 1), "site", "pat", None, "secret").is_err());
-        assert!(validate_coordinates("https://tableau.example", "site", "pat", Some(&"l".repeat(MAX_NAME + 1)), "secret").is_err());
-        assert!(validate_coordinates("https://tableau.example", "site", "pat", None, &"s".repeat(MAX_STORED_SECRET)).is_ok());
-        assert!(validate_coordinates("https://tableau.example", "site", "pat", None, &"s".repeat(MAX_STORED_SECRET + 1)).is_err());
+        assert!(
+            validate_coordinates("https://tableau.example", "site", "pat", None, "secret").is_ok()
+        );
+        assert!(validate_coordinates(
+            &"h".repeat(MAX_SERVER_URL + 1),
+            "site",
+            "pat",
+            None,
+            "secret"
+        )
+        .is_err());
+        assert!(validate_coordinates(
+            "https://tableau.example",
+            "site",
+            "pat",
+            Some(&"l".repeat(MAX_NAME + 1)),
+            "secret"
+        )
+        .is_err());
+        assert!(validate_coordinates(
+            "https://tableau.example",
+            "site",
+            "pat",
+            None,
+            &"s".repeat(MAX_STORED_SECRET)
+        )
+        .is_ok());
+        assert!(validate_coordinates(
+            "https://tableau.example",
+            "site",
+            "pat",
+            None,
+            &"s".repeat(MAX_STORED_SECRET + 1)
+        )
+        .is_err());
     }
 
     fn request(token: Option<&str>, credential_ref: &str) -> ParsedRequest {
@@ -1251,11 +1494,16 @@ mod tests {
     #[test]
     fn broker_statuses_distinguish_found_missing_and_unavailable_credentials() {
         let (_store, found) = TestStore::context(true);
-        let credential_ref = found.store_secret(CredentialKind::TableauPat, "test-secret").unwrap();
+        let credential_ref = found
+            .store_secret(CredentialKind::TableauPat, "test-secret")
+            .unwrap();
         let found_response =
             broker_response(&request(Some("token"), &credential_ref), "token", &found);
         assert_eq!(found_response.status, 200);
-        assert_eq!(json(&found_response), serde_json::json!({ "secret": "test-secret" }));
+        assert_eq!(
+            json(&found_response),
+            serde_json::json!({ "secret": "test-secret" })
+        );
 
         let (_store, missing) = TestStore::context(true);
         assert_eq!(
@@ -1285,20 +1533,34 @@ mod tests {
         assert_eq!(parse_ref(&format!("llm_{}", "g".repeat(32))), None);
         let directory = std::env::temp_dir();
         let context = CredentialContext::native(APP, &directory);
-        assert_eq!(context.service(CredentialKind::TableauPat), format!("{APP}.tableau-pat"));
-        assert_eq!(context.service(CredentialKind::LlmSecret), format!("{APP}.llm-secret"));
+        assert_eq!(
+            context.service(CredentialKind::TableauPat),
+            format!("{APP}.tableau-pat")
+        );
+        assert_eq!(
+            context.service(CredentialKind::LlmSecret),
+            format!("{APP}.llm-secret")
+        );
         assert_eq!(context.legacy_data_key_service(), format!("{APP}.data-key"));
         assert_ne!(
             context.service(CredentialKind::TableauPat),
-            CredentialContext::native("com.example.otherapp", &directory).service(CredentialKind::TableauPat)
+            CredentialContext::native("com.example.otherapp", &directory)
+                .service(CredentialKind::TableauPat)
         );
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn security_tool_reads_back_exactly_what_it_saved() {
-        assert_eq!(security_tool::parse_password("keychain: \"x\"\npassword: \"plain\"\n").as_deref(), Some("plain"));
-        assert_eq!(security_tool::parse_password("password: 0x6869E280A2  \"hi\\342\\200\\242\"\n").as_deref(), Some("hi\u{2022}"));
+        assert_eq!(
+            security_tool::parse_password("keychain: \"x\"\npassword: \"plain\"\n").as_deref(),
+            Some("plain")
+        );
+        assert_eq!(
+            security_tool::parse_password("password: 0x6869E280A2  \"hi\\342\\200\\242\"\n")
+                .as_deref(),
+            Some("hi\u{2022}")
+        );
         assert_eq!(security_tool::parse_password("password: \n"), None);
         assert_eq!(security_tool::parse_password("nothing here"), None);
     }
@@ -1307,18 +1569,27 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn security_tool_store_round_trips_against_a_temporary_keychain() {
-        let path = std::env::temp_dir().join(format!("pms-{}.keychain-db", Uuid::new_v4().simple()));
+        let path =
+            std::env::temp_dir().join(format!("pms-{}.keychain-db", Uuid::new_v4().simple()));
         let keychain = path.to_str().unwrap();
         let created = std::process::Command::new("/usr/bin/security")
             .args(["create-keychain", "-p", "pms-test", keychain])
             .status()
             .unwrap();
         assert!(created.success());
-        let store = SecurityToolStore { keychain: Some(path.clone()) };
+        let store = SecurityToolStore {
+            keychain: Some(path.clone()),
+        };
         let outcome = std::panic::catch_unwind(|| {
             assert!(store.available());
             let service = format!("{APP}.llm-secret");
-            for secret in ["sk-plain", "quote\"back\\slash $HOME 'single'", "line\nbreak\ttab", "caf\u{e9} \u{1f511}", &"x".repeat(MAX_STORED_SECRET)] {
+            for secret in [
+                "sk-plain",
+                "quote\"back\\slash $HOME 'single'",
+                "line\nbreak\ttab",
+                "caf\u{e9} \u{1f511}",
+                &"x".repeat(MAX_STORED_SECRET),
+            ] {
                 let account = CredentialKind::LlmSecret.new_ref();
                 store.set(&service, &account, secret).unwrap();
                 assert_eq!(store.get(&service, &account).unwrap(), secret);
@@ -1326,9 +1597,14 @@ mod tests {
                 assert_eq!(store.get(&service, &account), Err(StoreError::NotFound));
                 assert!(!store.delete(&service, &account).unwrap());
             }
-            assert_eq!(store.set("bad service", "account", "secret"), Err(StoreError::Unavailable));
+            assert_eq!(
+                store.set("bad service", "account", "secret"),
+                Err(StoreError::Unavailable)
+            );
         });
-        let _ = std::process::Command::new("/usr/bin/security").args(["delete-keychain", keychain]).status();
+        let _ = std::process::Command::new("/usr/bin/security")
+            .args(["delete-keychain", keychain])
+            .status();
         let _ = std::fs::remove_file(&path);
         if let Err(panic) = outcome {
             std::panic::resume_unwind(panic);

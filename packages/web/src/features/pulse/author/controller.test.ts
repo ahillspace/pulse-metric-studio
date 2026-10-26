@@ -515,25 +515,86 @@ test("clear while a proposal is pending cannot restore removed metrics", async (
   assert.deepEqual(activeEditor(store.getState())?.document.metrics, {});
 });
 
-test('a submitted message clears whitespace-normalized composer text', async (t) => {
-  const { store } = fixture();
+test('a sent message clears the composer before the assistant responds', async (t) => {
+  const pending = deferred<PulseAuthorProposal>();
+  const { store } = fixture({ propose: () => pending.promise });
   t.after(() => store.getState().dispose());
   await store.getState().openDraft('a');
   store.getState().setComposer('  Suggest an audience  ');
-  await store.getState().requestProposal('Suggest an audience');
-  assert.equal(activeEditor(store.getState())?.composer, '');
+  const sending = store.getState().requestProposal('Suggest an audience');
+  try {
+    const entry = activeEditor(store.getState());
+    assert.equal(entry?.proposalBusy, true);
+    assert.equal(entry?.composer, '');
+    assert.equal(entry?.document.chat.at(-1)?.content, 'Suggest an audience');
+  } finally {
+    pending.resolve({
+      baseRevision: 1,
+      candidateDocument: draft().document,
+      assistantMessage: 'Suggested audience',
+      changes: [],
+    });
+    await sending;
+  }
 });
 
-test('a failed assistant submission preserves the full composer text for retry', async (t) => {
+test('a failed sent request keeps its message in the transcript without restoring the composer', async (t) => {
   const { store } = fixture({ propose: async () => { throw new Error('Provider unavailable'); } });
   t.after(() => store.getState().dispose());
   await store.getState().openDraft('a');
   const message = '  Add customer count and Region\nKeep existing metrics.  ';
   store.getState().setComposer(message);
   await store.getState().requestProposal(message.trim());
-  assert.equal(activeEditor(store.getState())?.composer, message);
+  assert.equal(activeEditor(store.getState())?.composer, '');
+  assert.equal(activeEditor(store.getState())?.document.chat.at(-1)?.content, message.trim());
   assert.equal(activeEditor(store.getState())?.proposalBusy, false);
   assert.match(activeEditor(store.getState())?.proposalError ?? '', /Provider unavailable/);
+});
+
+test('a programmatic draft request preserves an unsent composer message', async (t) => {
+  const pending = deferred<PulseAuthorProposal>();
+  const { store } = fixture({ propose: () => pending.promise });
+  t.after(() => store.getState().dispose());
+  await store.getState().openDraft('a');
+  store.getState().setComposer('Keep this message for later');
+  const sending = store.getState().requestProposal('Generate a draft');
+  try {
+    assert.equal(activeEditor(store.getState())?.composer, 'Keep this message for later');
+  } finally {
+    pending.resolve({ baseRevision: 1, candidateDocument: draft().document, assistantMessage: 'Draft', changes: [] });
+    await sending;
+  }
+  assert.equal(activeEditor(store.getState())?.composer, 'Keep this message for later');
+});
+
+test('a request rejected before sending preserves the composer and conversation', async (t) => {
+  const { store } = fixture({}, () => null);
+  t.after(() => store.getState().dispose());
+  await store.getState().openDraft('a');
+  store.getState().setComposer('  Suggest an audience  ');
+  await store.getState().requestProposal('Suggest an audience');
+  const entry = activeEditor(store.getState());
+  assert.equal(entry?.composer, '  Suggest an audience  ');
+  assert.equal(entry?.document.chat.length, 0);
+  assert.match(entry?.proposalError ?? '', /Connect to this draft/);
+});
+
+test('a failed pending request preserves newer typing and ignores another submission while busy', async (t) => {
+  const pending = deferred<PulseAuthorProposal>();
+  let submissions = 0;
+  const { store } = fixture({ propose: () => { submissions += 1; return pending.promise; } });
+  t.after(() => store.getState().dispose());
+  await store.getState().openDraft('a');
+  store.getState().setComposer('First request');
+  const sending = store.getState().requestProposal('First request');
+  store.getState().setComposer('Next request still being written');
+  await store.getState().requestProposal('Next request still being written');
+  assert.equal(submissions, 1);
+  assert.equal(activeEditor(store.getState())?.composer, 'Next request still being written');
+  pending.reject(new Error('Provider unavailable'));
+  await sending;
+  assert.equal(activeEditor(store.getState())?.composer, 'Next request still being written');
+  assert.equal(activeEditor(store.getState())?.document.chat.length, 1);
 });
 
 test("a late assistant response preserves the next message being composed", async (t) => {
@@ -555,6 +616,19 @@ test("a late assistant response preserves the next message being composed", asyn
     activeEditor(store.getState())?.composer,
     "Next request still being written",
   );
+});
+
+test('a late assistant response preserves newly typed text identical to the sent message', async (t) => {
+  const pending = deferred<PulseAuthorProposal>();
+  const { store } = fixture({ propose: () => pending.promise });
+  t.after(() => store.getState().dispose());
+  await store.getState().openDraft('a');
+  store.getState().setComposer('Suggest an audience');
+  const sending = store.getState().requestProposal('Suggest an audience');
+  store.getState().setComposer('Suggest an audience');
+  pending.resolve({ baseRevision: 1, candidateDocument: draft().document, assistantMessage: 'Suggestion', changes: [] });
+  await sending;
+  assert.equal(activeEditor(store.getState())?.composer, 'Suggest an audience');
 });
 
 test("late proposal success and failure stay attached to their originating draft", async (t) => {

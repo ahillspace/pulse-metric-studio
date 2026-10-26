@@ -1,3 +1,36 @@
+.overlay-backdrop.llm-settings-modal .modal-card {
+  width: min(1000px, calc(100vw - 32px));
+  max-width: calc(100vw - 32px);
+}
+.llm-settings-modal .modal-body { min-width: 0; container: llm-settings / inline-size; }
+.llm-settings-layout { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 18px; min-height: 350px; }
+.llm-profile-list { display: flex; flex-direction: column; gap: 8px; }
+.llm-profile-card { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-md); background: rgba(255, 255, 255, 0.02); color: var(--text); text-align: left; overflow-wrap: anywhere; }
+.llm-profile-card.active { border-color: var(--cyan-dim); background: var(--cyan-glow); }
+.llm-profile-card span { color: var(--text-faint); font-size: 10.5px; }
+.llm-health.healthy { color: var(--green); }
+.llm-health.unhealthy { color: var(--red); }
+.llm-form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 10px; min-width: 0; }
+.llm-form-grid label { display: flex; flex-direction: column; gap: 5px; min-width: 0; color: var(--text-dim); font-size: 11.5px; }
+.llm-form-grid input, .llm-form-grid select, .llm-form-grid textarea { min-width: 0; max-width: 100%; }
+.llm-form-grid input:not([type="checkbox"]), .llm-form-grid select, .llm-form-grid textarea { width: 100%; }
+.llm-form-grid .full { grid-column: 1 / -1; min-width: 0; }
+.llm-clear-secret { flex-direction: row !important; align-items: center; }
+.llm-clear-secret input { flex: 0 0 auto; width: auto; }
+.llm-editor-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.llm-model-catalog-status { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; color: var(--text-faint); font-size: 10.5px; }
+.llm-feedback { margin-top: 14px; padding: 9px 12px; border-left: 3px solid var(--green); background: rgba(61, 220, 151, 0.06); overflow-wrap: anywhere; }
+.llm-feedback.error { border-left-color: var(--red); background: rgba(255, 107, 94, 0.06); }
+@container llm-settings (max-width: 720px) {
+  .llm-settings-layout { grid-template-columns: minmax(0, 1fr); }
+  .llm-profile-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr)); align-items: start; }
+}
+@supports not (container-type: inline-size) {
+  @media (max-width: 792px) {
+    .llm-settings-layout { grid-template-columns: minmax(0, 1fr); }
+    .llm-profile-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr)); align-items: start; }
+  }
+}
 .llm-setup-choices { min-width: 0; }
 .llm-setup-choices h2, .llm-editor-heading { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
 .llm-choice-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
@@ -11,7 +44,8 @@
 .llm-advanced summary { cursor: pointer; color: var(--text-muted); margin-bottom: 12px; }
 .llm-profile-editor > .section-hint { margin-bottom: 16px; }
 @media (max-width: 640px) { .llm-choice-grid { grid-template-columns: 1fr; } }
-.llm-profile-list, .llm-profile-editor { border: 0; margin: 0; padding: 0; min-width: 0; }
+.llm-profile-list, .llm-profile-editor { border: 0; margin: 0; padding: 0; min-width: 0; min-inline-size: 0; }
+.llm-profile-editor { overflow-wrap: anywhere; }
 .llm-account-setup { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
 .llm-account-setup .btn { justify-self: start; }
 .llm-account-setup p { margin: 0; }

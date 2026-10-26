@@ -602,6 +602,7 @@ export function createAuthorController(
           update(id, {
             proposalBase: document,
             proposalEpoch: snapshot.configurationEpoch,
+            composer: snapshot.composer.trim() === message.trim() ? "" : snapshot.composer,
             document: {
               ...document,
               chat: [
@@ -627,7 +628,6 @@ export function createAuthorController(
           update(id, (current) => ({
             proposal,
             proposalSequence: sequence,
-            composer: current.composer.trim() === message.trim() ? "" : current.composer,
             document: {
               ...current.document,
               chat: [

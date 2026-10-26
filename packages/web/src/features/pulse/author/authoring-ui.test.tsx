@@ -215,7 +215,7 @@ test("wide datasource choices remain inside a narrow viewport", () => {
   assert.equal(datasourcePopoverLayout(390, 170).width, 358);
 });
 
-test("assistant review shows an expanded grouped diff, collapsed details, then resulting metrics", () => {
+test("assistant response shows an expanded grouped diff with collapsed details and resulting metrics", () => {
   const document = draft().document;
   const entry = {
     document,
@@ -231,6 +231,7 @@ test("assistant review shows an expanded grouped diff, collapsed details, then r
   const markup = renderToStaticMarkup(<ProposalReview entry={entry} />);
   assert.match(markup, /<details open="" class="pulse-proposal-diff">/);
   assert.match(markup, /<details class="pulse-proposal-detail">/);
+  assert.match(markup, /<details class="pulse-proposal-result">/);
   assert.ok(
     markup.indexOf("Measures and filters") <
       markup.indexOf("Review all changes"),

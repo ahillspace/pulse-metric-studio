@@ -1,22 +1,28 @@
 import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+const requirement = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).engines.node;
+const minimum = /^>=(\d+)\.(\d+)\.(\d+)$/.exec(requirement)?.slice(1).map(Number);
+if (!minimum) throw new Error('The package Node.js requirement must declare a minimum three-part version.');
+
 export function assertSupportedNode(version = process.versions.node) {
-  const match = /^v?(\d+)\.\d+\.\d+/.exec(version.trim());
-  if (!match || Number(match[1]) < 22) {
-    throw new Error(`Node.js 22 or newer is required by the SQLite runtime; found ${version}. Use Node.js 22 LTS or newer.`);
+  const current = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(version.trim())?.slice(1).map(Number);
+  const difference = current?.findIndex((value, index) => value !== minimum[index]);
+  if (!current || (difference !== -1 && current[difference] < minimum[difference])) {
+    throw new Error(`Node.js ${minimum.join('.')} or newer is required; found ${version}. Use the version in .nvmrc.`);
   }
 }
 
-export function validateNodeExecutable(executable) {
-  const result = spawnSync(executable, ['--version'], { encoding: 'utf8', windowsHide: true, timeout: 10000 });
+export function validateNodeExecutable(executable, run = spawnSync) {
+  const result = run(executable, ['--use-system-ca', '--version'], { encoding: 'utf8', windowsHide: true, timeout: 10000 });
   if (result.error || result.status !== 0) throw new Error(`Cannot inspect Node runtime ${executable}: ${result.error?.message ?? result.stderr}`);
   assertSupportedNode(result.stdout);
 }
 
-export function verifyPackagedSqlite(executable, serverDist) {
-  validateNodeExecutable(executable);
+export function verifyPackagedSqlite(executable, serverDist, run = spawnSync) {
+  validateNodeExecutable(executable, run);
   const source = `
     const Database = require(process.argv[1]);
     const db = new Database(':memory:');
@@ -27,7 +33,7 @@ export function verifyPackagedSqlite(executable, serverDist) {
     } finally { db.close(); }
   `;
   const sqlitePath = path.join(path.resolve(serverDist), 'node_modules', 'better-sqlite3');
-  const result = spawnSync(executable, ['-e', source, sqlitePath], { cwd: serverDist, encoding: 'utf8', windowsHide: true, timeout: 15000 });
+  const result = run(executable, ['--use-system-ca', '-e', source, sqlitePath], { cwd: serverDist, encoding: 'utf8', windowsHide: true, timeout: 15000 });
   if (result.error || result.status !== 0) {
     throw new Error(`Packaged Node/SQLite compatibility check failed (${result.signal ?? result.status}): ${result.error?.message ?? result.stderr}`);
   }

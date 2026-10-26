@@ -16,6 +16,19 @@ Keep the product focused on Tableau Pulse metric authoring and management.
 Use the `@pulse-metric-studio/*` workspace scope and `PULSE_METRIC_STUDIO_` prefix for application environment variables.
 The desktop identifier is `com.ahillspace.pulsemetricstudio`.
 
+## Architecture and onboarding
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup and check ordering, then the [maintainer guide](docs/PULSE_MAINTAINER_GUIDE.md) for runtime boundaries and feature placement.
+The [SQLite contract](docs/PULSE_SQLITE.md) owns durable state and migration behavior.
+The [architecture audit](docs/ARCHITECTURE_AUDIT.md) records its examined snapshot, coverage limits, and recommendations; recommendations are not implemented behavior.
+
+Keep renderer code on shared contracts and API clients, provider serialization in backend adapters, and SQL in repositories or core stores.
+Preserve revision checks, connection ownership, reviewed mutation fingerprints, partial and unknown outcomes, and publication command idempotency.
+Local CLI providers inherit the user's native setup and launch options; do not force safe mode, permission bypass, or tool restrictions.
+Preserve the app's headless/output contract and document how optional native flags affect permissions and inherited instructions.
+Local-agent tool actions execute outside app proposal review and publication receipts; do not describe those app mechanisms as controlling every agent action.
+Update each concern's canonical documentation when its contract changes instead of copying architecture into instruction files.
+
 ## Workflow
 
 Use subagents for implementation tasks and independent review when available.
@@ -25,6 +38,7 @@ Use plain dashes in human-facing writing and put each full sentence on its own l
 Never add an agent as a commit co-author.
 
 Validate changes with the relevant unit tests, TypeScript checks, and build.
+Run `npm run check:architecture` when changing ownership boundaries; it enforces selected patterns and does not replace review.
 Use `npm test` for Node tests and `cargo test --locked --manifest-path src-tauri/Cargo.toml` for Rust tests.
 Keep automated tests isolated from live Tableau and AI services.
 Do not introduce automated browser tests or live-provider test tooling without an explicit request.
