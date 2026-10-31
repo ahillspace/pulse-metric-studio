@@ -206,6 +206,7 @@ It is a destructive action against those definitions, including their Tableau de
 Group deletion is a separate receipt-owned operation for groups confirmed created by that publication.
 Author and Activity read the same updated receipt outcomes.
 Activity places actions for the selected publication above its history and details, retaining the receipt's original connection and eligibility guards.
+Confirmation dialogs mount outside the sticky action toolbar's stacking context but remain inside the shell's disabled boundary for shutdown and backend unavailability.
 The history Refresh control reloads publication summaries; Activity does not expose a separate Refresh results action.
 
 Window close, tray Quit, and operating-system quit requests use the same desktop shutdown flow.
