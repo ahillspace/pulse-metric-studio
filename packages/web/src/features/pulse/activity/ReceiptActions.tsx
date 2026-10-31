@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { createPortal } from "react-dom";
 import type { PulsePublishReceipt } from "@pulse-metric-studio/shared";
 import { contextMatches } from "../author/controller";
 import { useConnection } from "../connections/controller";
@@ -47,7 +48,7 @@ export function ReceiptActions({ receipt }: { receipt: PulsePublishReceipt }) {
       {groupReceiptId === receipt.id && groupError && <p className="warning-banner" role="alert">{groupError}</p>}
     </div>}
     {showUndo && undoReason && <p className="pulse-receipt-note">{undoReason}</p>}
-    {confirmGroup && <Modal
+    {confirmGroup && createPortal(<Modal
       title={`Delete "${group.name || "Digest group"}" group?`}
       onClose={busy ? undefined : () => setConfirmGroup(false)}
       actions={<>
@@ -63,14 +64,14 @@ export function ReceiptActions({ receipt }: { receipt: PulsePublishReceipt }) {
       </>}>
       <p>Delete this group from Tableau, including its memberships and subscriptions. Metrics remain.</p>
       <p>This cannot be undone.</p>
-    </Modal>}
-    {confirmUndo && <ConfirmUndo receipt={receipt} busy={undoingThisReceipt}
+    </Modal>, document.body)}
+    {confirmUndo && createPortal(<ConfirmUndo receipt={receipt} busy={undoingThisReceipt}
       disabled={Boolean(undoReason) || busy || !showUndo}
       onCancel={() => setConfirmUndo(false)}
       onConfirm={() => {
         if (undoReason || busy || !showUndo) return;
         void useActivity.getState().undo(receipt.id).then(() => setConfirmUndo(false));
-      }} />}
+      }} />, document.body)}
   </>;
 }
 
