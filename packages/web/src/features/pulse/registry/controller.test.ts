@@ -93,6 +93,38 @@ test("refresh retains known follows until replacement data arrives", async () =>
   await refresh;
 });
 
+test("selection-scoped follower refresh batches exact IDs and preserves inventory state", async () => {
+  const requests: string[][] = [];
+  const store = fixture({ followState: async (ids) => {
+    requests.push(ids);
+    if (ids.includes("m200")) throw new Error("subscription read failed");
+    return { ...unavailableFollowState(ids, "partial"), selectedGroupId: null,
+      groupFollowerIdsByMetricId: {}, groupContextUnavailable: false, availabilityByMetricId: {},
+      userFollowerIdsByMetricId: Object.fromEntries(ids.map(id => [id, ["subscriber"]])) };
+  } });
+  store.getState().setContext(draft().context);
+  const before = store.getState().followState;
+  const ids = Array.from({length: 405}, (_, index) => `m${index}`);
+  const result = await store.getState().refreshFollowState([...ids, "m0"]);
+  assert.deepEqual(requests.flat(), ids);
+  assert.deepEqual(requests.map(batch => batch.length), [200, 200, 5]);
+  assert.deepEqual(result?.userFollowerIdsByMetricId?.m404, ["subscriber"]);
+  assert.equal(result?.availabilityByMetricId?.m200.status, "unavailable");
+  assert.equal(result?.userFollowerIdsByMetricId?.m200, undefined);
+  assert.equal(store.getState().followState, before);
+});
+
+test("follower refresh discards identities after the datasource context changes", async () => {
+  const response = deferred<any>();
+  const store = fixture({ followState: () => response.promise });
+  store.getState().setContext(draft("a").context);
+  const refresh = store.getState().refreshFollowState(["metric"]);
+  store.getState().setContext(draft("b").context);
+  response.resolve({ ...unavailableFollowState(["metric"], "old"), selectedGroupId: null });
+  assert.equal(await refresh, null);
+  assert.equal(store.getState().followState, null);
+});
+
 test("dismissed results stay dismissed after switching context", async () => {
   const store = fixture();
   store.getState().setContext(draft("a").context);

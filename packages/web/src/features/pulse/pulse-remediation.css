@@ -71,7 +71,7 @@
 
 .pulse-metric-highlight {
   background: rgba(61, 220, 151, 0.08);
-  box-shadow: inset 2px 0 0 var(--green);
+  box-shadow: none;
 }
 
 .pulse-metric-name {
@@ -137,7 +137,6 @@
   min-width: 0;
   padding: 7px 10px;
   border: 1px solid var(--cyan-dim);
-  border-left: 3px solid var(--cyan);
   border-radius: var(--radius-sm);
   color: var(--text);
   background: var(--cyan-glow);

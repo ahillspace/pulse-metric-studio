@@ -3,11 +3,11 @@ import type { PulseFollowOperation as FollowTargetOperation } from "@pulse-metri
 import { useRegistry } from "../registry/controller";
 import {
   buildFollowTargetOperations,
+  existingFollowTargets,
   followTargetMatchesQuery,
   handleFollowTargetSelectionKey,
-  reconcileFollowTargetResults,
+  mergeFollowTargetChoices,
   resolveCurrentUserFollowTarget,
-  targetLabelKey,
   type FollowTargetChoice,
 } from "../follow-target-actions";
 import { registryActionLabel } from "../registry-actions";
@@ -55,12 +55,25 @@ export function FollowTargetModal({
   const [busy, setBusy] = useState<"follow" | "unfollow" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [addingExisting, setAddingExisting] = useState(false);
+  const [existingNotice, setExistingNotice] = useState<string | null>(null);
   const [retry, setRetry] = useState<{
     kind: "follow" | "unfollow";
     operations: FollowTargetOperation[];
   } | null>(null);
   const optionRefs = useRef<Array<HTMLDivElement | null>>([]);
   const requestSeq = useRef(0);
+  const existingRequest = useRef(0);
+  const metricScope = JSON.stringify(metrics.map((metric) => metric.id));
+  const context = useRegistry((state) => state.context);
+  const contextScope = JSON.stringify(context);
+
+  useEffect(() => {
+    existingRequest.current += 1;
+    setAddingExisting(false);
+    setExistingNotice(null);
+    return () => { existingRequest.current += 1; };
+  }, [metricScope, contextScope]);
 
   // Load the full site inventory ONCE (server-side search is unavailable on
   // this REST API version, so we filter locally). Latest-wins guards the
@@ -80,6 +93,7 @@ export function FollowTargetModal({
         label: target.name ?? target.id,
       }));
       setTargets(next);
+      setSelected((current) => mergeFollowTargetChoices(current, [], next));
       setError(response.errors.length > 0 ? response.errors.join(" ") : null);
     } catch (loadError) {
       if (seq !== requestSeq.current) return;
@@ -98,6 +112,33 @@ export function FollowTargetModal({
       requestSeq.current += 1;
     };
   }, []);
+
+  const addExisting = async () => {
+    if (busy || addingExisting || loading || metrics.length === 0) return;
+    const seq = ++existingRequest.current;
+    const scope = JSON.stringify(useRegistry.getState().context);
+    const isCurrent = () => seq === existingRequest.current &&
+      scope === JSON.stringify(useRegistry.getState().context);
+    setAddingExisting(true);
+    setExistingNotice(null);
+    try {
+      const state = await useRegistry.getState().refreshFollowState(
+        [...new Set(metrics.map((metric) => metric.id))],
+      );
+      if (!isCurrent()) return;
+      const existing = existingFollowTargets(metrics.map((metric) => metric.id), state);
+      setSelected((current) => mergeFollowTargetChoices(current, existing.targets, targets));
+      setExistingNotice(existing.incompleteMetricIds.length
+        ? `Existing subscriber inventory is partial or unavailable for ${existing.incompleteMetricIds.length} selected metric${existing.incompleteMetricIds.length === 1 ? "" : "s"}. Only confirmed targets were added; some existing subscribers may be missing.${existing.diagnostics.length ? ` ${existing.diagnostics.join(" ")}` : ""}`
+        : existing.targets.length
+          ? "Existing subscriber targets added. Groups are added as groups, without expanding members."
+          : "No existing subscriber targets found for the selected metrics.");
+    } catch (error) {
+      if (isCurrent()) setExistingNotice(`Existing subscriber inventory is unavailable. Existing selections were kept. ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      if (isCurrent()) setAddingExisting(false);
+    }
+  };
 
   // Split out the current-user row (decorated with " (you)" and searchable by
   // their real name) from everyone else, synthesizing the row only when the
@@ -160,7 +201,7 @@ export function FollowTargetModal({
     kind: "follow" | "unfollow",
     retryOperations?: FollowTargetOperation[],
   ) => {
-    if (!metrics.length || (!retryOperations && !selected.length) || busy)
+    if (!metrics.length || (!retryOperations && !selected.length) || busy || addingExisting)
       return;
     const scope = JSON.stringify(useRegistry.getState().context);
     setBusy(kind);
@@ -208,7 +249,7 @@ export function FollowTargetModal({
           <button
             className="btn"
             type="button"
-            disabled={Boolean(busy) || selected.length === 0}
+            disabled={Boolean(busy) || addingExisting || selected.length === 0}
             onClick={() => void run("unfollow")}
           >
             <BusyLabel busy={busy === "unfollow"} idle="Unfollow" active="Unfollowing..." />
@@ -217,7 +258,7 @@ export function FollowTargetModal({
             <button
               className="btn"
               type="button"
-              disabled={Boolean(busy)}
+              disabled={Boolean(busy) || addingExisting}
               onClick={() => void run(retry.kind, retry.operations)}
             >
               <BusyLabel busy={busy === retry.kind} idle={`Retry ${retry.operations.length} failed`} active="Retrying..." />
@@ -226,7 +267,7 @@ export function FollowTargetModal({
           <button
             className="btn primary"
             type="button"
-            disabled={Boolean(busy) || selected.length === 0}
+            disabled={Boolean(busy) || addingExisting || selected.length === 0}
             onClick={() => void run("follow")}
           >
             <BusyLabel busy={busy === "follow"} idle="Follow" active="Following..." />
@@ -302,13 +343,23 @@ export function FollowTargetModal({
           <button
             className="btn small"
             type="button"
-            disabled={Boolean(busy)}
+            disabled={Boolean(busy) || addingExisting}
             onClick={() => void loadTargets()}
           >
             Refresh targets
           </button>
+          <button
+            className="btn small"
+            type="button"
+            disabled={Boolean(busy) || addingExisting || loading || metrics.length === 0}
+            onClick={() => void addExisting()}
+          >
+            <BusyLabel busy={addingExisting} idle="Add existing" active="Loading existing..." />
+          </button>
         </div>
       </div>
+
+      {existingNotice && <div className="empty-note" role="status">{existingNotice}</div>}
 
       {selected.length > 0 && (
         <div

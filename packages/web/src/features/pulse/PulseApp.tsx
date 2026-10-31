@@ -322,6 +322,7 @@ export default function PulseApp() {
               <div hidden={area !== "Activity"}>
                 <Activity />
               </div>
+              <div id="pulse-workspace-dialogs" />
             </fieldset>
           </main>
           <ResizableAssistant open={hasAssistant && assistantOpen}>

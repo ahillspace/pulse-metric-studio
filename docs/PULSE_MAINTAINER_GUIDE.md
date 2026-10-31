@@ -205,6 +205,9 @@ Undo compensates confirmed definition creations and rechecks connection ownershi
 It is a destructive action against those definitions, including their Tableau dependents; review the displayed scope before using it.
 Group deletion is a separate receipt-owned operation for groups confirmed created by that publication.
 Author and Activity read the same updated receipt outcomes.
+Activity places actions for the selected publication above its history and details, retaining the receipt's original connection and eligibility guards.
+Confirmation dialogs mount outside the sticky action toolbar's stacking context but remain inside the shell's disabled boundary for shutdown and backend unavailability.
+The history Refresh control reloads publication summaries; Activity does not expose a separate Refresh results action.
 
 Window close, tray Quit, and operating-system quit requests use the same desktop shutdown flow.
 The editor stops accepting changes, waits for current assistant and catalog updates, and saves every open draft before the native host stops the backend.
@@ -226,6 +229,14 @@ Deletion first asks the backend for a plan, then submits the exact selection and
 A bulk selection containing defaults opens an explicit review of the affected definitions and their metrics.
 An ordinary variant selection never authorizes deleting its parent definition.
 Incomplete inventory cannot establish that a selection covers every dependent resource.
+
+Create variants inherits the Manager selection, with source editing behind Change when metrics are already selected.
+Source changes remain local to that dialog until submission.
+Follow / Unfollow's Add existing reads a fresh identity snapshot for the exact selected metrics through the existing batched follow-state endpoint.
+It merges direct user and group subscribers into the selected targets without expanding group membership, and reports incomplete identity reads.
+The directory supplies display names, not subscription evidence.
+Deletion review resolves display labels from the current metric inventory without changing reviewed resource IDs or fingerprints.
+Follower counts can disclose current identities through the existing per-metric follower-detail endpoint; unavailable or partial reads remain explicit.
 
 Metric Manager previews use Tableau's springboard insight and metric card image APIs through the existing authenticated connection.
 The backend verifies the exact metric, definition, and datasource before rendering.
