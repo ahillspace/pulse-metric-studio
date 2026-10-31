@@ -24,6 +24,8 @@ export function ReceiptActions({ receipt }: { receipt: PulsePublishReceipt }) {
   const canDeleteGroup = createdGroup && group.deletion?.status !== "deleted";
   const busy = undoBusy || groupBusy || receipt.publishing;
   const undoingThisReceipt = undoBusy && undoReceiptId === receipt.id;
+  // Stay inside the shell's disabled fieldset without inheriting the toolbar's stacking context.
+  const dialogHost = typeof document === "undefined" ? null : document.getElementById("pulse-workspace-dialogs");
 
   return <>
     <div className="pulse-button-row pulse-receipt-actions">
@@ -48,7 +50,7 @@ export function ReceiptActions({ receipt }: { receipt: PulsePublishReceipt }) {
       {groupReceiptId === receipt.id && groupError && <p className="warning-banner" role="alert">{groupError}</p>}
     </div>}
     {showUndo && undoReason && <p className="pulse-receipt-note">{undoReason}</p>}
-    {confirmGroup && createPortal(<Modal
+    {confirmGroup && dialogHost && createPortal(<Modal
       title={`Delete "${group.name || "Digest group"}" group?`}
       onClose={busy ? undefined : () => setConfirmGroup(false)}
       actions={<>
@@ -64,14 +66,14 @@ export function ReceiptActions({ receipt }: { receipt: PulsePublishReceipt }) {
       </>}>
       <p>Delete this group from Tableau, including its memberships and subscriptions. Metrics remain.</p>
       <p>This cannot be undone.</p>
-    </Modal>, document.body)}
-    {confirmUndo && createPortal(<ConfirmUndo receipt={receipt} busy={undoingThisReceipt}
+    </Modal>, dialogHost)}
+    {confirmUndo && dialogHost && createPortal(<ConfirmUndo receipt={receipt} busy={undoingThisReceipt}
       disabled={Boolean(undoReason) || busy || !showUndo}
       onCancel={() => setConfirmUndo(false)}
       onConfirm={() => {
         if (undoReason || busy || !showUndo) return;
         void useActivity.getState().undo(receipt.id).then(() => setConfirmUndo(false));
-      }} />, document.body)}
+      }} />, dialogHost)}
   </>;
 }
 

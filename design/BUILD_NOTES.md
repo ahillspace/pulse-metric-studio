@@ -264,5 +264,9 @@ All 26 Rust tests passed, and 34 targeted regression tests passed after final in
 No live Tableau mutation, AI-provider run, or native desktop interaction was performed.
 Browser evidence establishes renderer behavior with isolated responses; it does not establish live service or native-shell compatibility.
 Independent review identified Activity confirmation stacking beneath the application header.
-Both confirmations now mount at the document body while their state remains owned by the selected receipt.
+Both confirmations mount in a shell-owned dialog host outside the toolbar's stacking context and inside the shell's disabled fieldset.
+Their state remains owned by the selected receipt.
 The compiled renderer verified that the modal backdrop covers the header and retains the native confirmation scope.
+An isolated browser harness invoked the real author shutdown controller while a confirmation was open.
+Both destructive confirmation buttons became disabled during shutdown and became available again when closing was cancelled.
+No mutation was submitted during this check.
