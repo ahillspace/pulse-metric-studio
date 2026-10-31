@@ -15,8 +15,8 @@
   top: 0;
   min-width: 0;
   padding: 16px;
-  border-left: 1px solid #36363e;
-  background: #222227;
+  border-left: 1px solid var(--border);
+  background: #1c1d21;
 }
 .pulse-metric-preview header {
   display: flex;
@@ -32,14 +32,14 @@
 }
 .pulse-preview-timeframe {
   margin: 5px 0 16px;
-  color: #aaaab7;
+  color: var(--text-dim);
   font-size: 12px;
 }
 .pulse-preview-content {
   min-height: 160px;
   font-size: 12px;
   line-height: 1.6;
-  color: #b8b8c4;
+  color: var(--text-dim);
 }
 .pulse-preview-content img {
   display: block;

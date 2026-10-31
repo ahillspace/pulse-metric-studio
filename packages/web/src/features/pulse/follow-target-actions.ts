@@ -1,6 +1,7 @@
 import type {
   FollowTargetOperation,
   FollowTargetOperationResult,
+  FollowState,
 } from "./registry/view-types";
 import type { RegistryActionItem } from "./registry-actions";
 
@@ -14,6 +15,49 @@ export interface FollowTargetChoice {
    * matches even though the visible label appends a " (you)" decoration.
    */
   searchText?: string;
+}
+
+export function mergeFollowTargetChoices(
+  selected: FollowTargetChoice[],
+  additions: FollowTargetChoice[],
+  directory: FollowTargetChoice[],
+): FollowTargetChoice[] {
+  const names = new Map(directory.map((target) => [targetLabelKey(target.kind, target.id), target]));
+  const merged = new Map<string, FollowTargetChoice>();
+  for (const target of [...selected, ...additions]) {
+    const key = targetLabelKey(target.kind, target.id);
+    if (!merged.has(key)) merged.set(key, names.get(key) ?? target);
+  }
+  return [...merged.values()];
+}
+
+/** Counts and membership context cannot establish complete subscriber identities. */
+export function existingFollowTargets(metricIds: string[], state: FollowState | null): {
+  targets: FollowTargetChoice[];
+  incompleteMetricIds: string[];
+  diagnostics: string[];
+} {
+  const targets: FollowTargetChoice[] = [];
+  const incompleteMetricIds: string[] = [];
+  const diagnostics = new Set<string>();
+  for (const metricId of new Set(metricIds)) {
+    const availability = state?.availabilityByMetricId?.[metricId];
+    const users = state?.userFollowerIdsByMetricId?.[metricId];
+    const groups = state?.groupFollowerIdsByMetricId?.[metricId];
+    if (availability?.followerIdsStatus !== "available" || !users || !groups) {
+      incompleteMetricIds.push(metricId);
+      for (const diagnostic of availability?.diagnostics ?? []) diagnostics.add(diagnostic.message);
+    }
+    // An unavailable inventory must not reuse stale identity arrays.
+    if (availability?.followerIdsStatus === "unavailable") continue;
+    for (const id of users ?? []) targets.push({ id, kind: "USER", label: id });
+    for (const id of groups ?? []) targets.push({ id, kind: "GROUP", label: id });
+  }
+  return {
+    targets: mergeFollowTargetChoices([], targets, []),
+    incompleteMetricIds,
+    diagnostics: [...diagnostics],
+  };
 }
 
 /**
