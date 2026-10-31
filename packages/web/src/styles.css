@@ -1,37 +1,38 @@
-/* Pulse Metric Studio base controls
-   Modeled on a tactical dark UI: near-black navy surfaces, cyan primary,
-   amber secondary, corner-bracket frames, uppercase micro-labels. */
+/* Shared desktop controls. Pulse workspaces refine their layout locally. */
 
 :root {
-  --bg: #070c14;
-  --bg-raise: #0b1421;
-  --panel: #0d1826;
-  --panel-alt: #10202f;
-  --border: #1a2a3c;
-  --border-bright: #274058;
+  color-scheme: dark;
+  --bg: #16171a;
+  --bg-raise: #202125;
+  --panel: #1c1d21;
+  --panel-alt: #292a30;
+  --border: #ffffff12;
+  --border-bright: #ffffff21;
 
-  --text: #d9e6f2;
-  --text-dim: #7e93a8;
-  --text-faint: #51677c;
+  --text: #e5e5eb;
+  --text-dim: #afb0bd;
+  --text-faint: #8c8d9c;
 
-  --cyan: #45d6e6;
-  --cyan-dim: #2fa8b8;
-  --cyan-glow: rgba(69, 214, 230, 0.14);
-  --amber: #f59a4a;
-  --amber-dim: #b06f2f;
-  --red: #ff6b5e;
-  --green: #3ddc97;
+  --cyan: #b5abff;
+  --cyan-dim: #a493ed;
+  --cyan-glow: #aa8bf51a;
+  --amber: #d9b47a;
+  --amber-dim: #b79c70;
+  --red: #e09692;
+  --green: #879d95;
 
   --radius-sm: 4px;
   --radius-md: 6px;
   --radius-lg: 8px;
   --shadow-sm: 0 2px 10px rgba(0, 0, 0, 0.35);
   --shadow-cyan: 0 0 24px rgba(69, 214, 230, 0.08);
-  --font-ui: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-ui: 'Segoe UI Variable Text', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
   --mono: 'Cascadia Code', Consolas, monospace;
 }
 
 * { box-sizing: border-box; }
+[hidden], [hidden]::before, [hidden]::after { display: none !important; }
+[hidden] *::before, [hidden] *::after { display: none !important; }
 html, body, #root { height: 100%; margin: 0; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 
@@ -39,7 +40,8 @@ body {
   font-family: var(--font-ui);
   background: var(--bg);
   color: var(--text);
-  font-size: 13.5px;
+  font-size: 13px;
+  font-synthesis: none;
 }
 
 ::-webkit-scrollbar { width: 9px; height: 9px; }
@@ -49,6 +51,37 @@ body {
 
 button { font-family: inherit; cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: 0.4; }
+.overlay-backdrop .btn { min-height: 32px; border-radius: 6px; }
+.overlay-backdrop .btn.primary {
+  background: #9987ee;
+  border-color: #b9a8ff40;
+  color: #171322;
+  font-weight: 600;
+}
+.overlay-backdrop .btn.primary:hover:not(:disabled) { background: #b2a0ff; color: #171322; }
+.overlay-backdrop .btn:disabled, .pulse-app .btn:disabled {
+  opacity: 1;
+  background: #292a30;
+  border-color: #ffffff12;
+  color: #8c8d9c;
+  box-shadow: none;
+}
+.overlay-backdrop .btn.primary:disabled, .pulse-app .btn.primary:disabled {
+  background: #3e394e;
+  border-color: #5d526a;
+  color: #bbb0d1;
+}
+.overlay-backdrop .modal-header {
+  padding: 18px 24px;
+  font-size: 18px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  border-top: 0;
+}
+.overlay-backdrop .modal-header[class*="outcome-strip-"] { border-top: 0; }
+.overlay-backdrop .modal-body { padding: 18px 24px; }
+.overlay-backdrop .modal-actions { padding: 14px 24px; }
 
 input, select, textarea {
   font-family: inherit;

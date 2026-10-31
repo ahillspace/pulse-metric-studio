@@ -67,6 +67,8 @@ interface RegistryState {
     targets: FollowTargetChoice[],
   ) => Promise<PulseFollowOperation[]>;
   loadTargets: RegistryApi["followTargets"];
+  /** Reads a fresh, selection-scoped identity snapshot without replacing inventory state. */
+  refreshFollowState: (metricIds: string[]) => Promise<FollowState | null>;
   loadFollowers: (
     metricIds: string[],
   ) => Promise<{ details: PulseFollowersDetail[] }>;
@@ -570,6 +572,22 @@ export function createRegistryController(
         return reconciled.retryOperations;
       },
       loadTargets: () => transport.followTargets(),
+      async refreshFollowState(metricIds) {
+        const scope = capture();
+        if (!scope.context) return null;
+        const ids = [...new Set(metricIds)];
+        const states: FollowState[] = [];
+        for (let offset = 0; offset < ids.length; offset += 800) {
+          if (!current(scope)) return null;
+          const batches = Array.from({ length: Math.ceil(Math.min(800, ids.length - offset) / 200) },
+            (_, index) => ids.slice(offset + index * 200, offset + (index + 1) * 200));
+          states.push(...await Promise.all(batches.map(async (batch) => {
+            try { return await transport.followState(batch); }
+            catch (error) { return unavailableFollowState(batch, errorMessage(error)); }
+          })));
+        }
+        return current(scope) ? mergeFollowStates(states) : null;
+      },
       loadFollowers: (metricIds) => transport.followers(metricIds),
     };
   });
