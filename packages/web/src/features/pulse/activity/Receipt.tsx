@@ -1,11 +1,7 @@
-import { useState } from "react";
 import { aggregationLabel } from "../metric-labels";
-import { BusyLabel, Modal } from "../components/ui";
 import type { PulsePublishReceipt } from "@pulse-metric-studio/shared";
-import { contextMatches } from "../author/controller";
-import { useConnection } from "../connections/controller";
 import { useActivity } from "./controller";
-import { ConfirmUndo } from "./ConfirmUndo";
+import { ReceiptActions } from "./ReceiptActions";
 import "./activity.css";
 
 const followLabels = {
@@ -21,42 +17,19 @@ export function Receipt({
   receipt,
   onRefresh,
   onActivity,
+  showActions = true,
 }: {
   receipt: PulsePublishReceipt;
   onRefresh?: () => void;
   onActivity?: () => void;
+  showActions?: boolean;
 }) {
-  const [confirmGroup, setConfirmGroup] = useState(false);
-  const [confirmUndo, setConfirmUndo] = useState(false);
-  const groupBusy = useActivity((state) => state.groupBusy);
-  const groupError = useActivity((state) =>
-    state.groupReceiptId === receipt.id ? state.groupError : null,
-  );
-  const group = receipt.follow.group;
-  const session = useConnection((state) => state.session);
-  const undoBusy = useActivity((state) => state.undoBusy);
-  const undoingThisReceipt = useActivity(
-    (state) => state.undoBusy && state.undoReceiptId === receipt.id,
-  );
   const undoError = useActivity((state) =>
     state.undoReceiptId === receipt.id ? state.undoError : null,
   );
   const readError = useActivity((state) =>
     state.readReceiptId === receipt.id ? state.readError : null,
   );
-  const canConnect = Boolean(
-    receipt.context && contextMatches(receipt.context, session),
-  );
-  const undoReason = !receipt.context
-    ? "The original Tableau connection is unknown."
-    : !canConnect
-      ? "Connect to this publication's Tableau site to undo."
-      : "";
-  const showUndo =
-    receipt.undoEligible ||
-    receipt.items.some(
-      (item) => item.undoStatus === "failed" || item.undoStatus === "unknown",
-    );
   const followNeedsAttention =
     receipt.follow.requested &&
     [
@@ -202,7 +175,7 @@ export function Receipt({
           {readError}
         </p>
       )}
-      <div className="pulse-button-row pulse-receipt-actions">
+      {(onRefresh || onActivity) && <div className="pulse-button-row pulse-receipt-actions">
         {onRefresh && (
           <button className="btn small" onClick={onRefresh}>
             Refresh results
@@ -213,112 +186,8 @@ export function Receipt({
             View in Activity
           </button>
         )}
-        {showUndo && (
-          <button
-            className="btn small danger"
-            disabled={
-              Boolean(undoReason) || undoBusy || groupBusy || receipt.publishing
-            }
-            title="Delete the definitions created by this publication, including their metric variants. Digest groups remain."
-            onClick={() => setConfirmUndo(true)}
-          >
-            <BusyLabel busy={undoingThisReceipt} idle="Undo publication" active="Undoing..." />
-          </button>
-        )}
-      </div>
-      {group.status === "created" && group.id && (
-        <section
-          className="pulse-publication-group-action"
-          aria-label="Publication digest group"
-        >
-          <div>
-            <strong>{group.name || "Digest group"}</strong>
-            <p>Created by this publication</p>
-          </div>
-          {group.deletion?.status === "deleted" ? (
-            <p role="status">Group deleted</p>
-          ) : (
-            <button
-              className="btn small danger"
-              disabled={
-                !canConnect || groupBusy || undoBusy || receipt.publishing
-              }
-              onClick={() => setConfirmGroup(true)}
-            >
-              <BusyLabel
-                busy={groupBusy}
-                idle={`Delete "${group.name || "Digest group"}" Group`}
-                active="Deleting group..."
-              />
-            </button>
-          )}
-          {group.deletion?.status === "unknown" && (
-            <p className="warning-banner">
-              Group deletion is unconfirmed. Check Tableau before retrying.
-            </p>
-          )}
-          {group.deletion?.message && (
-            <p className="warning-banner">{group.deletion.message}</p>
-          )}
-          {groupError && (
-            <p className="warning-banner" role="alert">
-              {groupError}
-            </p>
-          )}
-        </section>
-      )}
-      {confirmGroup && (
-        <Modal
-          title={`Delete "${group.name || "Digest group"}" group?`}
-          onClose={groupBusy ? undefined : () => setConfirmGroup(false)}
-          actions={
-            <>
-              <button
-                className="btn"
-                disabled={groupBusy}
-                onClick={() => setConfirmGroup(false)}
-              >
-                Cancel
-              </button>
-              <button
-                className="btn danger"
-                disabled={groupBusy || !canConnect}
-                onClick={() => {
-                  void useActivity
-                    .getState()
-                    .deleteGroup(receipt.id, group.id!)
-                    .then(() => setConfirmGroup(false));
-                }}
-              >
-                <BusyLabel busy={groupBusy} idle="Delete group" active="Deleting..." />
-              </button>
-            </>
-          }
-        >
-          <p>
-            Delete this group from Tableau, including its memberships and
-            subscriptions. Metrics remain.
-          </p>
-          <p>This cannot be undone.</p>
-        </Modal>
-      )}
-      {confirmUndo && (
-        <ConfirmUndo
-          receipt={receipt}
-          busy={undoingThisReceipt}
-          disabled={Boolean(undoReason) || groupBusy || receipt.publishing}
-          onCancel={() => setConfirmUndo(false)}
-          onConfirm={() =>
-            void useActivity
-              .getState()
-              .undo(receipt.id)
-              .then(() => setConfirmUndo(false))
-          }
-        />
-      )}
-      {showUndo && undoReason && (
-        <p className="pulse-receipt-note">{undoReason}</p>
-      )}
+      </div>}
+      {showActions && <ReceiptActions key={receipt.id} receipt={receipt} />}
     </section>
   );
 }

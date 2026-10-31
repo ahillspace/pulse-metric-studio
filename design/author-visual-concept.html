@@ -1,0 +1,1180 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Pulse Metric Studio | Design concept</title>
+  <style>
+    :root {
+      font-family: "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
+      color: #e5e5eb;
+      background: #16171a;
+      font-size: 13px;
+      font-synthesis: none;
+      --canvas: #202125;
+      --sidebar: #191a1e;
+      --panel: #1c1d21;
+      --line: #ffffff12;
+      --line-strong: #ffffff21;
+      --text: #e5e5eb;
+      --secondary: #afb0bd;
+      --muted: #8c8d9c;
+      --accent: #b5abff;
+      --accent-fill: #8b7be7;
+      --radius: 6px;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    button, input, textarea, select { font: inherit; }
+    button { cursor: pointer; color: inherit; }
+    button, input, textarea, select { outline-offset: 3px; }
+    :focus-visible { outline: 2px solid var(--accent); }
+    button { background: transparent; border: 0; }
+    button:disabled { cursor: default; }
+    .text-button:disabled { opacity:.45; }
+    input, textarea, select { color: var(--text); }
+    input[type="checkbox"] { width: 15px; height: 15px; accent-color: #a493ed; margin: 0; flex-shrink: 0; cursor: pointer; }
+    input::placeholder, textarea::placeholder { color: #878996; opacity: 1; }
+    svg.icon { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; vertical-align: middle; }
+    .app { height: 100dvh; min-height: 660px; min-width: 1040px; display: grid; grid-template-rows: 38px minmax(0, 1fr) 28px; overflow: hidden; }
+    .titlebar { display: flex; align-items: center; justify-content: space-between; padding: 0 18px; background: #191a1e; color: #a6a7b3; font-size: 12px; border-bottom: 1px solid #ffffff07; user-select: none; }
+    .titlebar-name { display: flex; align-items: center; gap: 9px; }
+    .titlebar-name img { width: 17px; height: 17px; border-radius: 4px; }
+    .preview-label { color: #9293a1; font-size: 11px; display: flex; align-items: center; gap: 7px; }
+    .preview-label::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: #9a90c6; }
+    .shell { display: grid; grid-template-columns: 200px minmax(0, 1fr); min-height: 0; }
+    .sidebar { padding: 21px 12px 12px; background: var(--sidebar); border-right: 1px solid #ffffff09; display: flex; flex-direction: column; min-width: 0; position: relative; }
+    .brand { display: flex; gap: 10px; align-items: center; padding: 0 8px 32px; }
+    .brand img { width: 32px; height: 32px; border-radius: 8px; box-shadow: 0 0 0 1px #ffffff10, 0 2px 7px #0003; }
+    .brand-name { font-size: 13px; font-weight: 600; letter-spacing: -.2px; line-height: 1.45; white-space: nowrap; }
+    .brand-subtitle { display: block; font-size: 11px; color: #91929e; font-weight: 400; letter-spacing: 0; }
+    .nav-group { display: grid; gap: 4px; }
+    .nav-item { width: 100%; height: 37px; display: flex; gap: 11px; align-items: center; border-radius: 6px; padding: 0 12px; font-size: 13px; color: #a1a2af; position: relative; text-align: left; white-space: nowrap; }
+    .nav-item svg { color: #858794; width: 16px; height: 16px; }
+    .nav-item:hover { background: #ffffff05; color: #d8d8e0; }
+    .nav-item.active { background: #b3a4ff14; color: #ded7ff; box-shadow: inset 0 0 0 1px #c9bfff08; }
+    .nav-item.active svg { color: #b9abf6; }
+    .nav-item.active::before { content: ""; position: absolute; left: 0; width: 2px; height: 14px; border-radius: 2px; background: #b7a8fb; }
+    .sidebar-bottom { margin-top: auto; }
+    .account { display: flex; align-items: center; padding: 10px 11px; gap: 10px; font-size: 12px; color: #b1b2bd; width: 100%; text-align: left; border-radius: 6px; }
+    .account:hover { background: #ffffff05; }
+    .account .icon { color: #9395a5; width: 16px; height: 16px; }
+    .account-dot { margin-left: auto; width: 5px; height: 5px; background: #c6ac76; border-radius: 50%; }
+    .connection-box { border: 1px solid #ffffff0c; border-radius: 7px; padding: 11px; margin: 13px 1px 0; background: #ffffff02; }
+    .connection-top { display: flex; align-items: center; gap: 8px; color: #c7c8d1; font-size: 12px; }
+    .connection-top .icon { width: 15px; height: 15px; color: #9295a4; }
+    .connection-sub { display: flex; align-items: center; gap: 6px; padding: 7px 0 0 23px; color: #90939e; font-size: 11px; }
+    .connection-sub i { height: 5px; width: 5px; border-radius: 50%; background: #879d95; }
+    .disconnect { font-size: 11px; margin: 11px 0 0 23px; color: #8d8f9d; padding: 0; }
+    .disconnect:hover { color: #d2d2db; }
+    .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--canvas); }
+    .toolbar { min-height: 65px; display: flex; align-items: center; padding: 0 24px; gap: 19px; border-bottom: 1px solid var(--line); background: #202125; }
+    .page-name { font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 9px; white-space: nowrap; }
+    .page-name .icon { width: 16px; height: 16px; color: #b9b5d1; }
+    .toolbar-divider { height: 20px; width: 1px; background: var(--line-strong); flex-shrink: 0; }
+    .source-picker { display: flex; align-items: center; gap: 8px; min-width: 0; color: #c9c9d3; font-size: 13px; padding: 7px 0; }
+    .source-picker span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .source-picker .icon { width: 14px; height: 14px; color: #888a98; }
+    .source-picker:hover { color: white; }
+    .document-count { color: #8f909f; font-size: 11px; white-space: nowrap; }
+    .toolbar-actions { margin-left: auto; display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+    .button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; height: 32px; padding: 0 12px; font-size: 13px; border-radius: var(--radius); border: 1px solid #ffffff19; background: linear-gradient(#ffffff06, #ffffff01); color: #d0d0da; box-shadow: 0 1px 2px #0002; white-space: nowrap; }
+    .button .icon { width: 14px; height: 14px; }
+    .button:hover { background: #ffffff0a; border-color: #ffffff29; }
+    .button.primary { background: #9987ee; border-color: #b9a8ff40; color: #171322; box-shadow: inset 0 1px 0 #e5dcff30, 0 1px 3px #0003; font-weight: 600; }
+    .button.primary:hover { background: #b2a0ff; }
+    .button.primary:disabled { background: #3e394e; border-color: #5d526a; color: #bbb0d1; box-shadow: none; }
+    .button.toggled { color: #d2c8ff; border-color: #a08bdb44; background: #a18be513; }
+    .workarea { display: grid; grid-template-columns: minmax(0, 1fr) var(--assistant-width, 300px); min-height: 0; flex: 1; }
+    .workarea.assistant-hidden { grid-template-columns: minmax(0, 1fr); }
+    .assistant-hidden .assistant { display: none; }
+    .authoring { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+    .configuration { padding: 0 24px; }
+    .digest { display: flex; align-items: center; flex-wrap: wrap; gap: 20px; padding: 19px 0; border-bottom: 1px solid var(--line); min-height: 72px; }
+    .checkbox-label { display: inline-flex; align-items: center; gap: 9px; color: #ccced7; font-size: 13px; cursor: pointer; }
+    .audience { display: flex; align-items: center; gap: 9px; }
+    .audience label { color: #a4a5b2; font-size: 12px; }
+    .text-input { height: 32px; border-radius: 5px; border: 1px solid #ffffff1c; background: #15161a59; padding: 0 9px; font-size: 13px; box-shadow: inset 0 1px 2px #0001; }
+    .audience .text-input { width: 160px; }
+    .icon-button { width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; color: #9899a9; border-radius: 5px; flex-shrink: 0; }
+    .icon-button .icon { width: 15px; height: 15px; }
+    .icon-button:hover { background: #ffffff09; color: #ddd7f5; }
+    .icon-button[aria-pressed=true] { color: #b7a8ed; background: #a38be411; }
+    .field-tools { padding: 15px 0 17px; display: flex; align-items: center; gap: 24px; }
+    .search { width: 220px; height: 30px; display: flex; align-items: center; gap: 8px; color: #9799a8; }
+    .search .icon { width: 15px; height: 15px; }
+    .search input { border: 0; width: 100%; padding: 5px 0; background: none; min-width: 0; font-size: 13px; }
+    .search:focus-within { color: #c4b8ff; }
+    .search input:focus { outline: none; }
+    .search kbd { font-family: inherit; font-size: 11px; color: #9193a1; background: #ffffff04; border: 1px solid #ffffff13; border-radius: 3px; padding: 0 5px; }
+    .field-tools .checkbox-label { color: #a3a5b3; }
+    .field-tools .checkbox-label input { width: 13px; height: 13px; }
+    .text-button { display: inline-flex; align-items: center; gap: 7px; color: #9597a6; font-size: 12px; padding: 5px 0; border-radius: 3px; }
+    .text-button:hover { color: #ded7ff; }
+    .text-button .icon { width: 13px; height: 13px; }
+    .clear { margin-left: auto; }
+    .section-label { display: flex; align-items: center; gap: 9px; font-size: 13px; font-weight: 600; margin: 0; color: #d1d2db; }
+    .section-label .count { color: #a0a2b1; font-weight: 400; font-size: 12px; }
+    .slicers { padding-bottom: 20px; }
+    .slicers .section-label { margin-bottom: 11px; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .chip { display: inline-flex; align-items: center; gap: 5px; padding: 0 9px; min-height: 27px; border-radius: 5px; border: 1px solid #ffffff12; background: #ffffff03; color: #aaadba; font-size: 12px; line-height: 1.4; }
+    .chip:hover { color: #e2deef; border-color: #ffffff2b; background: #ffffff07; }
+    .chip[aria-pressed=true] { color: #d2c8ff; background: #aa8bf51a; border-color: #a38ad35e; }
+    .chip .icon { width: 11px; height: 11px; }
+    .measure-section { display: flex; flex-direction: column; flex: 1; min-height: 0; border-top: 1px solid var(--line); }
+    .measure-heading { padding: 16px 24px 13px; display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+    .measure-heading .section-label { font-size: 14px; }
+    .table-scroll { margin: 0 24px; flex: 1; min-height: 100px; overflow: auto; border: 1px solid #ffffff13; border-radius: 7px 7px 0 0; background: #1e1f23; scrollbar-color: #4b4c58 #202125; scrollbar-width: thin; }
+    table { border-collapse: separate; border-spacing: 0; table-layout: fixed; width: 1744px; font-size: 12px; }
+    thead { position: sticky; top: 0; z-index: 4; }
+    th { font-weight: 500; text-align: left; }
+    thead th { height: 38px; padding: 0 12px; background: #292a30; border-bottom: 1px solid #ffffff12; color: #b5b8c7; font-size: 12px; white-space: nowrap; }
+    thead th:first-child { position: sticky; left: 0; z-index: 5; background: #292a30; border-right: 1px solid #ffffff14; padding-left: 14px; }
+    tbody th { position: sticky; left: 0; z-index: 2; border-right: 1px solid #ffffff10; background: #202125; padding: 0 12px 0 14px; }
+    tbody td, tbody th { border-bottom: 1px solid #ffffff09; height: 46px; }
+    tbody td { padding: 5px 8px; }
+    tbody tr:last-child td, tbody tr:last-child th { border-bottom: 0; }
+    tbody tr:hover td, tbody tr:hover th { background: #26272d; }
+    tbody tr.selected td { background: #a692e808; }
+    tbody tr.selected th { background: #292735; }
+    tbody tr.selected:hover td { background: #a692e811; }
+    tbody tr.selected:hover th { background: #302b40; }
+    .metric-name { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .metric-name input[type=text] { width: 100%; min-width: 0; background: none; padding: 4px 0; color: #d2d3de; border: 0; text-overflow: ellipsis; font-size: 13px; font-weight: 450; }
+    .metric-name input:disabled { opacity: 1; -webkit-text-fill-color: #b7b9c5; }
+    .metric-name input[type=text]:focus { background: #ffffff07; }
+    .metric-name .kind { font-size: 12px; color: #777b90; font-weight: 400; width: 11px; flex-shrink: 0; }
+    .selected .metric-name .kind { color: #ac9fdb; }
+    .table-select { width: 100%; border: 1px solid transparent; border-radius: 4px; color: #d1cede; appearance: none; height: 30px; padding: 0 20px 0 6px; background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='m3 4.5 3 3 3-3' fill='none' stroke='%238d8e9e' stroke-width='1.3'/%3E%3C/svg%3E") right 5px center / 12px no-repeat; text-overflow: ellipsis; font-size: 12px; }
+    .table-select:disabled { color: #a0a2af; opacity: 1; }
+    .table-select:not(:disabled):hover { background-color: #ffffff06; border-color: #ffffff19; }
+    option { background: #292a31; color: #e7e6ee; }
+    .cumulative { text-align: center; }
+    .switch { appearance: none; width: 26px !important; height: 14px !important; border: 1px solid #626371; border-radius: 20px; background: #34353d; position: relative; vertical-align: middle; }
+    .switch::after { content: ""; position: absolute; width: 8px; height: 8px; left: 2px; top: 2px; border-radius: 50%; background: #9b9ca8; }
+    .switch:checked { background: #8d7bce; border-color: #a593e5; }
+    .switch:checked::after { left: 14px; background: #f7f2ff; }
+    .switch:disabled { opacity: .45; cursor: default; }
+    .description { background: none; border: 1px solid transparent; resize:none; height:36px; min-height:36px; width:100%; padding:1px 6px; border-radius:4px; font-size:12px; line-height:16px; overflow-y:auto; scrollbar-gutter:stable; }
+    .description:not(:disabled):hover { border-color: #ffffff19; }
+    .source-label { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: #9a9cab; font-size: 11px; }
+    .source-label span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .field-details { position:relative; flex-shrink:0; }
+    .field-details summary { cursor:pointer; list-style:none; padding:5px; color:#989aac; }
+    .field-details summary::-webkit-details-marker { display:none; }
+    .field-details p { width:190px; white-space:normal; font-size:12px; line-height:1.6; color:#aeb0bf; }
+    .catalog-details { position:relative; }
+    .catalog-details summary { list-style:none; cursor:pointer; }
+    .catalog-details summary::-webkit-details-marker { display:none; }
+    .catalog-details > div { position:absolute; z-index:8; top:34px; right:0; width:290px; padding:16px; border:1px solid var(--line-strong); border-radius:6px; background:#26272d; box-shadow:0 12px 30px #0005; font-size:12px; line-height:1.7; color:#b9bac8; }
+    .catalog-details p { margin:8px 0 12px; }
+    .validation-details { margin:0 0 16px; font-size:12px; color:#c4bcd4; }
+    .validation-details summary { cursor:pointer; }
+    .validation-details ul { padding-left:18px; line-height:1.8; }
+    .measure-footer { padding: 11px 24px 12px; display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 11px; color: #9294a4; }
+    .measure-footer span { display: flex; gap: 6px; align-items: center; }
+    .measure-footer .icon { width: 12px; height: 12px; color: #828497; }
+    .dimension-group { margin:0 24px 14px; border-top:1px solid var(--line); flex-shrink:0; }
+    .dimension-group > summary { padding:12px 0 0; color:#c6c7d3; font-size:13px; cursor:pointer; }
+    .dimension-group > summary span { color:#a0a2b1; font-size:12px; margin-left:7px; }
+    .dimension-group .table-scroll { margin:12px 0 0; height:190px; min-height:0; border-radius:6px; }
+    .empty-row { text-align: left; padding: 30px 20px; color: #b1b1bf; }
+    .assistant { border-left: 1px solid #ffffff12; background: var(--panel); display: flex; flex-direction: column; min-height: 0; min-width: 0; position: relative; }
+    .resize-handle { position: absolute; top: 0; bottom: 0; left: -3px; width: 6px; z-index: 9; cursor: col-resize; }
+    .resize-handle:hover, .resize-handle:focus-visible { background: #ac95ed50; outline-offset: -2px; }
+    .sidebar-collapse { position: absolute; right: 12px; top: 54px; z-index: 1; }
+    .shell.nav-collapsed { grid-template-columns: 64px minmax(0, 1fr); }
+    .nav-collapsed .sidebar { padding-left: 8px; padding-right: 8px; }
+    .nav-collapsed .brand { padding-left: 7px; padding-right: 7px; }
+    .nav-collapsed .brand-name, .nav-collapsed .nav-item span, .nav-collapsed .account span, .nav-collapsed .account-dot, .nav-collapsed .connection-box { display: none; }
+    .nav-collapsed .nav-item, .nav-collapsed .account { justify-content: center; padding-left: 0; padding-right: 0; }
+    .nav-collapsed .sidebar-collapse { right: 18px; }
+    .assistant-header { display: flex; justify-content: space-between; align-items: center; min-height: 55px; padding: 0 19px; border-bottom: 1px solid #ffffff0a; }
+    .assistant-header h2 { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 8px; margin: 0; color: #d4d1e0; }
+    .assistant-header h2 .icon { width: 14px; height: 14px; color: #b9a7ee; }
+    .assistant-header .text-button { font-size: 11px; color: #9294a2; }
+    .assistant-body { flex: 1; min-height: 0; overflow-y: auto; padding: 24px 21px; scrollbar-width: thin; scrollbar-color: #474854 transparent; }
+    .assistant-intro { margin-top: 17px; }
+    .assistant-orb { width: 40px; height: 40px; border-radius: 11px; display: grid; place-items: center; color: #c7b7fd; border: 1px solid #b29bc52e; background: radial-gradient(ellipse at 20% 0, #b99cfa20, transparent 80%), #a991db08; box-shadow: inset 0 1px 0 #ffffff07; margin-bottom: 20px; }
+    .assistant-orb .icon { width: 21px; height: 21px; stroke-width: 1.4; }
+    .assistant-intro h3 { margin: 0 0 10px; font-size: 16px; line-height: 1.4; font-weight: 500; letter-spacing: -.2px; color: #ddd9e9; }
+    .assistant-intro p { color: #aaa8b8; font-size: 13px; line-height: 1.7; margin: 0 0 22px; }
+    .generate { height: 32px; background: #a992e81a; border-color: #b69cf03b; color: #cbbbfc; box-shadow: inset 0 1px 0 #ffffff06; font-size: 12px; }
+    .generate:hover { background: #a992e82b; border-color: #b69cf06b; }
+    .assistant-context { display: flex; align-items: flex-start; gap: 7px; font-size: 11px; line-height: 1.7; color: #8e8c9e; margin-top: 20px; }
+    .assistant-context .icon { width: 12px; height: 12px; margin-top: 3px; color: #8a819f; }
+    .message { background: #ffffff04; border: 1px solid #ffffff0b; padding: 12px; border-radius: 7px; font-size: 12px; line-height: 1.7; color: #c8c4d4; margin-top: 18px; }
+    .message small { display: block; color: #ac98db; font-size: 10px; margin-bottom: 6px; letter-spacing: .3px; }
+    .composer-wrap { padding: 16px 15px 0; }
+    .composer { background: #24242c; border: 1px solid #ffffff21; border-radius: 9px; box-shadow: 0 3px 14px #00000015, inset 0 1px 0 #ffffff04; padding: 12px; }
+    .composer:focus-within { border-color: #ab92df75; box-shadow: 0 0 0 2px #a58ddd0a; }
+    .composer textarea { background: none; border: 0; outline: none; resize: none; width: 100%; height: 62px; font-size: 12px; line-height: 1.7; padding: 0; color: #ded9eb; }
+    .composer textarea::placeholder { color: #a2a0b3; }
+    .composer-bottom { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .composer-bottom span { font-size: 10px; color: #a29bae; }
+    .send { width: 26px; height: 26px; border-radius: 5px; background: #a48bdc; color: #221b30; display: grid; place-items: center; }
+    .send .icon { width: 15px; height: 15px; }
+    .send:disabled { background: #3d374d; color: #90849e; }
+    .about { font-size: 11px; color: #898796; padding: 13px 6px 15px; }
+    .about summary { cursor: pointer; }
+    .about p { line-height: 1.7; margin: 10px 0 0; color: #a4a0b4; }
+    .statusbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; background: #191a1e; padding: 0 16px; border-top: 1px solid #ffffff0c; color: #8e909e; font-size: 10px; }
+    .statusbar span { display: flex; align-items: center; gap: 7px; min-width: 0; }
+    .statusbar .icon { width: 11px; height: 11px; }
+    .statusbar-right { color: #9f99b1; }
+    dialog { background: #25262d; border: 1px solid #ffffff24; border-radius: 12px; padding: 24px; color: var(--text); max-width: 460px; width: calc(100% - 32px); box-shadow: 0 20px 100px #0008; }
+    dialog::backdrop { background: #0b0c10aa; backdrop-filter: blur(4px); }
+    dialog h2 { font-size: 18px; font-weight: 600; margin: 0 0 12px; }
+    dialog p { font-size: 13px; line-height: 1.75; color: #b3b2c3; margin: 0 0 18px; }
+    dialog .dialog-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 22px; }
+    #info-dialog { padding:0; border-radius:10px; max-height:calc(100dvh - 80px); }
+    #info-dialog[open] { display:flex; flex-direction:column; }
+    .modal-title-row { display:flex; align-items:center; justify-content:space-between; gap:18px; padding:20px 24px; border-bottom:1px solid var(--line); flex-shrink:0; }
+    .modal-title-row h2 { margin:0; font-size:18px; }
+    .modal-body { padding:24px; min-height:0; overflow:auto; }
+    #info-dialog .dialog-actions { padding:16px 24px; margin:0; border-top:1px solid var(--line); flex-shrink:0; background:#202126; }
+    .review-list { list-style: none; padding: 0; margin: 0; }
+    .review-list li { padding: 11px 0; border-bottom: 1px solid var(--line); color: #d3cce6; font-size: 12px; }
+    .review-list small { display: block; margin-top: 5px; color: #a09aaf; }
+    .toast { position: fixed; bottom: 44px; left: 50%; transform: translateX(-50%); z-index: 20; padding: 12px 16px; color: #ddd7ef; background: #34303e; border: 1px solid #9e8abb50; border-radius: 7px; box-shadow: 0 8px 30px #0004; max-width: min(480px, 90vw); font-size: 12px; line-height: 1.6; }
+    [hidden] { display: none !important; }
+    @media (min-width: 1700px) { .workarea { grid-template-columns: minmax(0, 1fr) var(--assistant-width, 330px); } .shell { grid-template-columns: 216px minmax(0, 1fr); } .brand-name { font-size: 14px; } }
+    @media (max-width: 1360px) { .document-count { display: none; } .workarea { grid-template-columns: minmax(0, 1fr) var(--assistant-width, 280px); } .shell { grid-template-columns: 200px minmax(0, 1fr); } .toolbar { gap: 14px; padding: 0 20px; } .configuration { padding: 0 20px; } .digest { gap: 13px; } .audience .text-input { width: 125px; } .table-scroll { margin: 0 20px; } .measure-heading { padding-left: 20px; padding-right: 20px; } .measure-footer { padding-left: 20px; padding-right: 20px; } .field-tools { gap: 16px; } .search { width: 180px; } .assistant-intro h3 { font-size: 17px; } }
+    @media (max-width: 1100px) { .shell { grid-template-columns: 64px minmax(0, 1fr); } .sidebar { padding: 20px 8px 12px; } .brand { padding: 0 7px 32px; } .brand-name, .nav-item span, .account span, .account-dot, .connection-box { display: none; } .nav-item { justify-content: center; padding: 0; } .account { justify-content: center; padding: 12px 0; } .source-picker { max-width: 300px; } .field-tools { gap: 14px; } .digest { gap: 15px; } .audience { gap: 6px; } .audience .text-input { width: 120px; } }
+    @media (prefers-reduced-motion: no-preference) { button { transition: color .12s, background-color .12s, border-color .12s; } }
+  
+    #manager-view { color: #e5e5eb; background: #202125; font: 13px/1.5 system-ui, sans-serif; height: 100%; min-height: 0; overflow: auto; color-scheme: dark; }
+    #manager-view * { box-sizing: border-box; }
+    #manager-view [hidden] { display: none !important; }
+    #manager-view button, #manager-view input, #manager-view select { font: inherit; }
+    #manager-view button { cursor: pointer; color: #c9c9d4; background: none; border: 0; }
+    #manager-view :focus-visible { outline: 2px solid #b5abff; outline-offset: 3px; }
+    #manager-view button:disabled { cursor: default; opacity: .45; }
+    #manager-view input[type=checkbox] { width: 15px; height: 15px; accent-color: #a493ed; flex-shrink: 0; }
+    #manager-view .mm-head { padding: 25px 28px 19px; display: flex; justify-content: space-between; gap: 20px; align-items: center; border-bottom: 1px solid #ffffff10; }
+    #manager-view h1 { font-size: 18px; font-weight: 600; letter-spacing: -.3px; margin: 0 0 5px; }
+    #manager-view p { margin: 0; }
+    #manager-view .mm-muted { color: #a4a6b5; font-size: 12px; }
+    #manager-view .mm-source { display: flex; gap: 9px; align-items: center; }
+    #manager-view .mm-source span { color: #bcb2ed; }
+    #manager-view .mm-btn { border: 1px solid #ffffff21; border-radius: 6px; padding: 6px 12px; min-height: 32px; background: #ffffff03; white-space: nowrap; }
+    #manager-view .mm-btn:hover { background: #ffffff0a; border-color: #ffffff35; }
+    #manager-view .mm-primary { color: #ded5ff; background: #a18be518; border-color: #a08bdb55; }
+    #manager-view .mm-danger { color: #e9aaaa; }
+    #manager-view .mm-tools { display: flex; align-items: center; gap: 20px; padding: 19px 28px; }
+    #manager-view .mm-search { width: 340px; }
+    #manager-view input[type=search], #manager-view select { padding: 8px 11px; border: 1px solid #ffffff20; border-radius: 6px; background: #191a1e; color: #e0dfe8; }
+    #manager-view input::placeholder { color: #a0a2b0; }
+    #manager-view label { display: inline-flex; gap: 8px; align-items: center; color: #b8bac7; }
+    #manager-view .mm-push { margin-left: auto; }
+    #manager-view .mm-inventory { margin: 0 28px 20px; border: 1px solid #ffffff16; border-radius: 7px; overflow: hidden; }
+    #manager-view .mm-actionbar { background: #26272d; padding: 11px 15px; min-height: 55px; display: flex; align-items: center; gap: 12px; }
+    #manager-view .mm-count { min-width: 120px; font-variant-numeric: tabular-nums; }
+    #manager-view .mm-columns, #manager-view .mm-definition { display: grid; grid-template-columns: 24px minmax(240px,1fr) 185px 158px 36px; align-items: center; gap: 12px; }
+    #manager-view .mm-columns { padding: 10px 16px; color: #a7a9b8; font-size: 12px; border-top: 1px solid #ffffff0d; background: #222329; }
+    #manager-view .mm-definition { padding: 13px 16px; border-top: 1px solid #ffffff1b; min-height: 69px; }
+    #manager-view .mm-name { text-align: left; padding: 0; font-size: 14px; font-weight: 600; color: #e2dfea; }
+    #manager-view .mm-name::before { content: '›'; display: inline-block; color: #aaa2c6; margin-right: 10px; }
+    #manager-view .mm-name[aria-expanded=true]::before { transform: rotate(90deg); }
+    #manager-view .mm-formula { padding-left: 18px; margin-top: 4px; color: #9fa2b3; font-size: 12px; }
+    #manager-view .mm-followers { text-align: left; color: #bab3d5; text-decoration: underline; text-decoration-color: #ffffff23; text-underline-offset: 4px; padding: 0; }
+    #manager-view .mm-variants { background: #1c1d21; padding: 0 16px 0 52px; }
+    #manager-view .mm-variant { display: grid; grid-template-columns: 22px 165px minmax(120px,1fr) 175px 32px 32px; align-items: center; gap: 10px; min-height: 44px; border-top: 1px solid #ffffff0b; }
+    #manager-view .mm-family { text-align: left; color: #bbb6cb; padding: 5px 0; }
+    #manager-view .mm-family:hover { color:#d1c1ff; }
+    #manager-view .mm-family[aria-pressed=true] { text-decoration: underline; }
+    #manager-view .mm-scope { display: block; color: #a8a1bb; font-size: 11px; }
+    #manager-view .mm-follow { color: #acaebb; font-size: 12px; }
+    #manager-view .mm-link { color: #c4b7ea; font-size: 12px; padding: 5px 0; }
+    #manager-view .mm-icon-action { width:28px; height:28px; display:inline-flex; align-items:center; justify-content:center; color:#a3a0b2; border-radius:5px; }
+    #manager-view .mm-icon-action:hover { background:#ffffff08; color:#d1c1ff; }
+    #manager-view .mm-icon-action .icon { width:15px; height:15px; }
+    #manager-view .mm-list { max-height: 565px; overflow: auto; scrollbar-color: #4b4c58 #202125; scrollbar-width: thin; }
+    #manager-view .mm-empty { padding: 42px; text-align: center; color: #b5b3c3; }
+    #manager-view .mm-foot { display: flex; justify-content: space-between; gap: 20px; padding: 0 28px 20px; color: #a2a1b2; font-size: 12px; }
+    #manager-view .mm-status { color: #c3b5ec; }
+    #manager-view dialog { width: 640px; max-width: 90vw; max-height: 80vh; overflow: auto; background: #25262d; border: 1px solid #ffffff28; border-radius: 10px; color: #e5e5eb; padding: 25px; box-shadow: 0 20px 100px #0008; }
+    #manager-view dialog::backdrop { background: #0b0c10aa; }
+    #manager-view dialog h2 { margin: 0 0 7px; font-size: 19px; }
+    #manager-view dialog h3 { font-size: 13px; margin: 20px 0 9px; }
+    #manager-view dialog p { color: #b9b7c8; margin: 10px 0; }
+    #manager-view dialog ul { padding-left: 20px; }
+    #manager-view dialog li { padding: 7px 0; border-bottom: 1px solid #ffffff0c; }
+    #manager-view .mm-dialog-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 22px; }
+    #manager-view .mm-fields { display: grid; gap: 14px; margin-top: 20px; }
+    #manager-view .mm-fields label { display: flex; justify-content: space-between; }
+    #manager-view .mm-preview-art { padding: 28px; background: #1b1c21; border: 1px solid #ffffff13; margin: 18px 0; }
+    #manager-view .mm-preview-art strong { font-size: 35px; font-weight: 500; display: block; }
+    #manager-view .mm-preview-art svg { width: 100%; height: 100px; margin-top: 18px; }
+  
+
+#activity-view { --av-bg:#202125; --av-panel:#1c1d21; --av-line:#ffffff14; --av-text:#e5e5eb; --av-muted:#a6a7b5; --av-accent:#b5abff; box-sizing:border-box; width:100%; height:100%; min-height:700px; max-height:854px; color:var(--av-text); background:var(--av-bg); font:13px/1.5 "Segoe UI Variable Text","Segoe UI",sans-serif; display:flex; flex-direction:column; color-scheme:dark; }
+#activity-view[hidden], #activity-view [hidden] { display:none !important; }
+#activity-view *, #activity-view *::before, #activity-view *::after { box-sizing:border-box; }
+#activity-view button, #activity-view input, #activity-view select { font:inherit; color:inherit; }
+#activity-view button { cursor:pointer; }
+#activity-view :focus-visible { outline:2px solid var(--av-accent); outline-offset:3px; }
+#activity-view h2, #activity-view h3, #activity-view p { margin:0; }
+#activity-view .av-top { padding:23px 28px 19px; border-bottom:1px solid var(--av-line); display:flex; align-items:center; gap:16px; }
+#activity-view h2 { font-size:18px; font-weight:600; letter-spacing:-.3px; }
+#activity-view .av-sub { color:var(--av-muted); font-size:12px; margin-top:4px; }
+#activity-view .av-example { margin-left:auto; font-size:11px; color:#c2b8df; border:1px solid #b5abff30; background:#b5abff09; padding:4px 9px; border-radius:4px; white-space:nowrap; }
+#activity-view .av-tools { display:flex; align-items:center; gap:12px; padding:16px 28px; }
+#activity-view .av-search { flex:1; max-width:355px; }
+#activity-view input, #activity-view select { height:33px; border:1px solid #ffffff23; border-radius:5px; background:#191a1e; padding:0 10px; }
+#activity-view input { width:100%; }
+#activity-view input::placeholder { color:#9b9dab; }
+#activity-view .av-btn { display:inline-flex; align-items:center; justify-content:center; min-height:32px; padding:5px 11px; border:1px solid #ffffff23; border-radius:5px; background:#ffffff04; font-size:12px; white-space:nowrap; }
+#activity-view .av-btn:hover { background:#ffffff0b; border-color:#ffffff3a; }
+#activity-view .av-tools .av-btn, #activity-view .av-top > .av-btn { margin-left:auto; }
+#activity-view .av-layout { display:grid; grid-template-columns:380px minmax(0,1fr); flex:1; min-height:0; margin:0 28px; border:1px solid var(--av-line); border-radius:7px; overflow:hidden; }
+#activity-view .av-index { display:flex; flex-direction:column; min-height:0; background:#1e1f23; border-right:1px solid var(--av-line); }
+#activity-view .av-index-head { padding:13px 17px; display:flex; justify-content:space-between; color:var(--av-muted); font-size:12px; border-bottom:1px solid var(--av-line); }
+#activity-view .av-list { list-style:none; padding:0; margin:0; overflow:auto; flex:1; }
+#activity-view .av-day { padding:16px 17px 7px; color:#a4a5b4; font-size:10px; font-weight:600; letter-spacing:1px; text-transform:uppercase; }
+#activity-view .av-run { display:block; width:100%; text-align:left; padding:14px 17px 15px; background:transparent; border:0; border-bottom:1px solid #ffffff09; border-left:3px solid transparent; }
+#activity-view .av-run:hover { background:#ffffff04; }
+#activity-view .av-run[aria-current=true] { background:#a38be510; border-left-color:#b5abff; }
+#activity-view .av-run-line { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+#activity-view .av-run strong { font-size:13px; font-weight:600; }
+#activity-view .av-run time { color:#a6a6b4; font-size:12px; font-variant-numeric:tabular-nums; }
+#activity-view .av-run-summary { display:block; color:#adb0be; font-size:12px; margin-top:9px; }
+#activity-view .av-badge { display:inline-flex; align-items:center; gap:6px; font-size:10px; font-weight:500; border-radius:4px; padding:2px 7px; white-space:nowrap; }
+#activity-view .av-badge::before { content:""; width:5px; height:5px; border-radius:50%; background:currentColor; }
+#activity-view .av-ok { color:#acc8bb; background:#91b6a510; }
+#activity-view .av-partial { color:#dfc293; background:#d5ac7212; }
+#activity-view .av-unknown { color:#c4b7f3; background:#b5abff13; }
+#activity-view .av-failed { color:#dfa9ae; background:#dd929e12; }
+#activity-view .av-neutral { color:#b2b3bf; background:#ffffff08; }
+#activity-view .av-index-foot { padding:12px 17px; border-top:1px solid var(--av-line); font-size:11px; color:var(--av-muted); }
+#activity-view .av-detail { min-width:0; min-height:0; display:flex; flex-direction:column; background:var(--av-panel); }
+#activity-view .av-detail-body { overflow:auto; padding:23px 24px; flex:1; scrollbar-width:thin; scrollbar-color:#4b4c58 transparent; }
+#activity-view .av-eyebrow { color:#a6a0ba; font-size:10px; letter-spacing:1.1px; text-transform:uppercase; margin-bottom:9px; }
+#activity-view .av-detail-title { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+#activity-view h3 { font-size:20px; font-weight:550; letter-spacing:-.3px; }
+#activity-view .av-meta { color:var(--av-muted); font-size:12px; margin-top:6px; }
+#activity-view .av-summary { margin-top:21px; color:#d7d6e1; font-size:13px; }
+#activity-view .av-notice {margin-top:14px;font-size:12px;line-height:1.65;color:#c7c3d5;}
+#activity-view .av-section-heading { font-size:13px; font-weight:600; display:flex; justify-content:space-between; align-items:center; margin:24px 0 7px; }
+#activity-view .av-section-heading span { font-size:11px; color:var(--av-muted); font-weight:400; }
+#activity-view .av-items { list-style:none; padding:0; margin:0; }
+#activity-view .av-item { padding:13px 0; border-top:1px solid var(--av-line); }
+#activity-view .av-item-title { display:flex; justify-content:space-between; align-items:center; gap:10px; font-size:13px; font-weight:500; }
+#activity-view .av-diagnostic { color:#b6afc9; font-size:12px; margin-top:5px; }
+#activity-view details { color:var(--av-muted); font-size:12px; margin-top:7px; }
+#activity-view summary { cursor:pointer; width:fit-content; }
+#activity-view dl { display:grid; grid-template-columns:90px 1fr; gap:5px 12px; margin:10px 0 3px; }
+#activity-view dt { color:#9697a6; } #activity-view dd { margin:0; color:#c2c1ce; }
+#activity-view .av-digest { padding:12px 0; border:0; border-top:1px solid var(--av-line); border-bottom:1px solid var(--av-line); border-radius:0; margin-top:17px; }
+#activity-view .av-digest summary { font-size:12px; color:#d0cddc; }
+#activity-view .av-digest p { margin-top:9px; }
+#activity-view .av-digest .av-btn { margin-top:12px; }
+#activity-view .av-actions { margin:0 28px 14px; padding:12px 0; display:flex; gap:12px; align-items:center; border:0; border-bottom:1px solid var(--av-line); border-radius:0; flex-shrink:0; }
+#activity-view .av-action-scope { margin-right:auto; min-width:0; color:var(--av-muted); font-size:12px; overflow-wrap:anywhere; }
+#activity-view .av-danger { color:#dfb1b7; border-color:#c18c9638; }
+#activity-view .av-footer { min-height:44px; padding:12px 28px; display:flex; align-items:center; justify-content:space-between; gap:12px; color:#a2a2b1; font-size:10px; }
+#activity-view .av-empty { padding:35px 20px; color:var(--av-muted); font-size:12px; }
+#activity-view .av-sr { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; border:0; }
+#activity-view dialog { color:var(--av-text); background:#25262d; border:1px solid #ffffff29; border-radius:9px; width:470px; max-width:calc(100vw - 48px); padding:24px; box-shadow:0 20px 80px #0008; }
+#activity-view dialog::backdrop { background:#0b0c10aa; }
+#activity-view dialog h3 { font-size:18px; }
+#activity-view .av-modal-header { display:flex; align-items:center; justify-content:space-between; gap:20px; padding-bottom:15px; border-bottom:1px solid var(--av-line); }
+#activity-view dialog p { margin-top:13px; color:#bebaca; font-size:12px; line-height:1.7; }
+#activity-view dialog ul { padding-left:20px; font-size:12px; color:#d5cede; }
+#activity-view .av-dialog-actions { display:flex; justify-content:flex-end; gap:10px; margin-top:22px; }
+
+    .screen-view { display:flex; flex-direction:column; flex:1; min-width:0; min-height:0; }
+    #manager-view { font-family:"Segoe UI Variable Text","Segoe UI",sans-serif; overflow:hidden; }
+    #manager-view .mm-head, #manager-view .mm-tools, #manager-view .mm-foot { flex-shrink:0; }
+    #manager-view .mm-inventory { display:flex; flex-direction:column; flex:1; min-height:0; }
+    #manager-view .mm-actionbar, #manager-view .mm-columns { flex-shrink:0; }
+    #manager-view .mm-list { flex:1; min-height:0; max-height:none; }
+    #manager-view .mm-content { display:flex; gap:16px; min-height:0; flex:1; margin:0 28px 20px; }
+    #manager-view .mm-content .mm-inventory { flex:1; min-width:0; margin:0; }
+    #manager-view .mm-preview-pane { width:310px; flex-shrink:0; padding:20px; border:1px solid var(--line); border-radius:7px; background:var(--panel); display:flex; flex-direction:column; min-height:0; }
+    #manager-view .mm-preview-pane header { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+    #manager-view .mm-preview-pane h2 { margin:2px 0 12px; font-size:15px; font-weight:600; }
+    #manager-view .mm-preview-pane .mm-btn { padding:5px 9px; font-size:12px; }
+    #manager-view .mm-preview-content { flex:1; padding-top:28px; color:var(--muted); font-size:12px; }
+    #manager-view .mm-preview-pane footer { display:flex; gap:8px; margin-top:24px; }
+    #manager-view .mm-content:has(.mm-preview-pane:not([hidden])) .mm-definition, #manager-view .mm-content:has(.mm-preview-pane:not([hidden])) .mm-columns { min-width:700px; }
+    #manager-view .mm-content:has(.mm-preview-pane:not([hidden])) .mm-variant { min-width:670px; }
+    #activity-view { min-height:0; max-height:none; }
+
+    #manager-view .mm-head, #activity-view .av-top { min-height:96px; }
+    #manager-view .mm-source .icon { width:13px; height:13px; color:#a59abd; }
+    #manager-view .mm-definition:has(.mm-name[aria-expanded=true]) { background:#ffffff02; }
+    #manager-view dialog { padding:0; width:900px; max-width:calc(100vw - 80px); max-height:calc(100dvh - 80px); border-radius:10px; }
+    #manager-view dialog[open] { display:flex; flex-direction:column; }
+    #manager-view .mm-modal-header { padding:20px 24px; min-height:72px; display:flex; align-items:center; justify-content:space-between; gap:20px; border-bottom:1px solid var(--line); flex-shrink:0; }
+    #manager-view .mm-modal-header h2 { margin:0; font-size:18px; font-weight:600; }
+    #manager-view .mm-modal-header .mm-btn { color:#a7a7b7; font-size:12px; }
+    #manager-view .mm-modal-body { padding:24px; overflow:auto; min-height:0; }
+    #manager-view .mm-dialog-actions { margin:0; padding:16px 24px; min-height:70px; border-top:1px solid var(--line); background:#202126; flex-shrink:0; }
+    #manager-view .mm-dialog-actions .mm-btn { min-width:88px; }
+    #manager-view .mm-dialog-actions .mm-primary { background:#9987ee; color:#171322; border-color:#b9a8ff40; font-weight:600; }
+    #manager-view .mm-dialog-actions .mm-danger { background:#af6d7612; color:#e0a9b0; border-color:#ce8d9735; }
+    #manager-view .mm-target-label { display:block; color:#a9a8b8; font-size:12px; margin:0 0 8px; }
+    #manager-view .mm-target-search { display:flex; gap:9px; }
+    #manager-view .mm-target-search input { flex:1; min-width:0; }
+    #manager-view .mm-target-pills { display:flex; flex-wrap:wrap; gap:7px; margin:17px 0; }
+    #manager-view .mm-target-pill { display:inline-flex; align-items:center; gap:8px; border:1px solid #9d8dd178; border-radius:18px; padding:5px 10px; color:#cfc3f8; background:#aa8bf509; font-size:12px; }
+    #manager-view .mm-target-pill button { padding:0; font-size:11px; color:#c1b0eb; }
+    #manager-view .mm-target-options { border:1px solid var(--line); border-radius:6px; overflow:auto; max-height:320px; scrollbar-width:thin; }
+    #manager-view .mm-target-option { display:flex; justify-content:space-between; gap:20px; align-items:center; width:100%; min-height:39px; padding:9px 13px; text-align:left; border-bottom:1px solid #ffffff06; }
+    #manager-view .mm-target-option:hover, #manager-view .mm-target-option:focus-visible { background:#a18be50c; }
+    #manager-view .mm-target-option small { color:#9693a6; font-size:11px; }
+    #manager-view .mm-delete-list { padding-left:20px; margin:18px 0; }
+    #manager-view .mm-delete-list>li { padding:8px 0 15px; border:0; }
+    #manager-view .mm-delete-list ul { padding-left:20px; margin-top:8px; }
+    #manager-view .mm-delete-list ul li { border:0; padding:6px 0; color:#bcb9ca; }
+    #manager-view .mm-impact { margin:4px 0 0; font-size:12px; color:#a5a0b4; }
+    #manager-view .mm-impact summary { color:#c0b3e8; cursor:pointer; width:fit-content; text-underline-offset:3px; }
+    #manager-view .mm-impact summary:hover { text-decoration:underline; }
+    #manager-view .mm-impact ul { list-style:none; padding:3px 0 0 14px; }
+    #manager-view .mm-impact li { padding:3px 0 !important; color:#aaa6ba !important; }
+    #manager-view .mm-delete-warning, #manager-view .mm-notice { border:0; padding:0; background:none; color:#beb9ca; font-size:12px; line-height:1.8; margin:16px 0 0; }
+    #activity-view .av-notice, #activity-view .av-notice[data-tone] { padding:0; border:0; background:none; color:#c7c3d5; }
+    #activity-view .av-index { scrollbar-width:thin; scrollbar-color:#4b4c58 transparent; }
+
+#manager-view .mm-variants-dialog { width:min(980px,calc(100vw - 32px)); max-width:none; max-height:calc(100dvh - 32px); padding:0; overflow:hidden; background:#202023; border:1px solid #39393f; border-radius:12px; color:#e4e4ea; font:13px/1.5 "Segoe UI",sans-serif; }
+#manager-view .mm-variants-dialog[open] { display:flex; flex-direction:column; }
+#manager-view .mm-variants-dialog [data-mm-dialog-body] { min-height:0; overflow:auto; }
+#manager-view .mm-variants-dialog .mv-layout { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); }
+#manager-view .mm-variants-dialog .mv-config { min-width:0; padding:0 24px 24px; }
+#manager-view .mm-variants-dialog .mv-config > section { padding-top:23px; }
+#manager-view .mm-variants-dialog .mv-heading { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:11px; }
+#manager-view .mm-variants-dialog h3 { margin:0; font-size:14px; font-weight:650; }
+#manager-view .mm-variants-dialog .mv-heading > span, #manager-view .mm-variants-dialog small { color:#aaaab5; font-size:12px; }
+#manager-view .mm-variants-dialog .mv-sources { border:1px solid #39393f; border-radius:6px; padding:0 10px; }
+#manager-view .mm-variants-dialog summary { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 0; cursor:pointer; list-style:none; }
+#manager-view .mm-variants-dialog summary::-webkit-details-marker { display:none; }
+#manager-view .mm-variants-dialog summary span:last-child { color:#aaaab5; flex-shrink:0; }
+#manager-view .mm-variants-dialog input[type=search], #manager-view .mm-variants-dialog select { width:100%; min-width:0; color:#e4e4ea; background:#27272c; border:1px solid #404048; border-radius:4px; padding:8px 10px; font:inherit; }
+#manager-view .mm-variants-dialog .mv-source-list { max-height:220px; overflow:auto; padding-bottom:6px; }
+#manager-view .mm-variants-dialog .mv-source-list label { display:flex; padding:7px 3px; gap:9px; cursor:pointer; }
+#manager-view .mm-variants-dialog .mv-source-list small { display:block; font-size:11px; }
+#manager-view .mm-variants-dialog .mv-matches { display:flex; align-items:center; gap:8px; margin:10px 0; }
+#manager-view .mm-variants-dialog .mv-matches button { margin-left:auto; }
+#manager-view .mm-variants-dialog .mv-filter-title { display:flex; align-items:center; gap:9px; color:#aaaab5; font-weight:600; margin:14px 0 10px; }
+#manager-view .mm-variants-dialog .mv-filter-title::after { content:""; flex:1; height:1px; background:#39393f; }
+#manager-view .mm-variants-dialog .mv-control { display:flex; flex-direction:column; align-items:stretch; gap:5px; margin:12px 0; color:#aaaab5; }
+#manager-view .mm-variants-dialog .mv-picker { padding:10px; border:1px solid #39393f; border-radius:6px; margin-top:12px; }
+#manager-view .mm-variants-dialog .mv-mode { display:flex; flex-wrap:wrap; gap:16px; margin:10px 0; }
+#manager-view .mm-variants-dialog input[type=radio], #manager-view .mm-variants-dialog input[type=checkbox] { accent-color:#a4a0dd; width:14px; height:14px; margin:0; flex-shrink:0; }
+#manager-view .mm-variants-dialog p { margin:10px 0; color:#aaaab5; }
+#manager-view .mm-variants-dialog .mv-toolbar { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; margin:12px 0 9px; }
+#manager-view .mm-variants-dialog .mv-toolbar span { color:#a4a0dd; font:600 11px/1.5 Consolas,monospace; }
+#manager-view .mm-variants-dialog .mv-values { max-height:290px; overflow:auto; border:1px solid #39393f; border-radius:4px; }
+#manager-view .mm-variants-dialog .mv-values label { display:flex; padding:7px 9px; gap:9px; align-items:flex-start; cursor:pointer; }
+#manager-view .mm-variants-dialog .mv-values label span { overflow-wrap:anywhere; }
+#manager-view .mm-variants-dialog .mv-values input { margin-top:3px; }
+#manager-view .mm-variants-dialog .mv-values .mv-excluded span { text-decoration:line-through; }
+#manager-view .mm-variants-dialog .mv-preview { min-width:0; padding:24px; background:#1b1b1f; border-left:1px solid #39393f; }
+#manager-view .mm-variants-dialog .mv-preview article { padding:14px; margin-bottom:10px; border:1px solid #39393f; border-radius:7px; background:#232328; overflow-wrap:anywhere; }
+#manager-view .mm-variants-dialog .mv-preview strong { font-size:14px; }
+#manager-view .mm-variants-dialog .mv-preview article p { color:#e4e4ea; margin:9px 0; }
+#manager-view .mm-variants-dialog .mv-preview ul { margin:8px 0; padding-left:15px; }
+#manager-view .mm-variants-dialog .mv-preview li { padding:0; border:0; }
+#manager-view .mm-variants-dialog .mv-hint { font-size:12px; line-height:1.6; }
+#manager-view .mm-variants-dialog .mv-clause { display:flex; flex-wrap:wrap; gap:8px; padding:10px; border:1px solid #39393f; border-radius:5px; margin:8px 0; }
+#manager-view .mm-variants-dialog .mv-clause > span { flex:1 1 100%; overflow-wrap:anywhere; }
+#manager-view .mm-variants-dialog .mm-btn { background:#2a2a30; border-color:#44444e; color:#d9d9e2; padding:6px 10px; min-height:32px; }
+#manager-view .mm-variants-dialog .mm-primary { background:#9987ee; border-color:#b9a8ff40; color:#171322; }
+#manager-view .mm-variants-dialog [data-mm-dialog-actions] { flex:none; margin:0; padding:15px 24px; border-top:1px solid #39393f; display:flex; align-items:center; gap:10px; }
+#manager-view .mm-variants-dialog [data-mv-status] { margin:0 auto 0 0; font-size:12px; }
+#manager-view .mm-variants-dialog :focus-visible { outline:2px solid #b5abff; outline-offset:2px; }
+
+#manager-view .mm-variants-dialog {width:min(1320px,calc(100vw - 80px));max-height:calc(100dvh - 80px);font-family:"Segoe UI Variable Text","Segoe UI",sans-serif;}
+#manager-view .mm-variants-dialog .mm-modal-body {padding:0;}
+</style>
+</head>
+<body>
+  <svg style="display:none" aria-hidden="true"><defs>
+    <symbol id="i-author" viewBox="0 0 24 24"><path d="M5 16V9m7 9V5m7 11v-5"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1.2"/><rect x="14" y="4" width="6" height="6" rx="1.2"/><rect x="4" y="14" width="6" height="6" rx="1.2"/><rect x="14" y="14" width="6" height="6" rx="1.2"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><path d="M4 9a8 8 0 1 1-.5 5M3 4v5h5m4-2v5l3 2"/></symbol>
+    <symbol id="i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v14c0 4 14 4 14 0V5M5 12c0 4 14 4 14 0"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m8 10 4 4 4-4"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-5-5 5 5-5 5"/></symbol>
+    <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V5m-5 5 5-5 5 5"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 15V4m-4 4 4-4 4 4M5 15v5h14v-5"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="6" y="10" width="12" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3m-4 4v2"/></symbol>
+    <symbol id="i-unlock" viewBox="0 0 24 24"><rect x="6" y="10" width="12" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0m-4 7v2"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 11v5m0-9h.01"/></symbol>
+    <symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z"/></symbol>
+    <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16"/><rect x="7" y="4" width="4" height="6" rx="1" fill="currentColor" stroke="none"/><rect x="14" y="14" width="4" height="6" rx="1" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="m9 15 6-6m-7 4-2 2a4 4 0 0 0 6 6l3-3m1-7 2-2a4 4 0 0 0-6-6L9 6"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v5m4-5v5"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 10a8 8 0 0 0-14-5L3 8m0-5v5h5M4 14a8 8 0 0 0 14 5l3-3m0 5v-5h-5"/></symbol>
+    <symbol id="i-preview" viewBox="0 0 24 24"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M15 8V4H4v11h4"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-horizontal" viewBox="0 0 24 24"><path d="M4 12h16M8 8l-4 4 4 4m8-8 4 4-4 4"/></symbol>
+  </defs></svg>
+  <div class="app">
+    <div class="titlebar"><span class="titlebar-name"><img class="app-icon" alt="" src="data:image/png;base64,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">Pulse Metric Studio</span><span class="preview-label">Design preview</span></div>
+    <div class="shell">
+      <aside class="sidebar" aria-label="Application navigation">
+        <div class="brand"><img class="app-icon" alt="" src="data:image/png;base64,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"><div class="brand-name">Pulse Metric Studio<span class="brand-subtitle">Tableau Pulse</span></div></div>
+        <button class="icon-button sidebar-collapse" id="nav-collapse" aria-label="Collapse navigation" aria-expanded="true" title="Collapse navigation"><svg class="icon"><use href="#i-panel"/></svg></button><nav class="nav-group">
+          <button class="nav-item active" data-screen="author" aria-current="page" title="Author"><svg class="icon"><use href="#i-author"/></svg><span>Author</span></button>
+          <button class="nav-item" data-screen="manager" title="Metric Manager"><svg class="icon"><use href="#i-grid"/></svg><span>Metric Manager</span></button>
+          <button class="nav-item" data-screen="activity" title="Activity"><svg class="icon"><use href="#i-clock"/></svg><span>Activity</span></button>
+        </nav>
+        <div class="sidebar-bottom">
+          <button class="account" data-placeholder="Codex account" title="Codex account"><svg class="icon"><use href="#i-settings"/></svg><span>Codex account</span><i class="account-dot"></i></button>
+          <div class="connection-box"><div class="connection-top"><svg class="icon"><use href="#i-link"/></svg><span>Connections</span></div><div class="connection-sub"><i></i>pace </div><button class="disconnect" data-placeholder="Disconnect">Disconnect</button></div>
+        </div>
+      </aside>
+      <main class="main"><section id="author-view" class="screen-view" aria-label="Author metrics">
+        <header class="toolbar">
+          <div class="page-name"><svg class="icon"><use href="#i-author"/></svg>Author</div>
+          <div class="toolbar-divider"></div>
+          <button class="source-picker" id="source-picker" title="Choose a datasource"><svg class="icon"><use href="#i-database"/></svg><span>Superstore Sales Cloud (CalcTEST)</span><svg class="icon"><use href="#i-chevron"/></svg></button>
+          <span class="document-count" id="document-count">6 definitions · 14 metrics</span>
+          <div class="toolbar-actions"><button class="button primary" id="publish" aria-label="Review publication" disabled title="Select at least one metric and one slicer to publish."><svg class="icon"><use href="#i-upload"/></svg>Publish</button><button class="button toggled assistant-toggle" id="assistant-toggle" aria-expanded="true" aria-controls="assistant-panel" title="Toggle assistant"><svg class="icon"><use href="#i-panel"/></svg><span class="button-label">Assistant</span></button></div>
+        </header>
+        <div class="workarea" id="workarea">
+          <div class="authoring">
+            <div class="configuration">
+              <section class="digest" aria-label="Digest group settings">
+                <label class="checkbox-label"><input type="checkbox" id="group-follow" checked>Create or follow a digest group</label>
+                <div class="audience" id="audience-controls"><label for="audience">Digest audience</label><input class="text-input" id="audience" aria-label="Digest audience" maxlength="32768"><button class="icon-button" id="audience-lock" aria-pressed="false" title="Protect audience from assistant changes" aria-label="Protect audience from assistant changes"><svg class="icon"><use href="#i-unlock"/></svg></button></div>
+              </section>
+              <div class="field-tools">
+                <label class="search"><svg class="icon"><use href="#i-search"/></svg><input id="field-search" type="search" placeholder="Filter fields..." aria-label="Filter fields"></label>
+                <label class="checkbox-label"><input type="checkbox" id="hide-unused">Hide unused</label>
+                <button class="text-button clear" id="clear">Clear configuration</button><details class="catalog-details"><summary class="icon-button" aria-label="Datasource details" title="Datasource details"><svg class="icon"><use href="#i-info"/></svg></summary><div><strong>Datasource fields</strong><p>14 measures · 24 dimensions · 2 date fields<br>Example catalog</p><button class="button" disabled title="Live catalog refresh is not connected in this HTML concept">Refresh fields</button></div></details>
+              </div>
+              <details class="validation-details" id="validation-details" hidden><summary id="validation-summary"></summary><ul id="validation-issues"></ul></details>
+              <section class="slicers" aria-labelledby="slicers-title"><h2 class="section-label" id="slicers-title">Slicers <span class="count" id="slicer-count">0 selected</span></h2><div class="chips" id="chips"></div></section>
+            </div>
+            <section class="measure-section" aria-labelledby="measures-title">
+              <div class="measure-heading"><h2 class="section-label" id="measures-title">Measures <span class="count" id="measure-count">0 of 14 selected</span></h2><span class="text-button" aria-hidden="true">More settings<svg class="icon"><use href="#i-arrow"/></svg></span></div>
+              <div class="table-scroll" id="table-scroll" tabindex="0" role="region" aria-label="Metric settings, scroll horizontally for more properties">
+                <table><colgroup><col style="width:260px"><col style="width:120px"><col style="width:138px"><col style="width:110px"><col style="width:153px"><col style="width:128px"><col style="width:93px"><col style="width:145px"><col style="width:240px"><col style="width:257px"></colgroup>
+                  <thead><tr><th scope="col">Metric</th><th scope="col">Calculation</th><th scope="col">Date field</th><th scope="col">Format</th><th scope="col">Sentiment</th><th scope="col">Data mode</th><th scope="col">Cumulative</th><th scope="col">Minimum granularity</th><th scope="col">Description</th><th scope="col">Source field</th></tr></thead><tbody id="metric-rows"></tbody>
+                </table>
+              </div>
+              <div class="measure-footer"><span id="selection-hint"><svg class="icon"><use href="#i-info"/></svg>Select a measure to configure its metric.</span><span class="scroll-hint"><svg class="icon"><use href="#i-horizontal"/></svg>Scroll for more settings</span></div>
+              <details class="dimension-group"><summary>Dimensions <span id="dimension-count">24</span></summary><div class="table-scroll" tabindex="0" role="region" aria-label="Dimension metric settings"><table><colgroup><col style="width:260px"><col style="width:120px"><col style="width:138px"><col style="width:110px"><col style="width:153px"><col style="width:128px"><col style="width:93px"><col style="width:145px"><col style="width:240px"><col style="width:257px"></colgroup><thead><tr><th scope="col">Metric</th><th scope="col">Calculation</th><th scope="col">Date field</th><th scope="col">Format</th><th scope="col">Sentiment</th><th scope="col">Data mode</th><th scope="col">Cumulative</th><th scope="col">Minimum granularity</th><th scope="col">Description</th><th scope="col">Source field</th></tr></thead><tbody id="dimension-rows"></tbody></table></div></details>
+            </section>
+          </div>
+          <aside class="assistant" id="assistant-panel" aria-labelledby="assistant-title"><div class="resize-handle" id="assistant-resize" role="separator" aria-orientation="vertical" aria-label="Resize assistant" aria-valuemin="280" aria-valuemax="520" aria-valuenow="300" tabindex="0"></div>
+            <header class="assistant-header"><h2 id="assistant-title"><svg class="icon"><use href="#i-spark"/></svg>Metric assistant</h2><button class="text-button" id="clear-chat" disabled>Clear chat</button></header>
+            <div class="assistant-body" id="assistant-body"><div class="assistant-intro"><div class="assistant-orb"><svg class="icon"><use href="#i-spark"/></svg></div><h3>Draft your metric definitions</h3><p>Generate a draft from your datasource. Review proposed changes before applying them.</p><button class="button generate" id="generate"><svg class="icon"><use href="#i-spark"/></svg>Generate draft</button><div class="assistant-context"><svg class="icon"><use href="#i-database"/></svg><span>Using fields from<br>Superstore Sales Cloud (CalcTEST)</span></div></div><div id="messages" aria-live="polite"></div></div>
+            <div class="composer-wrap"><form class="composer" id="chat-form"><textarea id="chat-input" aria-label="Message the metric assistant" placeholder="Describe a change to review..."></textarea><div class="composer-bottom"><span>Enter to send · Shift + Enter for a new line</span><button class="send" id="send" aria-label="Send message" disabled><svg class="icon"><use href="#i-up"/></svg></button></div></form><details class="about"><summary>About this assistant</summary><p>This is a visual prototype. Assistant responses are illustrative, and no AI provider or Tableau service is connected.</p></details></div>
+          </aside>
+        </div>
+      </section>
+<section id="manager-view" class="screen-view" hidden aria-labelledby="mm-title">
+  
+  <header class="mm-head">
+    <div><h1 id="mm-title">Metric Manager</h1><div class="mm-source"><svg class="icon"><use href="#i-database"/></svg> Superstore Sales Cloud (CalcTEST) <span class="mm-muted">/ Example data</span></div></div>
+    <button type="button" class="mm-btn" data-mm-action="refresh"><svg class="icon" style="width:13px;height:13px;margin-right:6px"><use href="#i-refresh"/></svg>Refresh metrics</button>
+  </header>
+  <div class="mm-tools">
+    <input class="mm-search" type="search" aria-label="Find definitions" placeholder="Search definitions..." data-mm-search>
+    <label><input type="checkbox" data-mm-following>Following</label>
+    <button type="button" class="mm-link mm-push" data-mm-action="expand">Expand all</button>
+  </div>
+  <div class="mm-content"><div class="mm-inventory">
+    <div class="mm-actionbar">
+      <input type="checkbox" aria-label="Select displayed metrics" data-mm-all>
+      <span class="mm-count" data-mm-count role="status"></span>
+      <button type="button" class="mm-btn mm-primary" data-mm-action="variants">Create variants</button>
+      <button type="button" class="mm-btn" data-mm-action="follow" data-mm-selected disabled>Manage followers</button>
+      <button type="button" class="mm-btn mm-danger" data-mm-action="delete" data-mm-selected disabled>Delete selected</button>
+      <button type="button" class="mm-link" data-mm-action="clear" data-mm-selected disabled>Clear</button>
+    </div>
+    <div class="mm-columns" aria-hidden="true"><span></span><span>Definition / source calculation</span><span>Inventory</span><span>Distinct followers</span><span></span></div>
+    <div class="mm-list" data-mm-list></div>
+  </div>
+  <aside class="mm-preview-pane" data-mm-preview-pane hidden aria-label="Metric preview"><header><h2 data-mm-preview-title></h2><button type="button" class="mm-btn" data-mm-preview-close aria-label="Close metric preview">Close</button></header><p class="mm-muted" data-mm-preview-period></p><div class="mm-preview-content" data-mm-preview-content><p>Preview requires a Tableau connection.</p></div><footer><button type="button" class="mm-btn" data-mm-preview-refresh>Refresh</button><button type="button" class="mm-btn" disabled title="Example metrics have no live Tableau URL">Open in Pulse</button></footer></aside></div>
+  <footer class="mm-foot"><span data-mm-summary></span><span class="mm-status" data-mm-status role="status">Example inventory. All actions stay in this page.</span></footer>
+  <dialog aria-labelledby="mm-dialog-title" data-mm-dialog><header class="mm-modal-header"><h2 id="mm-dialog-title"></h2><button type="button" class="mm-btn" data-mm-close>Close</button></header><div class="mm-modal-body" data-mm-dialog-body></div><div class="mm-dialog-actions" data-mm-dialog-actions></div></dialog>
+  
+</section>
+
+﻿<!-- Activity content fragment. Example fixtures only. Parent controls visibility of #activity-view.
+     Safe to initialize repeatedly with window.initActivityConcept(). No services or persistence. -->
+
+<section id="activity-view" class="screen-view" hidden aria-labelledby="av-heading">
+  <header class="av-top">
+    <div><h2 id="av-heading">Activity</h2><p class="av-sub">Publication history</p></div>
+    <button type="button" class="av-btn" data-av-refresh>Refresh</button>
+  </header>
+  <div class="av-tools" role="search" aria-label="Filter example publications">
+    <label class="av-search"><span class="av-sr">Search publications by data source or metric</span><input data-av-search type="search" placeholder="Search data sources or metrics..."></label>
+    
+  </div>
+  <div class="av-actions" data-av-actions role="group" aria-label="Selected publication actions" hidden><span class="av-action-scope" data-av-scope></span><button type="button" class="av-btn av-danger" data-av-undo>Undo publication</button><button type="button" class="av-btn av-danger" data-av-delete-group hidden></button></div>
+  <div class="av-layout">
+    <nav class="av-index" aria-label="Example publication history">
+      <div class="av-index-head"><span data-av-count></span><span>Newest first</span></div>
+      <ul class="av-list" data-av-list></ul>
+      <div class="av-index-foot">Oct 27 - 29, 2026 · Pacific time (UTC-07:00)</div>
+    </nav>
+    <section class="av-detail" aria-label="Selected publication receipt">
+      <div class="av-detail-body" data-av-detail></div>
+    </section>
+  </div>
+  <footer class="av-footer"><span>Illustrative records only. No Tableau connection or live history.</span><span data-av-status role="status" aria-live="polite">Select a publication to inspect its receipt.</span></footer>
+  <dialog data-av-dialog aria-labelledby="av-dialog-title" aria-describedby="av-dialog-copy">
+    <header class="av-modal-header"><h3 id="av-dialog-title"></h3><button type="button" class="av-btn" data-av-dialog-close>Close</button></header><p id="av-dialog-copy"></p><ul data-av-targets></ul><p>Example interaction only. No changes will be sent to Tableau.</p>
+    <div class="av-dialog-actions"><button type="button" class="av-btn" data-av-cancel autofocus>Cancel</button><button type="button" class="av-btn av-danger" data-av-confirm>Simulate confirmation</button></div>
+  </dialog>
+</section>
+
+
+      </main>
+    </div>
+    <footer class="statusbar"><span id="status-context"><svg class="icon"><use href="#i-database"/></svg>Superstore Sales Cloud (CalcTEST)<span style="color:#656875">·</span>Example data</span><span class="statusbar-right">Visual concept only · Changes are not saved or published</span></footer>
+  </div>
+  <dialog id="info-dialog" aria-labelledby="dialog-title"><header class="modal-title-row"><h2 id="dialog-title">Design preview</h2><button type="button" class="button" id="dialog-close">Close</button></header><div class="modal-body"><p id="dialog-copy"></p><ul class="review-list" id="review-list" hidden></ul></div><div class="dialog-actions"><button class="button" id="dialog-cancel" hidden>Cancel</button><button class="button primary" id="dialog-ok">Done</button></div></dialog>
+  <div class="toast" id="toast" role="status" hidden></div>
+  <script>
+    const $ = s => document.querySelector(s);
+    const icon = name => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
+    const esc = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
+    const fields = ['CALCTEST', 'Closed Opportunity Monthly Goal', 'Margin %', 'Churn Risk Score', 'Closed Won', 'Deal Cycle Length (Days)', 'Deal Health Score', 'Discount', 'Opportunity Amount', 'Profit', 'Quantity', 'Quota Remaining ($)', 'Shipping Lead Time (days)', 'Win Rate'];
+    const dimensions = ['Account Name', 'Account Owner', 'Account Tier', 'Category', 'City', 'Country/Region', 'Customer ID', 'Customer Name', 'Industry', 'L1 Manager', 'L2 Manager', 'Opportunity Name', 'Order ID', 'Postal Code', 'Product ID', 'Product Name', 'Region', 'Row ID', 'Segment', 'Ship Mode', 'Stage', 'State/Province', 'Sub-Category', 'Year Quarter'];
+    const initialMetric = (name, i) => ({ name, source: name, dimension:i>=fields.length, configured:false, active: false, calculation: i>=fields.length?'Distinct count':i === 0 || i === 2 ? 'Calculated' : 'Sum', date: 'Order Date', format: 'Number', sentiment: 'Neutral', mode: 'Over time', cumulative: false, granularity: 'Day', description: '' });
+    let metrics = [...fields,...dimensions].map(initialMetric);
+    const slicers = new Set(), configuredSlicers=new Set();
+    let toastTimer;
+    let dialogAction = null;
+    let lastDialogFocus = null;
+    const options = (items, value, placeholder) => (placeholder ? `<option value="">${placeholder}</option>` : '') + items.map(item => `<option value="${esc(item)}"${item === value ? ' selected' : ''}>${esc(item)}</option>`).join('');
+    function selectControl(metric, index, property, label, items, placeholder) {
+      return `<select class="table-select" data-index="${index}" data-property="${property}" aria-label="${esc(label + ' for ' + metric.source)}" ${!metric.active || (property === 'calculation' && metric.calculation === 'Calculated') ? 'disabled' : ''}>${options(items, metric.configured || property === 'calculation' ? metric[property] : '', !metric.configured && property !== 'calculation' ? (property === 'date' ? 'Select date' : 'Select metric first') : placeholder)}</select>`;
+    }
+    function renderRows() {
+      const query = $('#field-search').value.toLocaleLowerCase();
+      const hide = $('#hide-unused').checked;
+      const visible = metrics.map((m,i) => ({m,i})).filter(({m}) => (!hide || m.active) && m.source.toLocaleLowerCase().includes(query.trim()));
+      const row=({m,i})=>`<tr class="${m.active ? 'selected' : ''}">
+        <th scope="row"><div class="metric-name"><input type="checkbox" data-toggle="${i}" aria-label="Use ${esc(m.source)}"${m.active ? ' checked' : ''}><span class="kind" aria-hidden="true">${m.calculation === 'Calculated' ? 'ƒ' : '#'}</span><input type="text" value="${esc(m.name)}" data-index="${i}" data-property="name" aria-label="Metric name for ${esc(m.source)}" title="Source field: ${esc(m.source)}" maxlength="32768"${m.active ? '' : ' disabled'}></div></th>
+        <td>${selectControl(m,i,'calculation','Calculation',m.dimension?['Distinct count']:m.calculation === 'Calculated' ? ['Calculated'] : ['Sum','Average','Minimum','Maximum','Distinct count'])}</td>
+        <td>${selectControl(m,i,'date','Date field',['Order Date','Ship Date'],'Select date')}</td>
+        <td>${selectControl(m,i,'format','Format',['Number','Currency','Percent'])}</td>
+        <td>${selectControl(m,i,'sentiment','Sentiment',['Higher is better','Lower is better','Neutral'])}</td>
+        <td>${selectControl(m,i,'mode','Data mode',['Over time','Latest value'])}</td>
+        <td class="cumulative"><input class="switch" type="checkbox" role="switch" data-index="${i}" data-property="cumulative" aria-label="Cumulative for ${esc(m.source)}" ${m.cumulative ? 'checked' : ''} ${!m.active || m.calculation !== 'Sum' || m.format === 'Percent' || m.mode === 'Latest value' ? 'disabled' : ''}></td>
+        <td>${selectControl(m,i,'granularity','Minimum granularity',['Any','Day','Week','Month','Quarter','Year'])}</td>
+        <td><textarea class="description" rows="2" maxlength="262144" placeholder="Add description" data-index="${i}" data-property="description" aria-label="Description for ${esc(m.source)}"${m.active ? '' : ' disabled'}>${esc(m.description)}</textarea></td>
+        <td><div class="source-label"><span>${esc(m.source)}</span><details class="field-details"><summary aria-label="Field details for ${esc(m.source)}" title="Field details for ${esc(m.source)}">${icon('info')}</summary><p>Live field metadata is not loaded in this HTML concept.</p></details></div></td>
+      </tr>`;
+      const shownMeasures=visible.filter(({m})=>!m.dimension),shownDimensions=visible.filter(({m})=>m.dimension);
+      $('#metric-rows').innerHTML=shownMeasures.length?shownMeasures.map(row).join(''):'<tr><td colspan="10" class="empty-row">No matching measures.</td></tr>';
+      $('#dimension-rows').innerHTML=shownDimensions.length?shownDimensions.map(row).join(''):'<tr><td colspan="10" class="empty-row">No matching dimensions.</td></tr>';
+      $('#dimension-count').textContent=shownDimensions.length;
+      updateCounts();
+    }
+    function validationIssues() {
+      const active=metrics.filter(m=>m.active);
+      if(!active.length)return [];
+      return [...(!slicers.size?['Select at least one valid slicer dimension before publishing.']:[]),...active.flatMap(m=>[...(!m.date?['Choose an available date or datetime field.']:[]),...(!m.name.trim()?['Metric name is required.']:[])])];
+    }
+    function updateCounts() {
+      const active = metrics.filter(m => m.active);
+      const issues=validationIssues();$('#validation-details').hidden=!issues.length;$('#validation-summary').textContent=issues.length+' '+(issues.length===1?'issue':'issues')+' to resolve before publishing';$('#validation-issues').innerHTML=issues.map(i=>'<li>'+esc(i)+'</li>').join('');
+      const visibleMeasures=metrics.filter(m=>!m.dimension&&(!$('#hide-unused').checked||m.active)&&m.source.toLocaleLowerCase().includes($('#field-search').value.trim().toLocaleLowerCase()));
+      $('#measure-count').textContent = `${visibleMeasures.filter(m=>m.active).length} of ${visibleMeasures.length} selected`;
+      $('#clear').disabled=!metrics.some(m=>m.configured)&&!configuredSlicers.size;
+      $('#publish').disabled = !active.length || !slicers.size;
+      $('#publish').title = $('#publish').disabled ? 'Select at least one metric and one slicer to publish.' : 'Review publication';
+      $('#selection-hint').innerHTML = icon('info') + (active.length ? `${active.length} selected${active.some(m=>!m.date) ? ' · Choose a date field to continue.' : (slicers.size ? ' · Ready to review.' : ' · Select at least one slicer.')}` : 'Select a measure to configure its metric.');
+    }
+    function renderChips() {
+      const query = $('#field-search').value.trim().toLocaleLowerCase();
+      const hide = $('#hide-unused').checked;
+      const visible = dimensions.filter(d => (!hide || slicers.has(d)) && d.toLocaleLowerCase().includes(query));
+      $('#chips').innerHTML = visible.length ? visible.map(d => `<button class="chip" aria-pressed="${slicers.has(d)}" data-dimension="${esc(d)}">${slicers.has(d) ? icon('check') : ''}${esc(d)}</button>`).join('') : '<span style="font-size:12px;color:#9294a4">'+(hide?'No selected slicers.':'No matching slicers.')+'</span>';
+      $('#slicer-count').textContent = `${slicers.size} selected`;
+    }
+    function notify(text) { clearTimeout(toastTimer); $('#toast').textContent=text; $('#toast').hidden=false; toastTimer=setTimeout(()=>$('#toast').hidden=true,5000); }
+    function showDialog(title, copy, action) {
+      lastDialogFocus = document.activeElement;
+      dialogAction = action || null;
+      $('#dialog-title').textContent=title;
+      $('#dialog-copy').textContent=copy;
+      $('#review-list').hidden=true;
+      $('#dialog-cancel').hidden=!action;
+      $('#dialog-ok').textContent=action ? 'Clear configuration' : 'Done';
+      $('#dialog-ok').disabled=false;
+      $('#info-dialog').showModal();
+    }
+    $('#dialog-cancel').addEventListener('click',()=>$('#info-dialog').close());
+    $('#dialog-close').addEventListener('click',()=>$('#info-dialog').close());
+    $('#dialog-ok').addEventListener('click',()=>{ if(dialogAction) dialogAction(); $('#info-dialog').close(); });
+    $('#info-dialog').addEventListener('close',()=>{dialogAction=null;if(lastDialogFocus?.isConnected)lastDialogFocus.focus();});
+    document.querySelector('.authoring').addEventListener('change', event => {
+      const target = event.target;
+      if(target.hasAttribute('data-toggle')) { metrics[Number(target.dataset.toggle)].active=target.checked;metrics[Number(target.dataset.toggle)].configured=true;renderRows();const checkbox=$(`[data-toggle="${target.dataset.toggle}"]`);if(checkbox)checkbox.focus();return; }
+      if(!target.dataset.property)return;
+      const m=metrics[Number(target.dataset.index)];
+      m[target.dataset.property]=target.type==='checkbox' ? target.checked : target.value;
+      if(m.calculation!=='Sum'||m.format==='Percent'||m.mode==='Latest value')m.cumulative=false;
+      updateCounts();
+      if(['calculation','format','mode'].includes(target.dataset.property)) { const index=target.dataset.index;const property=target.dataset.property;renderRows();$(`[data-index="${index}"][data-property="${property}"]`)?.focus(); }
+    });
+    document.querySelector('.authoring').addEventListener('input',event=>{const t=event.target;if(['name','description'].includes(t.dataset.property)){metrics[Number(t.dataset.index)][t.dataset.property]=t.value;updateCounts();}});
+    $('#chips').addEventListener('click',event=>{const b=event.target.closest('[data-dimension]');if(!b)return;const d=b.dataset.dimension;configuredSlicers.add(d);slicers.has(d)?slicers.delete(d):slicers.add(d);renderChips();updateCounts();$(`[data-dimension="${CSS.escape(d)}"]`)?.focus();});
+    $('#field-search').addEventListener('input',()=>{renderRows();renderChips();});
+    $('#hide-unused').addEventListener('change',()=>{renderRows();renderChips();});
+    $('#group-follow').addEventListener('change',event=>$('#audience-controls').hidden=!event.target.checked);
+    $('#audience-lock').addEventListener('click',event=>{const b=event.currentTarget;const locked=b.getAttribute('aria-pressed')!=='true';b.setAttribute('aria-pressed',String(locked));b.innerHTML=icon(locked?'lock':'unlock');b.title=locked?'Audience protected from assistant changes':'Allow assistant changes to audience';});
+    $('#clear').addEventListener('click',()=>showDialog('Clear configuration?','This will clear the metric configuration and slicer selections. Digest settings and the conversation are kept.',()=>{metrics=[...fields,...dimensions].map(initialMetric);slicers.clear();configuredSlicers.clear();renderRows();renderChips();notify('Example configuration cleared.');}));
+    $('#nav-collapse').addEventListener('click',()=>{const shell=document.querySelector('.shell');const collapsed=shell.classList.toggle('nav-collapsed');$('#nav-collapse').setAttribute('aria-expanded',String(!collapsed));$('#nav-collapse').setAttribute('aria-label',collapsed?'Expand navigation':'Collapse navigation');$('#nav-collapse').title=collapsed?'Expand navigation':'Collapse navigation';});
+    function resizeAssistant(width) { const clamped=Math.min(520,Math.max(280,width));$('#workarea').style.setProperty('--assistant-width',clamped+'px');$('#assistant-resize').setAttribute('aria-valuenow',String(Math.round(clamped))); }
+    $('#assistant-resize').addEventListener('keydown',e=>{if(e.key==='ArrowLeft'||e.key==='ArrowRight'){e.preventDefault();resizeAssistant(Number(e.currentTarget.getAttribute('aria-valuenow'))+(e.key==='ArrowLeft'?20:-20));}});
+    $('#assistant-resize').addEventListener('pointerdown',e=>{if(innerWidth<=900)return;const handle=e.currentTarget;handle.setPointerCapture(e.pointerId);const startX=e.clientX;const startWidth=$('#assistant-panel').getBoundingClientRect().width;const move=event=>resizeAssistant(startWidth+startX-event.clientX);const end=()=>{handle.removeEventListener('pointermove',move);handle.removeEventListener('pointerup',end);handle.removeEventListener('pointercancel',end);};handle.addEventListener('pointermove',move);handle.addEventListener('pointerup',end);handle.addEventListener('pointercancel',end);});
+    function setAssistant(open) { $('#workarea').classList.toggle('assistant-hidden',!open);$('#assistant-toggle').setAttribute('aria-expanded',String(open));$('#assistant-toggle').classList.toggle('toggled',open); }
+    $('#assistant-toggle').addEventListener('click',()=>setAssistant($('#assistant-toggle').getAttribute('aria-expanded')!=='true'));
+    $('#source-picker').addEventListener('click',()=>showDialog('Superstore Sales Cloud (CalcTEST)','This concept uses the datasource and field names from your original screen. Datasource switching is not connected in this standalone preview.'));
+    document.querySelectorAll('[data-placeholder]').forEach(b=>b.addEventListener('click',()=>notify(`${b.dataset.placeholder} is outside this author-screen visual preview.`)));
+    $('#publish').addEventListener('click',()=>{
+      const active=metrics.filter(m=>m.active);
+      const issues=validationIssues();
+      showDialog('Review publication',`Superstore Sales Cloud (CalcTEST). Preview of ${active.length} metric definition${active.length===1?'':'s'}. No data is sent to Tableau.`);
+      $('#review-list').innerHTML=active.map(m=>`<li><strong>${esc(m.name||m.source)}</strong><small>${esc(m.calculation)} of ${esc(m.source)} - ${esc(m.date||'Date field required')}${m.cumulative?' - cumulative':''}</small><small>Slicers: ${[...slicers].map(esc).join(', ')||'None'}</small>${m.description?`<p>${esc(m.description)}</p>`:''}</li>`).join('')+($('#group-follow').checked?`<li>Digest group requested${$('#audience').value?' for '+esc($('#audience').value):''}.</li>`:'')+(issues.length?`<li><strong>Resolve these issues before publishing</strong><ul>${issues.map(i=>`<li>${esc(i)}</li>`).join('')}</ul></li>`:'');
+      $('#review-list').hidden=false;$('#dialog-cancel').hidden=false;$('#dialog-ok').textContent='Publish metrics';$('#dialog-ok').disabled=!!issues.length;
+      dialogAction=()=>notify('Design preview only. No metrics were published.');
+    });
+    $('#messages').setAttribute('role','log');$('#messages').setAttribute('aria-label','Metric assistant conversation');
+    function exampleMessage(text) { const node=document.createElement('div');node.className='message';const label=document.createElement('small');label.textContent='PREVIEW RESPONSE';const body=document.createElement('div');body.textContent=text;node.append(label,body);$('#messages').append(node);$('#clear-chat').disabled=false;$('#assistant-body').scrollTop=$('#assistant-body').scrollHeight; }
+    $('#generate').addEventListener('click',()=>exampleMessage('In the connected app, Generate draft creates a proposal for you to review. This visual preview leaves your metric configuration unchanged and does not call an AI provider.'));
+    function sendMessage() { const text=$('#chat-input').value.trim();if(!text)return;const node=document.createElement('div');node.className='message';node.textContent=text;$('#messages').append(node);$('#chat-input').value='';$('#send').disabled=true;exampleMessage('This is a visual preview of the assistant. In the app, your requested changes would be presented for review before being applied.'); }
+    $('#chat-form').addEventListener('submit',e=>{e.preventDefault();sendMessage();});
+    $('#chat-input').addEventListener('input',()=>$('#send').disabled=!$('#chat-input').value.trim());
+    $('#chat-input').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();sendMessage();}});
+    $('#clear-chat').addEventListener('click',()=>{$('#messages').replaceChildren();$('#clear-chat').disabled=true;});
+    renderRows();renderChips();$('#assistant-resize').setAttribute('aria-valuenow',String(Math.round($('#assistant-panel').getBoundingClientRect().width)));
+  </script>
+<script>
+  (() => {
+    window.initManagerConcept = function () {
+      const root = document.getElementById('manager-view');
+      if (!root || root.dataset.initialized) return;
+      root.dataset.initialized = 'true';
+      const $ = s => root.querySelector(s), $$ = s => [...root.querySelectorAll(s)];
+      const escape = v => String(v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+      const names = ['Revenue','Gross margin','Closed opportunities','Average deal size','Customer count','Sales cycle duration'];
+      const calculations = ['Sum of Sales','Margin %','Distinct count of Opportunity ID','Average of Deal Amount','Distinct count of Customer ID','Average of Sales Cycle Days'];
+      let definitions = names.map((name,i) => ({id:'example-definition-'+i,name,calc:calculations[i],date:i===5?'Close Date':'Order Date',metrics:[
+        {id:'example-metric-'+i+'-mtd',time:'Month to date',scope:'',follow:i===0?'You + group':i%2===0?'You follow':'Not followed',default:true},
+        {id:'example-metric-'+i+'-qtd',time:'Quarter to date',scope:'',follow:i%3===0?'Group follows':'Not followed'},
+        ...(i<2?[{id:'example-metric-'+i+'-west',time:'Month to date',scope:'Region: West',follow:'Group follows'}]:[])
+      ]}));
+      let selected = new Set(), expanded = new Set(), serial = 0, previewId=null;
+      const all = () => definitions.flatMap(d=>d.metrics.map(m=>({...m,definition:d})));
+      const metricFamilyKey=m=>m.time+'|'+mmVariantKey(mmVariantFilters(m));
+      const definitionFollowerSummary=id=>{const targets=definitions.find(d=>d.id===id).metrics.flatMap(metricFollowerTargets);const people=new Set(targets.filter(t=>t.kind==='User').map(t=>t.id)).size;const groups=new Set(targets.filter(t=>t.kind==='Group').map(t=>t.id)).size;return `${people} ${people===1?'person':'people'} / ${groups} ${groups===1?'group':'groups'}`;};
+      const visible = () => definitions.filter(d=>(d.name+' '+d.calc).toLowerCase().includes($('[data-mm-search]').value.trim().toLowerCase())).map(d=>({...d,metrics:d.metrics.filter(m=>!$('[data-mm-following]').checked||m.follow!=='Not followed')})).filter(d=>d.metrics.length);
+      const notice = text => { $('[data-mm-status]').textContent = text; };
+      const setIds = (ids,checked) => ids.forEach(id=>checked?selected.add(id):selected.delete(id));
+      function render() {
+        document.getElementById('document-count').textContent=definitions.length+' definitions · '+all().length+' metrics';
+        const focusBefore=document.activeElement;
+        const focusAttribute=['data-mm-open','data-mm-metric','data-mm-definition','data-mm-family'].find(a=>focusBefore?.hasAttribute(a));
+        const focusValue=focusAttribute?focusBefore.getAttribute(focusAttribute):null;
+        const shown = visible(), ids=shown.flatMap(d=>d.metrics.map(m=>m.id));
+        $('[data-mm-list]').innerHTML = shown.length ? shown.map(d=>`<article aria-label="${escape(d.name)}"><div class="mm-definition">
+          <input type="checkbox" data-mm-definition="${d.id}" aria-label="Select displayed metrics in ${escape(d.name)}">
+          <div><button type="button" class="mm-name" data-mm-open="${d.id}" aria-expanded="${expanded.has(d.id)}" aria-controls="${d.id}-rows">${escape(d.name)}</button><div class="mm-formula">${escape(d.calc)} · ${escape(d.date)}</div></div>
+          <span>${d.metrics.length} metrics <span class="mm-muted">· Complete</span></span>
+          <button type="button" class="mm-followers" data-mm-followers="${d.id}" aria-label="View followers for ${escape(d.name)}">${definitionFollowerSummary(d.id)}</button>
+          <button type="button" class="mm-link mm-danger" data-mm-delete-definition="${d.id}" title="Delete definition ${escape(d.name)}" aria-label="Delete definition ${escape(d.name)}"><svg class="icon" style="width:15px;height:15px"><use href="#i-trash"/></svg></button>
+        </div><div class="mm-variants" id="${d.id}-rows" ${expanded.has(d.id)?'':'hidden'}>${d.metrics.map(m=>`<div class="mm-variant">
+          <input type="checkbox" data-mm-metric="${m.id}" aria-label="Select ${escape(d.name+' - '+m.time+(m.scope?' - '+m.scope:''))}" ${selected.has(m.id)?'checked':''}>
+          <button type="button" class="mm-family" data-mm-family="${m.id}" title="Select or clear all identically filtered ${escape(m.time)} metrics across definitions" aria-pressed="${all().filter(x=>metricFamilyKey(x)===metricFamilyKey(m)).every(x=>selected.has(x.id))}">${escape(m.time)}</button>
+          <span>${escape(d.name)}${m.scope?`<span class="mm-scope">Scoped · ${escape(m.scope)}</span>`:''}</span><span class="mm-follow">${m.follow}</span>
+          <button type="button" class="mm-icon-action" data-mm-preview="${m.id}" aria-label="Preview ${escape(d.name)}" title="Preview metric" aria-pressed="${previewId===m.id}"><svg class="icon"><use href="#i-preview"/></svg></button><button type="button" class="mm-icon-action" data-mm-copy="${m.id}" aria-label="Copy metric ID" title="Copy metric ID: ${m.id}"><svg class="icon"><use href="#i-copy"/></svg></button>
+        </div>`).join('')}</div></article>`).join('') : '<p class="mm-empty">No definitions match these filters.</p>';
+        const check = (el,group) => {const n=group.filter(id=>selected.has(id)).length;el.checked=!!group.length&&n===group.length;el.indeterminate=n>0&&n<group.length;};
+        check($('[data-mm-all]'),ids);
+        $$('[data-mm-definition]').forEach(el=>check(el,shown.find(d=>d.id===el.dataset.mmDefinition).metrics.map(m=>m.id)));
+        $('[data-mm-count]').textContent=selected.size?`${selected.size} selected`:`${all().length} metrics`;
+        $$('[data-mm-selected]').forEach(b=>{b.disabled=!selected.size;b.hidden=!selected.size;});
+        $('[data-mm-action=variants]').disabled=!all().length;
+        $('[data-mm-action=expand]').textContent=shown.length&&shown.every(d=>expanded.has(d.id))?'Collapse all':'Expand all';
+        $('[data-mm-summary]').textContent=`${shown.length} of ${definitions.length} definitions · ${ids.length} displayed metrics`;
+        if(focusAttribute && !focusBefore.isConnected) root.querySelector('['+focusAttribute+'="'+CSS.escape(focusValue)+'"]')?.focus();
+      }
+      let modalOpener=null;
+      $('[data-mm-close]').addEventListener('click',()=>$('[data-mm-dialog]').close());
+      $('[data-mm-dialog]').addEventListener('close',()=>{if(modalOpener?.isConnected)modalOpener.focus();else $('[data-mm-search]').focus();});
+      function modal(title,body,actions=[]) {
+        if(!$('[data-mm-dialog]').open)modalOpener=document.activeElement;
+        $('[data-mm-dialog-body]').onclick=null;
+        $('#mm-dialog-title').textContent=title;
+        $('[data-mm-dialog-body]').innerHTML=body;
+        const bar=$('[data-mm-dialog-actions]');bar.replaceChildren();
+        const close=document.createElement('button');close.type='button';close.className='mm-btn';close.textContent=actions.length?'Cancel':'Done';close.onclick=()=>$('[data-mm-dialog]').close();bar.append(close);
+        actions.forEach(a=>{const b=document.createElement('button');b.type='button';b.className='mm-btn '+(a.danger?'mm-danger':a.label==='Unfollow'?'':'mm-primary');b.textContent=a.label;b.onclick=a.run;bar.append(b);});
+        if (!$('[data-mm-dialog]').open) $('[data-mm-dialog]').showModal();
+      }
+      const sourceList = sources => '<ul>'+sources.map(m=>`<li>${escape(m.definition.name)} · ${escape(m.time)}${m.scope?' · '+escape(m.scope):''}</li>`).join('')+'</ul>';
+      const exampleTargets=[{id:'you',kind:'User',name:'Andrew Hill (you)'},{id:'jordan',kind:'User',name:'Jordan Lee'},{id:'morgan',kind:'User',name:'Morgan Chen'},{id:'sales',kind:'Group',name:'Sales leadership'},{id:'revenue',kind:'Group',name:'Revenue operations'}];
+      const metricFollowerTargets=m=>exampleTargets.filter(t=>(t.id==='you'&&m.follow.includes('You'))||(t.id==='sales'&&(m.follow.includes('Group')||m.follow.includes('group'))));
+      const friendlyMetric=m=>m.definition.name+' · '+m.time+(m.scope?' · '+m.scope:'');
+      function reviewDelete(definitionId) {
+        const sources=all().filter(m=>definitionId?m.definition.id===definitionId:selected.has(m.id));
+        const families=new Set(sources.filter(m=>m.default).map(m=>m.definition.id));
+        if(definitionId)families.add(definitionId);
+        const affected=all().filter(m=>families.has(m.definition.id)||sources.some(s=>s.id===m.id));
+        const affectedDefinitions=[...new Set(affected.map(m=>m.definition.id))];
+        const impact=m=>{const followers=metricFollowerTargets(m);return followers.length?`<details class="mm-impact"><summary>${followers.length} follower${followers.length===1?'':'s'}</summary><ul>${followers.map(t=>`<li>${escape(t.name)} <span class="mm-muted">· ${t.kind}</span></li>`).join('')}</ul></details>`:'<span class="mm-muted"> · 0 followers</span>';};
+        const reviewed=`<ul class="mm-delete-list">${affectedDefinitions.map(id=>{const items=affected.filter(m=>m.definition.id===id);const d=items[0].definition;return `<li><strong>${escape(d.name)}</strong>${families.has(id)?` - definition and its ${d.metrics.length} metrics; associated subscriptions are removed`:' - selected metrics and associated subscriptions'}<ul>${items.map(m=>`<li>${escape(friendlyMetric(m))}${impact(m)}</li>`).join('')}</ul></li>`;}).join('')}</ul>`;
+        modal('Review deletion',`<p>Delete exactly these reviewed resources from Superstore Sales Cloud:</p>${reviewed}${families.size?'<p class="mm-delete-warning">Deleting a definition also removes its metrics and their subscriptions.</p>':''}<p class="mm-delete-warning">Changed deletion effects require a new review. This action cannot be undone by the app.</p>`,[{label:'Delete reviewed resources',danger:true,run:()=>{definitions=definitions.filter(d=>!families.has(d.id)).map(d=>({...d,metrics:d.metrics.filter(m=>!affected.some(a=>a.id===m.id))}));affected.forEach(m=>selected.delete(m.id));render();modal('Deletion results',`<p>Local simulation: ${affected.length} example metric${affected.length===1?'':'s'} removed.</p>`);notice('Deletion simulated locally. Reloading the page restores example data.');}}]);
+      }
+      function followDialog() {
+        const sources=all().filter(m=>selected.has(m.id));
+        const chosen=new Set();
+        const run=kind=>{if(!chosen.size){$('[data-mm-target-status]').textContent='Select at least one user or group.';return;}notice(`${kind} preview for ${sources.length} selected metrics and ${chosen.size} selected targets. No Tableau request was made.`);$('[data-mm-dialog]').close();};
+        modal(`Follow or unfollow ${sources.length} selected metric${sources.length===1?'':'s'}`,`<label class="mm-target-label" for="mm-target-query">Search users or groups</label><div class="mm-target-search"><input id="mm-target-query" type="search" aria-label="Search users or groups"><button type="button" class="mm-btn" data-target-refresh>Refresh targets</button><button type="button" class="mm-btn" data-target-existing title="Proposed addition. Uses example followers in this design preview.">Add existing</button></div><div class="mm-target-pills" data-target-pills></div><div class="mm-target-options" aria-label="Available users and groups" data-target-options></div><p data-mm-target-status role="status" class="mm-muted" style="margin-bottom:0"></p>`,[{label:'Unfollow',run:()=>run('Unfollow')},{label:'Follow',run:()=>run('Follow')}]);
+        const updateTargets=()=>{
+          const q=$('#mm-target-query').value.trim().toLowerCase();
+          $('[data-target-pills]').innerHTML=exampleTargets.filter(t=>chosen.has(t.id)).map(t=>`<span class="mm-target-pill">${t.kind}: ${escape(t.name)}<button type="button" data-remove-target="${t.id}" aria-label="Remove ${escape(t.name)}">Remove</button></span>`).join('');
+          const available=exampleTargets.filter(t=>!chosen.has(t.id)&&(t.name+' '+t.kind).toLowerCase().includes(q));
+          $('[data-target-options]').innerHTML=available.length?available.map(t=>`<button type="button" class="mm-target-option" data-add-target="${t.id}"><span>${escape(t.name)}</span><small>${t.kind}</small></button>`).join(''):'<p class="mm-muted" style="padding:16px">No matching users or groups.</p>';
+          $('[data-mm-target-status]').textContent='';
+          [...$('[data-mm-dialog-actions]').children].slice(1).forEach(b=>b.disabled=!chosen.size);
+        };
+        $('#mm-target-query').addEventListener('input',updateTargets);
+        $('#mm-target-query').addEventListener('keydown',e=>{if(e.key==='ArrowDown'){e.preventDefault();$('[data-target-options] button')?.focus();}else if(e.key==='Escape'&&e.currentTarget.value){e.preventDefault();e.stopPropagation();e.currentTarget.value='';updateTargets();}});
+        $('[data-target-options]').addEventListener('keydown',e=>{const buttons=[...$('[data-target-options]').querySelectorAll('button')];const index=buttons.indexOf(document.activeElement);if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();buttons[Math.max(0,Math.min(buttons.length-1,index+(e.key==='ArrowDown'?1:-1)))]?.focus();}});
+        $('[data-mm-dialog-body]').onclick=e=>{const add=e.target.closest('[data-add-target]');const remove=e.target.closest('[data-remove-target]');if(add){chosen.add(add.dataset.addTarget);$('#mm-target-query').value='';updateTargets();$('#mm-target-query').focus();}if(remove){chosen.delete(remove.dataset.removeTarget);updateTargets();$('#mm-target-query').focus();}if(e.target.closest('[data-target-existing]')){sources.flatMap(metricFollowerTargets).forEach(t=>chosen.add(t.id));updateTargets();$('[data-mm-target-status]').textContent='Existing example followers added. Duplicate targets are included once.';}if(e.target.closest('[data-target-refresh]')){$('[data-mm-target-status]').textContent='Example targets refreshed locally.';}};
+        updateTargets();
+      }
+
+// Paste inside manager init; dependencies: root, $, escape, all(), selected,
+// definitions, serial, expanded, render(), notice(), modal(). No requests.
+const mmVariantFields = [
+  {id:'product',label:'Product Name',table:'Superstore_Sales_Cloud_Data_All_Dates_with_Stage.csv',values:[
+    '"While you Were Out" Message Book, One Form per Page',
+    '#10 Gummed Flap White Envelopes, 100/Box',
+    '#10 Self-Seal White Envelopes',
+    '#10 White Business Envelopes, 4 1/8 x 9 1/2',
+    '#10- 4 1/8" x 9 1/2" Recycled Envelopes',
+    '#10- 4 1/8" x 9 1/2" Security-Tint Envelopes',
+    '#10-4 1/8" x 9 1/2" Premium Diagonal Seam Envelopes',
+    '#6 3/4 Gummed Flap White Envelopes',
+    '1.7 Cubic Foot Compact "Cube" Office Refrigerators'
+  ]},
+  {id:'region',label:'Region',values:['Central','East','South','West']}
+];
+const mmVariantTimeframes = ['Today','This week','Month to date','Quarter to date','Year to date','Yesterday','Last week','Last month','Last quarter','Last year','Last 7 days','Last 14 days','Last 30 days','Last 60 days','Last 90 days','One year (by month)'];
+function mmVariantFilters(metric) {
+  if (metric.variantFilters) return metric.variantFilters.map(c=>({...c,values:[...c.values]}));
+  if (!metric.scope) return [];
+  // The original concept's only inherited fixture is Region: West.
+  if (/^Region: (Central|East|South|West)$/.test(metric.scope)) return [{fieldId:'region',exclude:false,values:[metric.scope.slice(8)]}];
+  return [{fieldId:'opaque',label:metric.scope,exclude:false,values:[]}];
+}
+function mmVariantKey(filters) {
+  return JSON.stringify(filters.map(c=>[c.fieldId,!!c.exclude,[...c.values].sort(),c.label||'']).sort((a,b)=>a[0].localeCompare(b[0])));
+}
+function mmVariantLabel(c) {
+  const label=mmVariantFields.find(f=>f.id===c.fieldId)?.label || c.label;
+  if(c.fieldId==='opaque')return label;
+  return label+': '+(c.exclude?'excluding ':'')+c.values.slice(0,4).join(', ')+(c.values.length>4?' and '+(c.values.length-4)+' more':'');
+}
+function mmVariantStagedLabel(c) {
+  const field=mmVariantFields.find(f=>f.id===c.fieldId);
+  const count=c.values.length;
+  const text=count===1?(c.exclude?'excludes ':'')+c.values[0]:!c.exclude?'keeps '+count:field?'keeps '+(field.values.length-count):'excludes '+count;
+  return (field?.label||c.label)+': '+text;
+}
+function variantsDialog() {
+  const inventory=all(), ids=new Set(inventory.filter(m=>selected.has(m.id)).map(m=>m.id));
+  const clauses=new Map();
+  let fieldId='', valueQuery='', sourceQuery='', exclude=false, keys=new Set();
+  const sources=()=>inventory.filter(m=>ids.has(m.id));
+  const inherited=()=>mmVariantFields.flatMap(f=>{
+    const list=sources(); if(!list.length)return [];
+    const first=mmVariantFilters(list[0]).find(c=>c.fieldId===f.id);
+    return first && list.every(m=>mmVariantKey(mmVariantFilters(m).filter(c=>c.fieldId===f.id))===mmVariantKey([first]))?[first]:[];
+  });
+  const effective=m=>{
+    const filters=new Map(mmVariantFilters(m).map(c=>[c.fieldId,c]));
+    clauses.forEach((c,id)=>filters.set(id,c));
+    return [...filters.values()];
+  };
+  const changes=()=>[...clauses.values()].some(c=>!inherited().some(i=>mmVariantKey([i])===mmVariantKey([c])));
+  modal('Create variants',`
+    <div class="mv-layout"><div class="mv-config">
+    <section><div class="mv-heading"><h3>Source metrics</h3><span data-mv-source-count></span></div>
+    <details class="mv-sources" ${ids.size?'':'open'}><summary><span data-mv-source-summary></span><span>Change</span></summary>
+    <input type="search" aria-label="Search source metrics" placeholder="Search metrics..." data-mv-source-search>
+    <div class="mv-matches"><label><input type="checkbox" aria-label="Select matching source metrics" data-mv-matches>Select matches</label><button type="button" data-mv-clear>Clear</button></div>
+    <div class="mv-source-list" data-mv-sources></div></details></section>
+    <section><div class="mv-heading"><h3>Timeframe</h3></div><select aria-label="Variant timeframe" data-mv-time><option value="">Keep each source timeframe</option>${mmVariantTimeframes.map(t=>`<option>${escape(t)}</option>`).join('')}</select></section>
+    <section><div class="mv-filter-title">Filters</div><div aria-label="Selected filters" data-mv-clauses></div>
+    <label class="mv-control">Dimension field<select aria-label="Dimension field" data-mv-field><option value="">Select a field</option>${mmVariantFields.map(f=>`<option value="${f.id}">${escape(f.label+(f.table?' - '+f.table:''))}</option>`).join('')}</select></label>
+    <label class="mv-control">Search values<input type="search" aria-label="Search dimension values" placeholder="Filter loaded values" data-mv-search disabled></label>
+    <p class="mv-hint" data-mv-no-source hidden>Select metrics to create variants.</p>
+    <div class="mv-picker" data-mv-picker hidden><div class="mv-mode" role="radiogroup" aria-label="Filter mode">
+    <label><input type="radio" name="mm-variant-mode" value="include" checked>Include selected</label><label><input type="radio" name="mm-variant-mode" value="exclude">Exclude selected</label></div>
+    <p data-mv-mode-hint></p><div class="mv-toolbar"><button type="button" class="mm-btn" data-mv-all>Select all</button><button type="button" class="mm-btn" data-mv-none hidden>Deselect all</button><span data-mv-selected></span><span data-mv-total></span></div>
+    <div class="mv-values" role="group" aria-label="Dimension values" data-mv-values></div>
+    <p class="mv-hint">Fixture subset only. Total members is the number of loaded example values.</p></div></section></div>
+    <aside class="mv-preview" aria-label="Variant preview"><div class="mv-heading"><h3>Preview</h3><span data-mv-preview-count></span></div><div data-mv-preview></div><p class="mv-hint" data-mv-preview-hint>One variant per source. Selected values stay together in each filter. Existing variants are reused.</p></aside></div>`,[{label:'Create 0 variants',run:create}]);
+  const dialog=$('[data-mm-dialog]');
+  dialog.classList.add('mm-variants-dialog');
+  const q=s=>dialog.querySelector(s), qa=s=>[...dialog.querySelectorAll(s)];
+  const bar=q('[data-mm-dialog-actions]'), createButton=bar.lastElementChild;
+  const status=document.createElement('p');status.dataset.mvStatus='';status.setAttribute('role','status');bar.prepend(status);
+
+  dialog.addEventListener('close',()=>dialog.classList.remove('mm-variants-dialog'),{once:true});
+  function drawSources() {
+    const shown=inventory.filter(m=>(m.definition.name+' '+m.time).toLowerCase().includes(sourceQuery.toLowerCase()));
+    q('[data-mv-sources]').innerHTML=shown.map(m=>`<label><input type="checkbox" data-mv-source="${escape(m.id)}" ${ids.has(m.id)?'checked':''}><span>${escape(m.definition.name)}<small>${escape(m.time)}${m.scope?' · Scoped':''}</small></span></label>`).join('');
+    const count=shown.filter(m=>ids.has(m.id)).length, checkbox=q('[data-mv-matches]');
+    checkbox.checked=!!shown.length&&count===shown.length;checkbox.indeterminate=count>0&&count<shown.length;checkbox.disabled=!shown.length;
+    return shown;
+  }
+  function chooseField(id) {
+    fieldId=id;valueQuery='';q('[data-mv-search]').value='';q('[data-mv-field]').value=id;
+    const clause=clauses.get(id)||inherited().find(c=>c.fieldId===id);
+    keys=new Set(clause?.values||[]);exclude=clause?.exclude||false;
+    update();
+  }
+  function stage() {
+    if(fieldId) {
+      if(keys.size)clauses.set(fieldId,{fieldId,exclude,values:mmVariantFields.find(f=>f.id===fieldId).values.filter(v=>keys.has(v))});
+      else clauses.delete(fieldId);
+    }
+    update();
+  }
+  function reason() {
+    if(fieldId&&!keys.size)return 'Choose values for the selected filter.';
+    if(!ids.size)return 'Select at least one exact source metric.';
+    if(!q('[data-mv-time]').value&&!changes())return 'Stage a target timeframe or at least one dimension clause.';
+    return '';
+  }
+  function update() {
+    const focusedValue=q('[data-mv-values]')?.contains(document.activeElement)?document.activeElement.value:null;
+    const valueScroll=q('[data-mv-values]').scrollTop;
+    const list=sources(), field=mmVariantFields.find(f=>f.id===fieldId), time=q('[data-mv-time]').value;
+    q('[data-mv-source-count]').textContent=list.length+' selected';
+    q('[data-mv-source-summary]').textContent=list.length?[...new Set(list.map(m=>m.definition.name))].join(', '):'Choose metrics';
+    q('[data-mv-field]').disabled=!list.length;
+    q('[data-mv-no-source]').hidden=!!list.length;
+    q('[data-mv-search]').disabled=!field;
+    q('[data-mv-picker]').hidden=!field;
+    qa('input[name="mm-variant-mode"]').forEach(r=>r.checked=(r.value==='exclude')===exclude);
+    const shared=inherited(), displayed=[...shared.filter(c=>!clauses.has(c.fieldId)),...clauses.values()];
+    q('[data-mv-clauses]').innerHTML=displayed.map(c=>`<div class="mv-clause"><span>${escape(mmVariantStagedLabel(c))}${clauses.has(c.fieldId)?'':' <small>· Scoped</small>'}</span><button type="button" class="mm-btn" data-mv-edit="${c.fieldId}" aria-label="Edit ${escape(mmVariantFields.find(f=>f.id===c.fieldId).label)} filter">Edit</button>${clauses.has(c.fieldId)?`<button type="button" class="mm-btn" data-mv-remove="${c.fieldId}">${shared.some(i=>i.fieldId===c.fieldId)?'Revert':'Remove'}</button>`:''}</div>`).join('');
+    if(field) {
+      q('[data-mv-mode-hint]').textContent=exclude?'Excluded values are removed; every other member (including any added later) stays in the metric.':'Only the selected values are kept. Members added to the datasource later are not included.';
+      const shown=field.values.filter(v=>v.toLowerCase().includes(valueQuery.toLowerCase()));
+      q('[data-mv-values]').innerHTML=shown.length?shown.map(v=>`<label class="${exclude&&keys.has(v)?'mv-excluded':''}"><input type="checkbox" value="${escape(v)}" data-mv-value ${keys.has(v)?'checked':''}><span>${escape(v)}</span></label>`).join(''):'<p>No values match this search.</p>';
+      q('[data-mv-selected]').textContent=keys.size+' selected';
+      q('[data-mv-total]').textContent='Total members: '+field.values.length;
+      q('[data-mv-all]').textContent=keys.size===field.values.length?'Deselect all':'Select all';
+      q('[data-mv-none]').hidden=!keys.size||keys.size===field.values.length;
+    }
+    q('[data-mv-preview-count]').textContent=list.length+' '+(list.length===1?'variant':'variants');
+    q('[data-mv-preview-hint]').hidden=!list.length;
+    q('[data-mv-preview]').innerHTML=list.length?list.map(m=>{
+      const filters=effective(m);
+      return `<article><strong>${escape(m.definition.name)}</strong><p>${time&&time!==m.time?escape(m.time)+' → ':''}${escape(time||m.time)}</p>${filters.length?'<ul>'+filters.map(c=>'<li>'+escape(mmVariantLabel(c))+'</li>').join('')+'</ul>':'<small>No filters</small>'}</article>`;
+    }).join(''):'<p>Choose source metrics to see the results here.</p>';
+    q('[data-mv-values]').scrollTop=valueScroll;
+    if(focusedValue!==null)qa('[data-mv-value]').find(el=>el.value===focusedValue)?.focus({preventScroll:true});
+    const blocked=reason();status.textContent=blocked||list.length+' '+(list.length===1?'variant':'variants')+' ready to create';
+    createButton.disabled=!!blocked;createButton.textContent='Create '+list.length+' '+(list.length===1?'variant':'variants');
+  }
+  function sourceChanged() {
+    // Eligible fixture fields are shared by all fixture metrics; preserve staged
+    // clauses but reset the active editor exactly as the source component does.
+    fieldId='';keys=new Set();exclude=false;valueQuery='';
+    q('[data-mv-field]').value='';q('[data-mv-search]').value='';drawSources();update();
+  }
+  q('[data-mv-source-search]').oninput=e=>{sourceQuery=e.target.value;drawSources();};
+  q('[data-mv-sources]').onchange=e=>{const t=e.target.closest('[data-mv-source]');if(!t)return;t.checked?ids.add(t.dataset.mvSource):ids.delete(t.dataset.mvSource);sourceChanged();};
+  q('[data-mv-matches]').onchange=e=>{const checked=e.target.checked;drawSources().forEach(m=>checked?ids.add(m.id):ids.delete(m.id));sourceChanged();};
+  q('[data-mv-clear]').onclick=()=>{ids.clear();sourceChanged();};
+  q('[data-mv-time]').onchange=update;
+  q('[data-mv-field]').onchange=e=>chooseField(e.target.value);
+  q('[data-mv-search]').oninput=e=>{valueQuery=e.target.value;update();};
+  qa('input[name="mm-variant-mode"]').forEach(r=>r.onchange=()=>{exclude=r.value==='exclude';stage();});
+  q('[data-mv-values]').onchange=e=>{if(!e.target.matches('[data-mv-value]'))return;const v=e.target.value;e.target.checked?keys.add(v):keys.delete(v);stage();};
+  q('[data-mv-all]').onclick=()=>{const values=mmVariantFields.find(f=>f.id===fieldId).values;keys=keys.size===values.length?new Set():new Set(values);stage();};
+  q('[data-mv-none]').onclick=()=>{keys.clear();stage();};
+  q('[data-mv-clauses]').onclick=e=>{
+    const edit=e.target.closest('[data-mv-edit]'), remove=e.target.closest('[data-mv-remove]');
+    if(edit){chooseField(edit.dataset.mvEdit);q('[data-mv-field]').focus();}
+    if(remove){clauses.delete(remove.dataset.mvRemove);if(fieldId===remove.dataset.mvRemove)chooseField('');else update();q('[data-mv-field]').focus();}
+  };
+  function create() {
+    if(reason())return;
+    let created=0,reused=0;
+    sources().forEach(s=>{
+      const d=definitions.find(d=>d.id===s.definition.id),time=q('[data-mv-time]').value||s.time,filters=effective(s),key=mmVariantKey(filters);
+      if(d.metrics.some(m=>m.time===time&&mmVariantKey(mmVariantFilters(m))===key)){reused++;return;}
+      d.metrics.push({id:'example-created-'+(++serial),time,scope:filters.map(mmVariantLabel).join('; '),variantFilters:filters,follow:'Not followed'});
+      expanded.add(d.id);created++;
+    });
+    render();notice(`Fixture simulation: ${created} created, ${reused} existing variants reused. Reload restores example data.`);
+    dialog.close();
+  }
+  drawSources();update();
+}
+
+      function preview(id) {
+        const m=all().find(m=>m.id===id);if(!m)return;
+        previewId=id;$('[data-mm-preview-pane]').hidden=false;$('[data-mm-preview-title]').textContent=m.definition.name;$('[data-mm-preview-period]').textContent=m.time+(m.scope?' · '+m.scope:'');$$('[data-mm-preview]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.mmPreview===id)));
+      }
+      $('[data-mm-preview-close]').addEventListener('click',()=>{const id=previewId;previewId=null;$('[data-mm-preview-pane]').hidden=true;$$('[data-mm-preview]').forEach(b=>b.setAttribute('aria-pressed','false'));root.querySelector('[data-mm-preview="'+CSS.escape(id)+'"]')?.focus();});
+      $('[data-mm-preview-refresh]').addEventListener('click',()=>{$('[data-mm-preview-content]').textContent='Preview requires a Tableau connection. No live service is connected in this HTML concept.';});
+      root.addEventListener('input',e=>{if(e.target.matches('[data-mm-search]'))render();});
+      root.addEventListener('change',e=>{
+        const t=e.target;
+        if(t.matches('[data-mm-following]'))render();
+        if(t.matches('[data-mm-metric]')){setIds([t.dataset.mmMetric],t.checked);render();}
+        if(t.matches('[data-mm-all]')){setIds(visible().flatMap(d=>d.metrics.map(m=>m.id)),t.checked);render();}
+        if(t.matches('[data-mm-definition]')){setIds(visible().find(d=>d.id===t.dataset.mmDefinition).metrics.map(m=>m.id),t.checked);render();}
+      });
+      root.addEventListener('click',async e=>{
+        const b=e.target.closest('button');if(!b||!root.contains(b))return;
+        if(b.dataset.mmOpen){const id=b.dataset.mmOpen;expanded.has(id)?expanded.delete(id):expanded.add(id);render();}
+        if(b.dataset.mmFamily){const source=all().find(m=>m.id===b.dataset.mmFamily),family=all().filter(m=>metricFamilyKey(m)===metricFamilyKey(source)),checked=family.every(m=>selected.has(m.id));setIds(family.map(m=>m.id),!checked);if(!checked){family.forEach(m=>expanded.add(m.definition.id));$('[data-mm-search]').value='';$('[data-mm-following]').checked=false;}render();}
+        if(b.dataset.mmFollowers){const d=definitions.find(d=>d.id===b.dataset.mmFollowers);modal('Followers - '+d.name,'<p>Distinct people and groups across this definition. Example identities only.</p><ul>'+d.metrics.map(m=>`<li>${escape(m.time+(m.scope?' · '+m.scope:''))}<p>${m.follow==='Not followed'?'No followers yet':escape(m.follow.replace('You','Example user').replace('Group','Sales leadership group'))}</p></li>`).join('')+'</ul>');}
+        if(b.dataset.mmDeleteDefinition)reviewDelete(b.dataset.mmDeleteDefinition);
+        if(b.dataset.mmPreview)preview(b.dataset.mmPreview);
+        if(b.dataset.mmCopy){try{await navigator.clipboard.writeText(b.dataset.mmCopy);b.innerHTML='<svg class="icon"><use href="#i-check"/></svg>';b.setAttribute('aria-label','Copied metric ID');}catch{modal('Metric ID',`<p>Select and copy this example ID:</p><code>${escape(b.dataset.mmCopy)}</code>`);}}
+        const action=b.dataset.mmAction;
+        if(action==='expand'){const shown=visible(),collapse=shown.every(d=>expanded.has(d.id));expanded=collapse?new Set():new Set(shown.map(d=>d.id));render();}
+        if(action==='clear'){selected.clear();render();}
+        if(action==='refresh')notice('Example inventory refreshed locally. No live service is connected.');
+        if(action==='delete')reviewDelete();
+        if(action==='follow')followDialog();
+        if(action==='variants')variantsDialog();
+      });
+      render();
+    };
+    window.initManagerConcept();
+  })();
+  </script>
+<script>
+(function () {
+  'use strict';
+  window.initActivityConcept = function () {
+    const root = document.getElementById('activity-view');
+    if (!root || root.dataset.avInitialized) return;
+    root.dataset.avInitialized = 'true';
+    const $ = s => root.querySelector(s);
+    const escape = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const metric = (name, status, field, diagnostic = '') => ({name,status,field,diagnostic});
+    // All names, dates, outcomes and diagnostic messages below are illustrative fixtures.
+    const records = [
+      {id:'example-01',source:'Superstore',day:'29',time:'10:42 AM',iso:'2026-10-29T10:42:00-07:00',note:'Publication stopped before finishing. Review the failed metric and the metric that was not sent.',items:[metric('Total Sales','created','Sales'),metric('Total Profit','created','Profit'),metric('Profit Ratio','failed','Profit Ratio','Example diagnostic: Tableau rejected the metric definition.'),metric('Order Count','not_attempted','Order ID','Not sent after the publication stopped.')],group:'Sales leadership',groupStatus:'created',follow:'Membership added. Total Sales added; Total Profit subscription failed. Other subscriptions were not sent.'},
+      {id:'example-02',source:'Regional Sales',day:'29',time:'9:18 AM',iso:'2026-10-29T09:18:00-07:00',note:'One result is unconfirmed. Check this metric in Tableau before publishing again. An unconfirmed response does not mean creation failed.',items:[metric('Regional Revenue','created','Revenue'),metric('Regional Margin','unknown','Margin','Example diagnostic: The response was interrupted; creation could not be confirmed.'),metric('Regional Orders','not_attempted','Order ID')],group:null},
+      {id:'example-03',source:'Superstore',day:'28',time:'3:36 PM',iso:'2026-10-28T15:36:00-07:00',items:[metric('Sales by Region','created','Sales'),metric('Profit by Region','created','Profit'),metric('Quantity Sold','created','Quantity')],group:'Regional overview',groupStatus:'reused',follow:'Group already added. Your membership and all three metric subscriptions were added.'},
+      {id:'example-04',source:'Service Operations',day:'28',time:'11:05 AM',iso:'2026-10-28T11:05:00-07:00',note:'No definitions were confirmed as created. Review the diagnostic before publishing again.',items:[metric('Resolved Cases','failed','Cases','Example diagnostic: Permission to create metric definitions was denied.'),metric('Time to Resolution','not_attempted','Resolution Hours')],group:null},
+      {id:'example-05',source:'Superstore',day:'27',time:'4:12 PM',iso:'2026-10-27T16:12:00-07:00',items:[metric('Average Discount','created','Discount'),metric('Shipping Cost','created','Shipping Cost')],group:null}
+    ];
+    const receiptSummary=r=>{const counts={created:0,failed:0,unknown:0,not_attempted:0};r.items.forEach(i=>counts[i.status]++);return [counts.created+' created',...(counts.failed?[counts.failed+' failed']:[]),...(counts.unknown?[counts.unknown+' unconfirmed']:[]),...(counts.not_attempted?[counts.not_attempted+' not sent']:[])].join(' \u00b7 ');};
+    let selected = records[0], pending = null, opener = null;
+    const names = {created:'Created',failed:'Not created',unknown:'Unconfirmed',not_attempted:'Not sent'};
+    const tones = {created:'ok',failed:'failed',unknown:'unknown',not_attempted:'neutral'};
+    const badge = (label,tone) => '<span class="av-badge av-'+tone+'">'+escape(label)+'</span>';
+    const say = text => { $('[data-av-status]').textContent = text; };
+    function renderDetail() {
+      const r = selected;
+      $('[data-av-actions]').hidden = !r;
+      if (!r) { $('[data-av-detail]').innerHTML = '<p class="av-empty">Select a publication to review its results.</p>'; return; }
+      $('[data-av-scope]').textContent = r.source+' · October '+r.day+', 2026 at '+r.time+' PDT';
+      $('[data-av-undo]').hidden = !r.items.some(i=>i.status==='created');
+      $('[data-av-delete-group]').hidden = !r.group || r.groupStatus!=='created';
+      $('[data-av-delete-group]').textContent = 'Delete "'+(r.group || '')+'" Group';
+      $('[data-av-detail]').innerHTML = '<div class="av-eyebrow">Publication receipt · '+r.id+'</div><div class="av-detail-title"><h3>'+escape(r.source)+'</h3><button type="button" class="av-btn" data-av-close>Close details</button></div><p class="av-meta"><time datetime="'+r.iso+'">October '+r.day+', 2026 at '+r.time+'</time> · PDT · Example site</p><p class="av-summary">'+receiptSummary(r)+'</p>'+(r.note?'<div class="av-notice">'+escape(r.note)+'</div>':'')+'<div class="av-section-heading">Metric definitions<span>'+r.items.length+' in this publication</span></div><ul class="av-items">'+r.items.map(i => '<li class="av-item"><div class="av-item-title"><span>'+escape(i.name)+'</span>'+badge(names[i.status],tones[i.status])+'</div>'+(i.diagnostic?'<p class="av-diagnostic">'+escape(i.diagnostic)+'</p>':'')+'<details><summary>Metric details</summary><dl><dt>Calculation</dt><dd>'+escape(i.field==='Order ID'?'Count distinct of Order ID':i.field==='Discount'?'Average of Discount':'Sum of '+i.field)+'</dd><dt>Date field</dt><dd>'+(r.source==='Service Operations'?'Closed Date':'Order Date')+'</dd><dt>Slicers</dt><dd>Region, Segment</dd></dl></details></li>').join('')+'</ul>'+(r.group?'<details class="av-digest" '+(r.id==='example-01'?'open':'')+'><summary>Digest group'+(r.id==='example-01'?' - needs attention':'')+'</summary><p>'+escape(r.group)+' · '+(r.groupStatus==='created'?'Created by this publication':'Already added')+'</p><p>'+escape(r.follow)+'</p>'+'</details>':'');
+      const digest = $('[data-av-detail]').querySelector('.av-digest');
+      if (digest) {
+        $('[data-av-detail]').insertBefore(digest, $('[data-av-detail]').querySelector('.av-section-heading'));
+      }
+    }
+    function renderList() {
+      const q = $('[data-av-search]').value.trim().toLowerCase();
+      const visible = records.filter(r => (r.source+' '+r.items.map(i=>i.name).join(' ')).toLowerCase().includes(q));
+      if (!visible.some(r => r===selected)) selected = visible[0] || null;
+      $('[data-av-count]').textContent = visible.length+' example publications';
+      let day = '';
+      $('[data-av-list]').innerHTML = visible.map(r => {
+        const heading = day!==r.day?'<li class="av-day">October '+r.day+'</li>':''; day=r.day;
+        return heading+'<li><button type="button" class="av-run" data-av-id="'+r.id+'" '+(selected===r?'aria-current="true"':'')+' aria-label="Open '+escape(r.source)+', October '+r.day+', '+r.time+', '+receiptSummary(r)+'"><span class="av-run-line"><strong>'+escape(r.source)+'</strong><time datetime="'+r.iso+'">'+r.time+'</time></span><span class="av-run-summary">'+receiptSummary(r)+'</span></button></li>';
+      }).join('') || '<li class="av-empty">No matching example publications.<br>Try another search.</li>';
+      renderDetail();
+    }
+    $('[data-av-search]').addEventListener('input', () => {renderList();say('Example history filtered.');});
+
+    $('[data-av-list]').addEventListener('click', e => {
+      const button = e.target.closest('[data-av-id]'); if (!button) return;
+      selected = records.find(r => r.id===button.dataset.avId);
+      root.querySelectorAll('[data-av-id]').forEach(b => b.removeAttribute('aria-current'));
+      button.setAttribute('aria-current','true'); renderDetail(); say(selected.source+' receipt selected.');
+    });
+    $('[data-av-refresh]').addEventListener('click', () => say('Example history refreshed locally. No service was contacted.'));
+    $('[data-av-undo]').addEventListener('click', e => confirm('undo',e.currentTarget,selected));
+    $('[data-av-delete-group]').addEventListener('click', e => confirm('group',e.currentTarget,selected));
+    $('[data-av-detail]').addEventListener('click', e => {
+      if (!e.target.closest('[data-av-close]')) return;
+      const receiptId = selected?.id;
+      selected = null;
+      root.querySelectorAll('[data-av-id]').forEach(button => button.removeAttribute('aria-current'));
+      renderDetail();
+      root.querySelector('[data-av-id="'+receiptId+'"]')?.focus();
+    });
+    const dialog = $('[data-av-dialog]');
+    function confirm(kind, trigger, receipt) {
+      if (!receipt || (kind==='undo' && !receipt.items.some(i=>i.status==='created')) || (kind==='group' && (!receipt.group || receipt.groupStatus!=='created'))) return;
+      pending = {kind,receipt}; opener = trigger;
+      $('#av-dialog-title').textContent = kind==='undo'?'Undo publication?':'Delete digest group?';
+      $('[data-av-confirm]').textContent = kind==='undo'?'Undo publication':'Delete digest group';
+      $('#av-dialog-copy').textContent = kind==='undo'?'Delete the definitions created by '+receipt.source+' ('+receipt.id+'), including their metric variants and followers. Digest groups remain. This cannot be undone.':'Delete "'+receipt.group+'" from '+receipt.source+' ('+receipt.id+'), including its memberships and subscriptions. Metrics remain. This cannot be undone.';
+      $('[data-av-targets]').innerHTML = kind==='undo'?receipt.items.filter(i=>i.status==='created').map(i=>'<li>'+escape(i.name)+'</li>').join(''):'';
+      dialog.showModal();
+    }
+    $('[data-av-cancel]').addEventListener('click', () => dialog.close());
+    $('[data-av-dialog-close]').addEventListener('click', () => dialog.close());
+    $('[data-av-confirm]').addEventListener('click', () => {if(!pending)return;say(pending.receipt.source+' ('+pending.receipt.id+'): '+(pending.kind==='undo'?'Undo publication':'Delete group')+' confirmation simulated. Example records unchanged; nothing was deleted.');dialog.close();});
+    dialog.addEventListener('close', () => {opener?.focus();pending=null;});
+    renderList();
+  };
+  window.initActivityConcept();
+}());
+</script>
+<script>
+(function(){
+  const screens=['author','manager','activity'];
+  function showScreen(name){
+    const screen=screens.includes(name)?name:'author';
+    screens.forEach(id=>document.getElementById(id+'-view').hidden=id!==screen);
+    document.querySelectorAll('[data-screen]').forEach(button=>{
+      const active=button.dataset.screen===screen;
+      button.classList.toggle('active',active);
+      if(active)button.setAttribute('aria-current','page');else button.removeAttribute('aria-current');
+    });
+    document.title='Pulse Metric Studio | '+({author:'Author',manager:'Metric Manager',activity:'Activity'}[screen])+' concept';
+    document.getElementById('status-context').innerHTML='<svg class="icon"><use href="#i-'+(screen==='activity'?'clock':'database')+'"/></svg>'+({author:'Superstore Sales Cloud (CalcTEST) · Example data',manager:'pace · Example inventory',activity:'Publication history · Example records'}[screen]);
+  }
+  document.querySelectorAll('[data-screen]').forEach(button=>button.addEventListener('click',()=>{
+    showScreen(button.dataset.screen);
+    history.replaceState(null,'','#'+button.dataset.screen);
+  }));
+  showScreen(location.hash.slice(1));
+  document.querySelectorAll('dialog').forEach(dialog=>dialog.addEventListener('click',event=>{if(event.target!==dialog)return;const rect=dialog.getBoundingClientRect();if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)dialog.close();}));
+  addEventListener('hashchange',()=>showScreen(location.hash.slice(1)));
+})();
+</script>
+</body>
+</html>

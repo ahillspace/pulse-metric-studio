@@ -1,22 +1,22 @@
 /* Pulse Metric Studio task surfaces and component tokens. */
 .pulse-app {
-  --bg: #171719;
-  --bg-raise: #202022;
-  --panel: #202022;
-  --panel-alt: #262628;
-  --border: #323236;
-  --border-bright: #48484e;
-  --text: #e8e8eb;
-  --text-dim: #9a9aa3;
-  --text-faint: #74747e;
-  --cyan: #b8b9ff;
-  --cyan-dim: #8587cf;
-  --cyan-glow: transparent;
+  --bg: #202125;
+  --bg-raise: #202125;
+  --panel: #1c1d21;
+  --panel-alt: #292a30;
+  --border: #ffffff12;
+  --border-bright: #ffffff21;
+  --text: #e5e5eb;
+  --text-dim: #afb0bd;
+  --text-faint: #8c8d9c;
+  --cyan: #b5abff;
+  --cyan-dim: #a493ed;
+  --cyan-glow: #aa8bf51a;
   --amber: #d9b47a;
   --green: #78ae92;
   --red: #e09692;
   font:
-    13px/1.5 "Segoe UI",
+    13px/1.5 "Segoe UI Variable Text", "Segoe UI",
     system-ui,
     sans-serif;
   color: var(--text);
@@ -36,13 +36,13 @@
   overflow: hidden;
 }
 .pulse-navigation-rail {
-  width: 204px;
-  flex: 0 0 204px;
+  width: 200px;
+  flex: 0 0 200px;
   display: flex;
   flex-direction: column;
   padding: 18px 12px 12px;
-  background: #19191b;
-  border-right: 1px solid #29292d;
+  background: #191a1e;
+  border-right: 1px solid #ffffff09;
 }
 .pulse-workspace-brand {
   display: flex;
@@ -127,8 +127,8 @@
 }
 .pulse-navigation-rail nav button.active,
 .pulse-rail-bottom > button.active {
-  background: #2b2b30;
-  color: #f0f0f3;
+  background: #b3a4ff14;
+  color: #ded7ff;
 }
 .pulse-navigation-rail svg {
   flex: 0 0 16px;
@@ -167,8 +167,8 @@
 }
 .pulse-app .update-error {
   padding: 9px 12px;
-  border-left: 3px solid var(--red);
-  background: rgba(255, 107, 94, 0.06);
+  color: var(--red);
+  background: transparent;
 }
 .pulse-navigation-rail .pulse-disconnect {
   font-size: 12px;
@@ -179,22 +179,22 @@
   flex: 1;
   min-width: 0;
   flex-direction: column;
-  background: #202022;
+  background: var(--bg);
 }
 .pulse-location-header {
   display: flex;
   align-items: center;
   gap: 14px;
-  flex: 0 0 56px;
+  flex: 0 0 65px;
   padding: 10px 24px;
-  border-bottom: 1px solid #303034;
+  border-bottom: 1px solid var(--border);
   min-width: 0;
 }
 .pulse-location-header h1 {
   display: flex;
   align-items: center;
   gap: 9px;
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 600;
   margin: 0;
   white-space: nowrap;
@@ -280,11 +280,11 @@
   margin: 0;
 }
 .pulse-app .btn {
-  min-height: 29px;
-  padding: 5px 10px;
-  background: #2c2c30;
-  border: 1px solid #414147;
-  border-radius: 5px;
+  min-height: 32px;
+  padding: 5px 12px;
+  background: linear-gradient(#ffffff06, #ffffff01);
+  border: 1px solid #ffffff19;
+  border-radius: 6px;
   box-shadow: none;
   color: #dddde4;
   font: inherit;
@@ -296,15 +296,16 @@
   color: #dddde4;
 }
 .pulse-app .btn.primary {
-  background: #6869ae;
-  border-color: #787abe;
-  color: #fff;
+  background: #9987ee;
+  border-color: #b9a8ff40;
+  color: #171322;
+  font-weight: 600;
   box-shadow: none;
 }
 .pulse-app .btn.primary:hover:not(:disabled) {
-  background: #7778be;
-  border-color: #787abe;
-  color: #fff;
+  background: #b2a0ff;
+  border-color: #b9a8ff40;
+  color: #171322;
   box-shadow: none;
 }
 .pulse-app .btn.danger {
@@ -329,9 +330,9 @@
 .pulse-app select,
 .pulse-app textarea {
   color: var(--text);
-  background: #252528;
-  border: 1px solid #404047;
-  border-radius: 4px;
+  background: #15161a59;
+  border: 1px solid #ffffff1c;
+  border-radius: 5px;
   font: inherit;
   min-width: 0;
 }
@@ -349,8 +350,8 @@
   place-content: center;
 }
 .pulse-app input[type="checkbox"]:checked {
-  background: #8688c0;
-  border-color: #999cd3;
+  background: #a493ed;
+  border-color: #b5abff;
 }
 .pulse-app input[type="checkbox"]:checked::after {
   content: "";
@@ -361,7 +362,7 @@
   transform: translateY(-1px) rotate(-45deg);
 }
 .pulse-app input[type="checkbox"]:indeterminate {
-  background: #8688c0;
+  background: #a493ed;
 }
 .pulse-app input[type="checkbox"]:indeterminate::after {
   content: "";
@@ -513,8 +514,8 @@
 .pulse-metric-list tbody th,
 .pulse-metric-list tbody td {
   padding: 5px 7px;
-  height: 42px;
-  background: #1b1c1e;
+  height: 46px;
+  background: #202125;
 }
 .pulse-metric-list tbody tr:last-child > * {
   border-bottom: 0;
@@ -524,10 +525,10 @@
   top: 0;
   z-index: 3;
   padding: 0 10px;
-  height: 34px;
-  background: #25262a;
+  height: 38px;
+  background: #292a30;
   border-bottom-color: #383a42;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   color: #c0c1ca;
   white-space: nowrap;
@@ -553,9 +554,9 @@
 .pulse-metric-list th:nth-child(9),
 .pulse-metric-list th:nth-child(10) { width: 260px; }
 .pulse-metric-list .pulse-cumulative-cell { text-align: center; }
-.pulse-metric-list tbody tr.is-selected > th { background: #202123; }
-.pulse-metric-list tbody tr:hover > * { background: #222327; }
-.pulse-metric-list tbody tr.is-selected:hover > th { background: #25262a; }
+.pulse-metric-list tbody tr.is-selected > th { background: #292735; }
+.pulse-metric-list tbody tr:hover > * { background: #26272d; }
+.pulse-metric-list tbody tr.is-selected:hover > th { background: #302b40; }
 .pulse-metric-name {
   display: flex;
   align-items: center;
@@ -607,7 +608,7 @@
 }
 .pulse-metric-list :disabled {
   opacity: 1;
-  color: #91949e;
+  color: #a0a2af;
   cursor: default;
 }
 .pulse-metric-name input:disabled { color: #b6b7c1; }
@@ -742,9 +743,9 @@
 }
 .pulse-app .warning-banner {
   margin: 12px 24px;
-  padding: 10px 12px;
-  border: 1px solid #5b4940;
-  background: #322c29;
+  padding: 8px 0;
+  border: 0;
+  background: transparent;
   color: #dfc2a4;
   border-radius: 5px;
   font-size: 12px;
@@ -781,7 +782,7 @@
   width: var(--assistant-width, 340px);
   flex: 0 0 var(--assistant-width, 340px);
   max-width: calc(100% - 360px);
-  background: #1d1d20;
+  background: #1c1d21;
   border-left: 1px solid #303034;
   overflow: visible;
 }
@@ -856,8 +857,8 @@
   gap: 8px;
   padding: 10px;
   border: 1px solid #414149;
-  border-radius: 7px;
-  background: #242428;
+  border-radius: 9px;
+  background: #24242c;
 }
 .pulse-assistant-panel .chat-compose textarea {
   flex: none;
@@ -1013,29 +1014,29 @@
   backdrop-filter: none;
 }
 .pulse-app .modal-card {
-  background: #252528;
-  border: 1px solid #48484f;
+  background: #25262d;
+  border: 1px solid #ffffff24;
   box-shadow: 0 16px 80px #0008;
-  border-radius: 8px;
+  border-radius: 12px;
   max-width: min(760px, calc(100vw - 32px));
   max-height: calc(100dvh - 32px);
 }
 .pulse-app .modal-header {
-  padding: 16px 20px;
-  font-size: 14px;
+  padding: 18px 24px;
+  font-size: 15px;
   font-weight: 600;
   letter-spacing: 0;
   text-transform: none;
   border-bottom: 1px solid #39393f;
 }
 .pulse-app .modal-body {
-  padding: 18px 20px;
+  padding: 18px 24px;
   overflow: auto;
 }
 .pulse-app .modal-actions {
-  background: #222225;
+  background: #222329;
   border-top: 1px solid #39393f;
-  padding: 12px 20px;
+  padding: 14px 24px;
 }
 .pulse-app .pulse-modal-close {
   color: #a7a7b3;
@@ -1096,16 +1097,16 @@
 .pulse-app .pulse-registry-icon { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 5px; background: transparent; border-color: transparent; }
 .pulse-app .pulse-registry-actionbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-height: 44px; padding: 7px 18px; border-bottom: 1px solid #303034; }
 .pulse-registry-count { color: #a4a4ae; font-size: 12px; margin-right: 8px; }
-.pulse-registry-create { margin-left: auto; }
+.pulse-registry-create { margin-left: 0; }
 .pulse-app .pulse-registry-list { margin: 0; }
 .pulse-app .def-row { border-color: #303034; }
 .pulse-app .def-head { min-height: 43px; padding: 7px 18px; gap: 10px; flex-wrap: nowrap; cursor: default; }
 .pulse-app .def-head:hover { background: #26262b; }
-.pulse-app .pulse-expand-button { font: inherit; font-weight: 500; flex: 1; min-width: 100px; overflow-wrap: anywhere; }
+.pulse-app .pulse-expand-button { font: inherit; font-weight: 600; flex: 1; min-width: 100px; overflow-wrap: anywhere; }
 .pulse-app .pulse-expand-button::before { content: "\203a"; color: #9b9ba6; }
 .pulse-app .pulse-expand-button[aria-expanded="true"]::before { transform: rotate(90deg); }
 .pulse-app .def-meta { font: inherit; font-size: 11px; color: #9b9ba6; white-space: nowrap; }
-.pulse-app .def-head > .btn.danger { color: #a7a7b4; }
+.pulse-app .def-head > .btn.danger { color: #a7a7b4; background: transparent; border-color: transparent; }
 .pulse-app .def-head > .btn.danger:hover:not(:disabled) { color: #e9aaa5; background: #37292c; }
 .pulse-app .variant-row { min-height: 36px; gap: 10px; padding: 5px 18px 5px 43px; flex-wrap: nowrap; border-top: 1px solid #28282d; background: #1d1d21; }
 .pulse-app .pulse-metric-name { flex: 1; min-width: 80px; overflow-wrap: anywhere; color: #c5c5d0; }
@@ -1127,11 +1128,19 @@
 }
 .pulse-app .tf-label {
   color: #bbbbc9;
-  background: #303039;
-  border-color: #43434e;
+  background: transparent;
+  border-color: transparent;
+  border-radius: 5px;
   font: inherit;
-  font-size: 11px;
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  box-shadow: none;
 }
+.pulse-app .tf-label:hover:not(:disabled) { background: #ffffff06; border-color: #ffffff19; }
+.pulse-app .follow-dot { box-shadow: none; }
+.pulse-app .metric-id-btn { text-transform: none; letter-spacing: 0; font-family: inherit; font-size: 12px; box-shadow: none; }
 .pulse-app .pulse-timeframe-button[aria-pressed="true"] {
   background: #4e4e70;
   color: #e0e0f7;
@@ -1144,8 +1153,8 @@
   color: #9999a7;
 }
 .pulse-app .pulse-metric-highlight {
-  background: #25332d;
-  box-shadow: inset 2px 0 0 #7ca890;
+  background: #879d9514;
+  box-shadow: none;
 }
 .pulse-app .subpanel-title {
   font-size: 13px;
@@ -1374,3 +1383,108 @@
 .pulse-published-metric-preview { margin-top: 10px; }
 .pulse-published-metric-preview p { margin: 0; color: var(--text-dim); font-size: 12px; }
 .pulse-published-metric-preview img { display: block; width: 100%; max-width: 420px; height: auto; border-radius: 8px; }
+
+/* Shared modal finish applies inside the shell and to body-mounted dialogs.
+   Keep specialized dialog body geometry in its owning stylesheet. */
+.overlay-backdrop .modal-card {
+  background: #25262d;
+  border-color: #ffffff24;
+  border-radius: 12px;
+}
+.overlay-backdrop .modal-header,
+.pulse-app .overlay-backdrop .modal-header {
+  padding: 18px 24px;
+  font-size: 18px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  border-top: 0;
+}
+.overlay-backdrop .modal-header[class*="outcome-strip-"] {
+  border-top: 0;
+}
+.overlay-backdrop .warning-banner,
+.pulse-app .overlay-backdrop .warning-banner,
+.overlay-backdrop .dimension-fork-results,
+.overlay-backdrop .dimension-fork-error {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 8px 0;
+}
+.overlay-backdrop .btn.primary,
+.pulse-app .overlay-backdrop .btn.primary {
+  background: #9987ee;
+  border-color: #b9a8ff40;
+  color: #171322;
+  font-weight: 600;
+}
+.overlay-backdrop .btn.primary:hover:not(:disabled),
+.pulse-app .overlay-backdrop .btn.primary:hover:not(:disabled) {
+  background: #b2a0ff;
+  color: #171322;
+}
+.overlay-backdrop .btn.primary:disabled,
+.pulse-app .overlay-backdrop .btn.primary:disabled {
+  opacity: 1;
+  background: #3e394e;
+  border-color: #5d526a;
+  color: #bbb0d1;
+}
+
+.pulse-deletion-followers {
+  margin: 6px 0 4px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.pulse-deletion-followers > summary {
+  width: fit-content;
+  max-width: 100%;
+  cursor: pointer;
+  color: var(--cyan);
+}
+.pulse-deletion-followers > summary:hover { color: #d2c8ff; }
+.pulse-deletion-followers p {
+  margin: 7px 0;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+.overlay-backdrop ul.pulse-follower-lines {
+  list-style: none;
+  margin: 8px 0 10px;
+  padding: 0 0 0 14px;
+  font-size: 12px;
+}
+.overlay-backdrop ul.pulse-follower-lines > li,
+.pulse-app .overlay-backdrop ul.pulse-follower-lines > li {
+  display: block;
+  padding: 5px 0;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  line-height: 1.6;
+  font-family: inherit;
+  overflow-wrap: anywhere;
+}
+.overlay-backdrop ul.pulse-follower-lines > li.err { color: var(--red); }
+.pulse-deletion-review .pulse-deletion-targets {
+  list-style: none;
+  margin: 16px 0;
+  padding: 0;
+}
+.pulse-deletion-review .pulse-deletion-targets > li {
+  padding: 12px 0;
+  line-height: 1.65;
+}
+.pulse-deletion-review .pulse-deletion-metrics {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0 0 0 16px;
+}
+.pulse-deletion-review .pulse-deletion-metrics > li {
+  padding: 8px 0;
+  line-height: 1.6;
+}

@@ -20,6 +20,8 @@ import {
   flattenMetrics,
   cleanName,
   previewSourceLabel,
+  reviewedMetricLabel,
+  ReviewedMetricFollowers,
 } from "../registry/views";
 import { VariantDialog } from "../registry/VariantDialog";
 import { InventoryFailures } from "../registry/InventoryFailures";
@@ -310,6 +312,14 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
               ? `${selectedSources.length} selected`
               : `${allMetrics.length} ${allMetrics.length === 1 ? "metric" : "metrics"}`}
           </span>
+          <button
+            className="btn small"
+            disabled={Boolean(registry.busy) || !allMetrics.length}
+            aria-haspopup="dialog"
+            onClick={() => setVariantsOpen(true)}
+          >
+            Create variants
+          </button>
           {selectedSources.length > 0 && (
             <>
               <button
@@ -345,14 +355,6 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
               </button>
             </>
           )}
-          <button
-            className="btn small pulse-registry-create"
-            disabled={Boolean(registry.busy) || !allMetrics.length}
-            aria-haspopup="dialog"
-            onClick={() => setVariantsOpen(true)}
-          >
-            Create variants
-          </button>
         </div>
         {registry.error && (
           <p className="warning-banner" role="alert">
@@ -541,6 +543,7 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
         registry.deleteError) && (
         <Modal
           title="Review deletion"
+          className="pulse-deletion-review"
           onClose={
             registry.busy === "delete" ? undefined : registry.cancelDelete
           }
@@ -593,10 +596,12 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
                 Delete exactly these reviewed resources from{" "}
                 {entry.record.datasourceName}:
               </p>
-              <ul>
+              <ul className="pulse-deletion-targets">
                 {registry.deletePlan.targets.map((target) => (
                   <li key={`${target.kind}-${target.id}`}>
-                    <strong>{target.name}</strong> -{" "}
+                    <strong>{target.kind === "metric"
+                      ? reviewedMetricLabel(target.id, metricById)
+                      : cleanName(definitionById.get(target.id)?.name ?? "Definition name unavailable")}</strong> -{" "}
                     {target.kind === "definition"
                       ? target.inventoryComplete
                         ? `definition and its ${target.affectedMetricIds.length} ${target.affectedMetricIds.length === 1 ? "metric" : "metrics"}; associated subscriptions are removed`
@@ -605,17 +610,15 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
                         ? "individual metric"
                         : "individual metric, deleted by ID (inventory incomplete)"}
                     {!!target.affectedMetrics?.length && (
-                      <ul>
+                      <ul className="pulse-deletion-metrics">
                         {target.affectedMetrics.map((metric) => (
                           <li key={metric.id}>
-                            {metric.name}
-                            <span className="section-hint">
-                              {" "}
-                              ·{" "}
-                              {metric.followerCount === null
-                                ? "Followers unavailable"
-                                : `${metric.followerCount} ${metric.followerCount === 1 ? "follower" : "followers"}`}
-                            </span>
+                            {reviewedMetricLabel(metric.id, metricById)}
+                            <ReviewedMetricFollowers
+                              key={`${contextKey}-${registry.deletePlan!.previewFingerprint}-${metric.id}`}
+                              metricId={metric.id}
+                              followerCount={metric.followerCount}
+                            />
                           </li>
                         ))}
                       </ul>

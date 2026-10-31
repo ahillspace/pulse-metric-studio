@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useLayoutEffect } from "react";
 import { useActivity } from "./controller";
 import { Receipt } from "./Receipt";
+import { SelectedReceiptActions } from "./ReceiptActions";
 import { BusyLabel } from "../components/ui";
 import { Pagination } from "../components/ConfigEditor";
 import "./activity.css";
@@ -29,6 +30,7 @@ export function Activity() {
         </button>
       </div>
       {error && !(error === undoError && selected?.id === undoReceiptId) && !(error === readError && selected?.id === readReceiptId) && <p className="warning-banner" role="alert">{error}</p>}
+      <SelectedReceiptActions receipt={selected} />
       <div className={`pulse-history-layout${selected ? " has-selection" : ""}`}>
         <div className="pulse-history-index">
           <h2 className="sr-only">Publication history</h2>
@@ -65,7 +67,7 @@ export function Activity() {
         {selected && (
           <div className="pulse-history-detail">
             <button className="btn small pulse-history-close" onClick={() => { returnFocus.current = selected.id; close(); }}>Close details</button>
-            <Receipt receipt={selected} onRefresh={() => void open(selected.id)} />
+            <Receipt receipt={selected} showActions={false} />
           </div>
         )}
       </div>
