@@ -445,6 +445,67 @@ export function FollowersList({ definition }: { definition: DefinitionNode }) {
   );
 }
 
+export function reviewedMetricLabel(
+  metricId: string,
+  metrics: ReadonlyMap<string, PulseRegistryMetric>,
+): string {
+  const metric = metrics.get(metricId);
+  return metric
+    ? forkFriendlyName(metric, metric.name, metricId)
+    : "Metric name unavailable";
+}
+
+export function reviewedFollowerLines(
+  metricId: string,
+  details: FollowersDetail[],
+): FollowerDetailItem[] {
+  const detail = details.find((item) => item.metricId === metricId);
+  return detail
+    ? followerDetailLines(detail)
+    : [{ key: `${metricId}-missing`, text: "Follower details are unavailable for this metric.", error: true }];
+}
+
+export function ReviewedMetricFollowers({
+  metricId,
+  followerCount,
+}: {
+  metricId: string;
+  followerCount: number | null;
+}) {
+  const [open, setOpen] = useState(false);
+  const [lines, setLines] = useState<FollowerDetailItem[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setLines(null);
+    setError(null);
+    void useRegistry.getState().loadFollowers([metricId]).then((response) => {
+      if (!cancelled) setLines(reviewedFollowerLines(metricId, response.details));
+    }).catch((cause) => {
+      if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
+    });
+    return () => { cancelled = true; };
+  }, [open, metricId]);
+  return (
+    <details className="pulse-deletion-followers" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary>
+        {followerCount === null ? "Followers unavailable" : `${followerCount} ${followerCount === 1 ? "follower" : "followers"}`}
+      </summary>
+      {open && (
+        <>
+          <p className="section-hint">Count from deletion review. Details fetched separately; groups are subscriber targets, not expanded members.</p>
+          {error ? <p role="alert">Follower details are unavailable: {error}</p> : !lines ? <p role="status">Loading followers...</p> : (
+            <ul className="result-list pulse-follower-lines">
+              {lines.map((line) => <li key={line.key} className={line.error ? "err" : undefined}>{line.text}</li>)}
+            </ul>
+          )}
+        </>
+      )}
+    </details>
+  );
+}
+
 function CopyLuidButton({ luid }: { luid: string }) {
   const [copied, setCopied] = useState(false);
   return (
