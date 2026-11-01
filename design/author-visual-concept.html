@@ -822,7 +822,7 @@
         if (!$('[data-mm-dialog]').open) $('[data-mm-dialog]').showModal();
       }
       const sourceList = sources => '<ul>'+sources.map(m=>`<li>${escape(m.definition.name)} · ${escape(m.time)}${m.scope?' · '+escape(m.scope):''}</li>`).join('')+'</ul>';
-      const exampleTargets=[{id:'you',kind:'User',name:'Andrew Hill (you)'},{id:'jordan',kind:'User',name:'Jordan Lee'},{id:'morgan',kind:'User',name:'Morgan Chen'},{id:'sales',kind:'Group',name:'Sales leadership'},{id:'revenue',kind:'Group',name:'Revenue operations'}];
+      const exampleTargets=[{id:'you',kind:'User',name:'Example User (you)'},{id:'jordan',kind:'User',name:'Jordan Lee'},{id:'morgan',kind:'User',name:'Morgan Chen'},{id:'sales',kind:'Group',name:'Sales leadership'},{id:'revenue',kind:'Group',name:'Revenue operations'}];
       const metricFollowerTargets=m=>exampleTargets.filter(t=>(t.id==='you'&&m.follow.includes('You'))||(t.id==='sales'&&(m.follow.includes('Group')||m.follow.includes('group'))));
       const friendlyMetric=m=>m.definition.name+' · '+m.time+(m.scope?' · '+m.scope:'');
       function reviewDelete(definitionId) {

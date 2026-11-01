@@ -499,11 +499,11 @@ test('fork friendly names lead with the source name and never a bare LUID', () =
 });
 
 test('current user fallback row is searchable and labelled with their real name', () => {
-  const named = currentUserFollowTarget('user-1', 'Andrew Hill');
-  assert.deepEqual(named, { id: 'user-1', kind: 'USER', label: 'Andrew Hill (you)', searchText: 'Andrew Hill' });
+  const named = currentUserFollowTarget('user-1', 'Example User');
+  assert.deepEqual(named, { id: 'user-1', kind: 'USER', label: 'Example User (you)', searchText: 'Example User' });
   // Searchable by the REAL name, not only the "(you)" decoration.
-  assert.equal(followTargetMatchesQuery(named!, 'andrew'), true);
-  assert.equal(followTargetMatchesQuery(named!, 'hill'), true);
+  assert.equal(followTargetMatchesQuery(named!, 'example'), true);
+  assert.equal(followTargetMatchesQuery(named!, 'user'), true);
   assert.equal(followTargetMatchesQuery(named!, 'you'), true);
   assert.equal(followTargetMatchesQuery(named!, 'nomatch'), false);
 
@@ -515,7 +515,7 @@ test('current user fallback row is searchable and labelled with their real name'
 
 test('current user stays in the fetched inventory, decorated and searchable by real username', () => {
   const inventory: FollowTargetChoice[] = [
-    { id: 'user-1', kind: 'USER', label: 'Andrew Hill' },
+    { id: 'user-1', kind: 'USER', label: 'Example User' },
     { id: 'user-2', kind: 'USER', label: 'Ada Lovelace' },
     { id: 'group-1', kind: 'GROUP', label: 'Sales' },
   ];
@@ -524,11 +524,11 @@ test('current user stays in the fetched inventory, decorated and searchable by r
   assert.deepEqual(resolved.currentUser, {
     id: 'user-1',
     kind: 'USER',
-    label: 'Andrew Hill (you)',
-    searchText: 'Andrew Hill',
+    label: 'Example User (you)',
+    searchText: 'Example User',
   });
   // Still searchable by the real username, not just "(you)".
-  assert.equal(followTargetMatchesQuery(resolved.currentUser!, 'andrew'), true);
+  assert.equal(followTargetMatchesQuery(resolved.currentUser!, 'example'), true);
   // The current user is removed from "others" so they are not listed twice.
   assert.deepEqual(resolved.others.map((target) => target.id), ['user-2', 'group-1']);
 
@@ -536,13 +536,13 @@ test('current user stays in the fetched inventory, decorated and searchable by r
   const absent = resolveCurrentUserFollowTarget(
     [{ id: 'user-2', kind: 'USER', label: 'Ada Lovelace' }],
     'user-1',
-    'Andrew Hill',
+    'Example User',
   );
   assert.deepEqual(absent.currentUser, {
     id: 'user-1',
     kind: 'USER',
-    label: 'Andrew Hill (you)',
-    searchText: 'Andrew Hill',
+    label: 'Example User (you)',
+    searchText: 'Example User',
   });
   assert.deepEqual(absent.others.map((target) => target.id), ['user-2']);
 });

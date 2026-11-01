@@ -9,11 +9,11 @@ test('launch commands preserve native prefix flags and empty quoted options', ()
 });
 
 test('quoted and partially quoted Windows paths retain their backslashes', () => {
-  assert.deepEqual(parseLaunchCommand(String.raw`C:\Users\"Andrew Hill"\tools\codex.exe --sandbox read-only`), {
-    file: String.raw`C:\Users\Andrew Hill\tools\codex.exe`, args: ['--sandbox', 'read-only'],
+  assert.deepEqual(parseLaunchCommand(String.raw`C:\Users\"Example User"\tools\codex.exe --sandbox read-only`), {
+    file: String.raw`C:\Users\Example User\tools\codex.exe`, args: ['--sandbox', 'read-only'],
   });
-  assert.deepEqual(parseLaunchCommand(String.raw`"C:\Program Files\Local Agent\launch.exe" --config 'C:\Users\Andrew Hill\agent.json'`), {
-    file: String.raw`C:\Program Files\Local Agent\launch.exe`, args: ['--config', String.raw`C:\Users\Andrew Hill\agent.json`],
+  assert.deepEqual(parseLaunchCommand(String.raw`"C:\Program Files\Local Agent\launch.exe" --config 'C:\Users\Example User\agent.json'`), {
+    file: String.raw`C:\Program Files\Local Agent\launch.exe`, args: ['--config', String.raw`C:\Users\Example User\agent.json`],
   });
 });
 

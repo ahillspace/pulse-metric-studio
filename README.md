@@ -7,7 +7,7 @@ Manage what you published afterwards: variants, followers, previews, and clean d
 It runs on macOS and Windows and connects to your Tableau Cloud site and the AI provider you configure.
 Local CLI providers use your native configuration and the launch options you choose.
 
-Owner and maintainer: Andrew Hill (`andrew-hill_sfemu`).
+Publisher: ahillspace.
 Pulse Metric Studio is open source under the [Apache 2.0 license](LICENSE).
 It is an independent tool, not a Tableau or Salesforce product.
 
