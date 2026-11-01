@@ -1,6 +1,6 @@
 {
   "name": "pulse-metric-studio",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": true,
   "description": "Pulse Metric Studio by ahillspace, a local desktop workbench for Tableau Pulse metrics.",
   "license": "Apache-2.0",
