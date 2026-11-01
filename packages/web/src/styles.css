@@ -80,7 +80,6 @@ button:disabled { cursor: not-allowed; opacity: 0.4; }
   border-top: 0;
 }
 .overlay-backdrop .modal-header[class*="outcome-strip-"] { border-top: 0; }
-.overlay-backdrop .modal-body { padding: 18px 24px; }
 .overlay-backdrop .modal-actions { padding: 14px 24px; }
 
 input, select, textarea {
@@ -542,6 +541,7 @@ tr.flash-apply td { animation: flashRow 900ms ease-out; }
 .modal-header.outcome-strip-mixed { border-top: 3px solid var(--amber); }
 .modal-header.outcome-strip-fail { border-top: 3px solid var(--red); }
 .modal-body { padding: 18px 20px; overflow-y: auto; }
+:where(.overlay-backdrop) .modal-body { padding: 18px 24px; }
 .modal-actions {
   padding: 13px 20px;
   border-top: 1px solid var(--border);
