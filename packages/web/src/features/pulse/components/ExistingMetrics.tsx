@@ -21,6 +21,8 @@ import {
   cleanName,
   previewSourceLabel,
   reviewedMetricLabel,
+  reviewedDefinitionLabel,
+  ReviewedResourceId,
   ReviewedMetricFollowers,
 } from "../registry/views";
 import { VariantDialog } from "../registry/VariantDialog";
@@ -600,8 +602,8 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
                 {registry.deletePlan.targets.map((target) => (
                   <li key={`${target.kind}-${target.id}`}>
                     <strong>{target.kind === "metric"
-                      ? reviewedMetricLabel(target.id, metricById)
-                      : cleanName(definitionById.get(target.id)?.name ?? "Definition name unavailable")}</strong> -{" "}
+                      ? reviewedMetricLabel(target.id, metricById, target.name)
+                      : reviewedDefinitionLabel(target.id, definitionById, target.name)}</strong> -{" "}
                     {target.kind === "definition"
                       ? target.inventoryComplete
                         ? `definition and its ${target.affectedMetricIds.length} ${target.affectedMetricIds.length === 1 ? "metric" : "metrics"}; associated subscriptions are removed`
@@ -609,11 +611,13 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
                       : target.inventoryComplete
                         ? "individual metric"
                         : "individual metric, deleted by ID (inventory incomplete)"}
+                    <ReviewedResourceId id={target.id} name={target.name} kind={target.kind} />
                     {!!target.affectedMetrics?.length && (
                       <ul className="pulse-deletion-metrics">
                         {target.affectedMetrics.map((metric) => (
                           <li key={metric.id}>
-                            {reviewedMetricLabel(metric.id, metricById)}
+                            {reviewedMetricLabel(metric.id, metricById, metric.name)}
+                            <ReviewedResourceId id={metric.id} name={metric.name} kind="metric" />
                             <ReviewedMetricFollowers
                               key={`${contextKey}-${registry.deletePlan!.previewFingerprint}-${metric.id}`}
                               metricId={metric.id}
