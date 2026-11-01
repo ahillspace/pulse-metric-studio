@@ -6,7 +6,8 @@ Add existing uses a fresh, selection-scoped invocation of the existing follow-st
 That read is batched at 200 metrics with at most four concurrent requests, discards results after context changes, and does not replace the inventory snapshot.
 It merges direct user and group targets using directory names, preserves existing pills, and reports incomplete reads.
 Deletion follower disclosure invokes the existing follower-detail endpoint on demand for the exact reviewed metric.
-Friendly deletion labels are presentation-only; reviewed IDs and fingerprints remain authoritative.
+Deletion labels prefer meaningful names from the fresh reviewed plan, using cached metadata only as a fallback and disclosing exact IDs when plan names are unavailable.
+Reviewed IDs and fingerprints remain authoritative.
 Activity actions belong to the selected publication above the history/details layout; its separate Refresh results control is removed while history Refresh remains.
 
 The sections below preserve the design-stage audit from 2026-10-30 at `bb8011d`.
@@ -270,3 +271,15 @@ The compiled renderer verified that the modal backdrop covers the header and ret
 An isolated browser harness invoked the real author shutdown controller while a confirmation was open.
 Both destructive confirmation buttons became disabled during shutdown and became available again when closing was cancelled.
 No mutation was submitted during this check.
+
+## Post-merge review corrections
+
+Deletion review uses meaningful names from the fresh deletion plan, including renamed resources and metrics absent from the Manager cache.
+When plan names are blank or raw identities, cached friendly metadata remains a fallback and an exact-ID disclosure keeps each reviewed resource identifiable.
+Renderer regressions exercise the actual Manager component with stale inventory and a newer deletion plan, retaining reviewed IDs, fingerprints, and unknown follower counts.
+Checked and indeterminate checkbox indicators use the dark foreground `#171322` against `#a493ed`, giving 6.92:1 contrast.
+Generic modal-body padding has lower specificity than specialized layouts, so Create variants retains its zero outer body padding and ordinary dialogs retain `18px 24px`.
+The regressions were reproduced in the React renderer with an isolated fixture API before correction.
+The compiled production renderer confirmed fresh plan labels, working exact-ID disclosure, dark checkbox marks, zero variant-body padding, and unchanged ordinary modal padding.
+Build, workspace TypeScript checks, architecture checks, the full Node suite (724 passed and 2 platform skips), and all 26 Rust tests passed.
+No live Tableau operation or native desktop workflow was exercised for these corrections.

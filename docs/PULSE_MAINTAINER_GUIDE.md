@@ -235,7 +235,8 @@ Source changes remain local to that dialog until submission.
 Follow / Unfollow's Add existing reads a fresh identity snapshot for the exact selected metrics through the existing batched follow-state endpoint.
 It merges direct user and group subscribers into the selected targets without expanding group membership, and reports incomplete identity reads.
 The directory supplies display names, not subscription evidence.
-Deletion review resolves display labels from the current metric inventory without changing reviewed resource IDs or fingerprints.
+Deletion review prefers meaningful resource names from the fresh deletion plan without changing reviewed resource IDs or fingerprints.
+Cached Manager metadata supplies fallback labels only when the plan has no meaningful name, with an exact-ID disclosure for those resources.
 Follower counts can disclose current identities through the existing per-metric follower-detail endpoint; unavailable or partial reads remain explicit.
 
 Metric Manager previews use Tableau's springboard insight and metric card image APIs through the existing authenticated connection.

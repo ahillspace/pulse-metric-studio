@@ -357,8 +357,8 @@
   content: "";
   width: 6px;
   height: 3px;
-  border-left: 1.5px solid white;
-  border-bottom: 1.5px solid white;
+  border-left: 1.5px solid #171322;
+  border-bottom: 1.5px solid #171322;
   transform: translateY(-1px) rotate(-45deg);
 }
 .pulse-app input[type="checkbox"]:indeterminate {
@@ -368,7 +368,7 @@
   content: "";
   width: 7px;
   height: 1px;
-  background: white;
+  background: #171322;
 }
 .pulse-source-chevron {
   color: #9797a4;
@@ -1029,7 +1029,7 @@
   text-transform: none;
   border-bottom: 1px solid #39393f;
 }
-.pulse-app .modal-body {
+:where(.pulse-app) .modal-body {
   padding: 18px 24px;
   overflow: auto;
 }

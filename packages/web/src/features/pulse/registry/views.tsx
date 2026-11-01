@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   PulseDefinitionNode as DefinitionNode,
+  PulseDeletePlan,
   PulseMetricVariant as MetricVariant,
 } from "@pulse-metric-studio/shared";
 import type { FollowState, FollowersDetail } from "./view-types";
@@ -448,11 +449,38 @@ export function FollowersList({ definition }: { definition: DefinitionNode }) {
 export function reviewedMetricLabel(
   metricId: string,
   metrics: ReadonlyMap<string, PulseRegistryMetric>,
+  planName?: string,
 ): string {
+  const freshName = meaningfulResourceName(planName, metricId);
+  if (freshName) return freshName;
   const metric = metrics.get(metricId);
   return metric
     ? forkFriendlyName(metric, metric.name, metricId)
     : "Metric name unavailable";
+}
+
+export function reviewedDefinitionLabel(
+  definitionId: string,
+  definitions: ReadonlyMap<string, DefinitionNode>,
+  planName: string,
+): string {
+  return meaningfulResourceName(planName, definitionId) ??
+    meaningfulResourceName(definitions.get(definitionId)?.name, definitionId) ??
+    "Definition name unavailable";
+}
+
+export function ReviewedResourceId({
+  id,
+  name,
+  kind,
+}: Pick<PulseDeletePlan["targets"][number], "id" | "name" | "kind">) {
+  if (meaningfulResourceName(name, id)) return null;
+  return (
+    <details className="pulse-deletion-id">
+      <summary>Exact {kind} ID</summary>
+      <code>{id}</code>
+    </details>
+  );
 }
 
 export function reviewedFollowerLines(
@@ -631,13 +659,18 @@ export function metricDisplayName(
   definitionName: string,
   metricId: string,
 ): string {
-  const isIdentity = (value: string) =>
-    value === metricId ||
-    /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(value);
   const candidate = [name, definitionName]
-    .map((value) => value?.trim())
-    .find((value) => value && !isIdentity(value));
-  return candidate ? cleanName(candidate) : "Metric name unavailable";
+    .map((value) => meaningfulResourceName(value, metricId))
+    .find(Boolean);
+  return candidate ?? "Metric name unavailable";
+}
+
+function meaningfulResourceName(name: string | undefined, id: string): string | null {
+  const value = name?.trim();
+  return value && value !== id &&
+    !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(value)
+    ? cleanName(value)
+    : null;
 }
 
 export function flattenMetrics(
