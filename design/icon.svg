@@ -1,0 +1,33 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#25374f"/>
+      <stop offset="1" stop-color="#131d2b"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="0.55" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- badge -->
+  <rect x="64" y="64" width="896" height="896" rx="212" fill="url(#bg)"/>
+  <rect x="64" y="64" width="896" height="896" rx="212" fill="url(#sheen)"/>
+
+  <!-- ascending metric bars -->
+  <rect x="236" y="596" width="118" height="196" rx="30" fill="#ffffff" opacity="0.16"/>
+  <rect x="412" y="492" width="118" height="300" rx="30" fill="#ffffff" opacity="0.24"/>
+  <rect x="588" y="388" width="118" height="404" rx="30" fill="#ffffff" opacity="0.34"/>
+
+  <!-- pulse line -->
+  <polyline points="176,636 340,636 416,500 494,706 572,548 656,548"
+            fill="none" stroke="#ffffff" stroke-width="52"
+            stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- rising trend to the pulse dot -->
+  <path d="M 656 548 C 720 548 752 474 788 420" fill="none" stroke="#ffffff" stroke-width="52" stroke-linecap="round"/>
+
+  <!-- pulse dot -->
+  <circle cx="812" cy="392" r="92" fill="#6fb3ff" opacity="0.22"/>
+  <circle cx="812" cy="392" r="56" fill="#6fb3ff"/>
+</svg>

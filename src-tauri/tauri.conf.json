@@ -1,0 +1,49 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Pulse Metric Studio",
+  "version": "0.1.4",
+  "identifier": "com.ahillspace.pulsemetricstudio",
+  "build": {
+    "beforeBuildCommand": "node scripts/copy-resources.mjs",
+    "frontendDist": "../packages/web/dist"
+  },
+  "bundle": {
+    "active": true,
+    "publisher": "ahillspace",
+    "copyright": "Copyright (c) 2026 ahillspace",
+    "icon": [
+      "icons/32x32.png",
+      "icons/64x64.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico",
+      "icons/icon.icns"
+    ],
+    "resources": [
+      "resources/server",
+      "resources/web",
+      "resources/runtime",
+      "resources/installer"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": "-"
+    }
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [],
+    "security": {
+      "capabilities": [
+        "default"
+      ],
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none'"
+    }
+  },
+  "plugins": {}
+}

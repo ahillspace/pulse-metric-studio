@@ -1,0 +1,73 @@
+node_modules/
+dist/
+build/
+*.log
+.env
+.env.*
+!.env.example
+/data/
+.DS_Store
+
+# Local credentials and private keys
+.ssh/
+.aws/
+.azure/
+.gnupg/
+.kube/
+.docker/
+**/.config/gcloud/
+**/.config/gh/
+**/.config/hub/
+.npmrc
+.netrc
+_netrc
+.pypirc
+id_rsa
+id_ed25519
+id_ecdsa
+id_dsa
+id_ed25519_sk
+id_ecdsa_sk
+credentials.json
+secrets.json
+tokens.json
+token.json
+auth.json
+application_default_credentials.json
+client_secret*.json
+service-account*.json
+*-credentials.json
+*_credentials.json
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.token
+*.secret
+*.secrets
+
+# Local review/verify tool artifacts
+/.review-*.json
+/tmp-*.txt
+
+# Tauri
+src-tauri/target/
+src-tauri/resources/
+src-tauri/gen/
+
+# Local OpenSpec tooling
+/.codex/skills/openspec-*/
+/.opencode/commands/opsx-*.md
+/.opencode/skills/openspec-*/
+/openspec/
+
+# Local qualification and packaging artifacts
+/.codex/
+/native-artifacts/
+/packages/server/.generated-entry.mjs
+
+# Local planning notes and API reference copies
+/TODO.md
+/pulse_metric_definition.md

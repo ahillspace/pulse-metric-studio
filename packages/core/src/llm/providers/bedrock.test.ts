@@ -1,0 +1,109 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import type { StoredLlmProfile } from '../profiles.js';
+import { BedrockProvider, classifyBedrockError } from './bedrock.js';
+import { clearCredentialCache } from './credential.js';
+import { LlmProviderError } from '../types.js';
+
+const allowEndpoint = async () => undefined;
+
+test('Bedrock bearer and SDK requests honor caller cancellation', async () => {
+  for (const authMode of ['bearer', 'aws'] as const) {
+    const controller = new AbortController();
+    let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    const waitForCancellation = (signal?: AbortSignal | null): Promise<never> => new Promise((_resolve, reject) => {
+      started();
+      signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+    const provider = new BedrockProvider({
+      id: 'bedrock', label: 'Bedrock', protocol: 'bedrock-converse', baseUrl: '', model: 'test-model',
+      authMode, secret: { value: 'test-secret' }, headers: {}, credentialCommand: null, credentialCommandHint: null, region: 'us-west-2', awsProfile: '', command: '', source: 'saved',
+    }, async (_input, init) => waitForCancellation(init?.signal), allowEndpoint);
+    provider.getHealth = async () => ({ installed: true, configured: true, healthy: null, reasonCode: 'not_tested', reason: null, resolvedModel: 'test-model' });
+    provider.client = () => ({ send: async (_command: unknown, options: { abortSignal?: AbortSignal }) => waitForCancellation(options.abortSignal) }) as unknown as ReturnType<BedrockProvider['client']>;
+    const pending = provider.complete({ messages: [], signal: controller.signal });
+    const rejected = assert.rejects(pending, { name: 'AbortError' });
+    await ready;
+    controller.abort();
+    await rejected;
+  }
+});
+
+test('Bedrock bearer profiles use the verified Converse HTTP contract', async () => {
+  const profile: StoredLlmProfile = {
+    id: 'bedrock-key', label: 'Bedrock API key', protocol: 'bedrock-converse', baseUrl: '',
+    model: 'us.anthropic.claude-model', authMode: 'bearer', secret: { value: 'bedrock-secret' }, headers: {}, credentialCommand: null, credentialCommandHint: null,
+    region: 'us-west-2', awsProfile: '', command: '', source: 'saved',
+  };
+  const requests: Array<{ url: string; init: RequestInit }> = [];
+  const provider = new BedrockProvider(profile, async (input, init) => {
+    requests.push({ url: String(input), init: init ?? {} });
+    return Response.json({ output: { message: { content: [{ text: 'done' }] } } });
+  }, allowEndpoint);
+  const result = await provider.complete({ system: 'system', messages: [{ role: 'user', content: 'hello' }] });
+  const request = requests[0];
+  assert.ok(request);
+  assert.equal(request.url, 'https://bedrock-runtime.us-west-2.amazonaws.com/model/us.anthropic.claude-model/converse');
+  assert.equal((request.init.headers as Record<string, string>).Authorization, 'Bearer bedrock-secret');
+  assert.equal(request.init.redirect, 'error');
+  assert.equal(JSON.parse(String(request.init.body)).messages[0].content[0].text, 'hello');
+  // Current Claude models reject sampling parameters such as temperature.
+  assert.deepEqual(JSON.parse(String(request.init.body)).inferenceConfig, { maxTokens: 4096 });
+  assert.equal(result.text, 'done');
+});
+
+test('Bedrock bearer profiles mint the token from a credential command', async () => {
+  clearCredentialCache();
+  const profile: StoredLlmProfile = {
+    id: 'bedrock-key', label: 'Bedrock API key', protocol: 'bedrock-converse', baseUrl: '',
+    model: 'us.anthropic.claude-model', authMode: 'bearer', secret: null, headers: {},
+    region: 'us-west-2', awsProfile: '', command: '', credentialCommand: { value: `node -e "process.stdout.write('MINTED-TOKEN')"` }, credentialCommandHint: 'node ...', source: 'saved',
+  };
+  const requests: Array<{ init: RequestInit }> = [];
+  const provider = new BedrockProvider(profile, async (_input, init) => {
+    requests.push({ init: init ?? {} });
+    return Response.json({ output: { message: { content: [{ text: 'done' }] } } });
+  }, allowEndpoint);
+  assert.equal((await provider.getHealth()).configured, true);
+  const result = await provider.complete({ messages: [{ role: 'user', content: 'hello' }] });
+  assert.equal(result.text, 'done');
+  assert.equal((requests[0]?.init.headers as Record<string, string>).Authorization, 'Bearer MINTED-TOKEN');
+});
+
+test('Bedrock bearer timeout failures are classified as provider timeouts', async () => {
+  const profile: StoredLlmProfile = {
+    id: 'bedrock-key', label: 'Bedrock API key', protocol: 'bedrock-converse', baseUrl: '',
+    model: 'us.anthropic.claude-model', authMode: 'bearer', secret: { value: 'bedrock-secret' }, headers: {}, credentialCommand: null, credentialCommandHint: null,
+    region: 'us-west-2', awsProfile: '', command: '', source: 'saved',
+  };
+  const provider = new BedrockProvider(profile, async () => {
+    throw new DOMException('Timed out', 'TimeoutError');
+  }, allowEndpoint);
+  await assert.rejects(
+    () => provider.complete({ messages: [{ role: 'user', content: 'hello' }] }),
+    (error: any) => error?.code === 'provider_timeout' && error?.retryable === true,
+  );
+});
+
+test('Bedrock SDK errors use AWS names and status metadata for classification', () => {
+  assert.equal(classifyBedrockError({ name: 'AccessDeniedException', $metadata: { httpStatusCode: 403 } }).code, 'provider_authentication');
+  assert.equal(classifyBedrockError({ name: 'ThrottlingException', $metadata: { httpStatusCode: 429 } }).code, 'provider_quota');
+  assert.equal(classifyBedrockError({ name: 'ServiceUnavailableException', $metadata: { httpStatusCode: 503 } }).code, 'provider_unavailable');
+});
+
+test('Bedrock bearer failures surface the gateway explanation and truncation', async () => {
+  const profile: StoredLlmProfile = {
+    id: 'gateway', label: 'Gateway', protocol: 'bedrock-converse', baseUrl: 'https://gateway.example.test/bedrock',
+    model: 'claude-model', authMode: 'bearer', secret: { value: 'gateway-secret' }, headers: {}, credentialCommand: null, credentialCommandHint: null,
+    region: 'us-east-2', awsProfile: '', command: '', source: 'saved',
+  };
+  const rejecting = new BedrockProvider(profile, async () => Response.json(
+    { detail: { error: JSON.stringify({ message: 'The model returned the following errors: `temperature` is deprecated for this model.' }) } },
+    { status: 400 },
+  ), allowEndpoint);
+  await assert.rejects(() => rejecting.complete({ messages: [{ role: 'user', content: 'hello' }] }), (error: unknown) =>
+    error instanceof LlmProviderError && error.message === 'Amazon Bedrock request failed with HTTP 400: The model returned the following errors: `temperature` is deprecated for this model.');
+  const truncating = new BedrockProvider(profile, async () => Response.json({ output: { message: { content: [{ text: '{"ops":[' }] } }, stopReason: 'max_tokens' }), allowEndpoint);
+  assert.equal((await truncating.complete({ messages: [{ role: 'user', content: 'hello' }] })).truncated, true);
+});
