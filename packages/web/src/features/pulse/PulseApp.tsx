@@ -21,6 +21,7 @@ import { ExistingMetrics } from "./components/ExistingMetrics";
 import { useNotices } from "./shell/notifications";
 import { UpdateNotice } from "./shell/UpdateNotice";
 import { Modal } from "./components/ui";
+import { sessionOwnerKey, type SessionOwner } from "./shell/session-events";
 import "./pulse-remediation.css";
 import "./workflows.css";
 import "./registry/variants.css";
@@ -67,18 +68,23 @@ export default function PulseApp() {
     () => !window.matchMedia("(max-width: 820px)").matches,
   );
   const [backendError, setBackendError] = useState<string | null>(null);
-  const { session, checked, error, connecting, init, disconnect } = useConnection();
+  const { session, checked, error, reachable, connecting, init, disconnect } = useConnection();
   const closeStatus = useAuthor((state) => state.closeStatus);
   const closing = closeStatus !== "open";
   const [closeError, setCloseError] = useState<string | null>(null);
   const [reviewDiscard, setReviewDiscard] = useState(false);
   const entry = useAuthor(activeEditor);
   const notice = useNotices((state) => state.notice);
+  const registryContextKey = JSON.stringify([entry?.record.context.connectionId, entry?.record.context.serverUrl,
+    entry?.record.context.siteId, entry?.record.context.datasourceLuid, sessionOwnerKey(session)]);
   useEffect(() => {
     const context = entry && contextMatches(entry.record.context, session) ? entry.record.context : null;
-    useRegistry.getState().setContext(context, entry?.record.datasourceName);
-    if (context) void useRegistry.getState().ensureLoaded();
-  }, [entry?.record.context, entry?.record.datasourceName, session]);
+    void useRegistry.getState().activateContext(context, entry?.record.datasourceName, session);
+  }, [registryContextKey]);
+  useEffect(() => {
+    const state = useRegistry.getState();
+    state.setContext(state.context, entry?.record.datasourceName, state.owner);
+  }, [entry?.record.datasourceName]);
   const initialized = useRef(false);
   const previousSession = useRef(Boolean(session));
   useEffect(() => {
@@ -111,12 +117,17 @@ export default function PulseApp() {
       setArea(session ? "Author" : "Connections");
     } else if (session && !previousSession.current) setArea("Author");
     previousSession.current = Boolean(session);
-    if (session) void useAuthor.getState().refreshCatalog();
-  }, [session, checked]);
+    if (session && reachable) void useAuthor.getState().refreshCatalog();
+  }, [sessionOwnerKey(session), checked, reachable]);
   useEffect(() => {
+    let available = true;
+    const updateAdmission = () => useRegistry.getState().setMutationAvailable(available && useAuthor.getState().closeStatus === "open");
+    const unsubscribeAuthor = useAuthor.subscribe(updateAdmission);
+    updateAdmission();
     const unsubscribeDesktop = subscribeDesktopLifecycle({
-      onUnavailable: setBackendError,
+      onUnavailable: (message) => { available = false; updateAdmission(); setBackendError(message); },
       prepareClose: () => {
+        useRegistry.getState().setMutationAvailable(false);
         setCloseError(null);
         setReviewDiscard(false);
         return useAuthor.getState().prepareClose();
@@ -130,11 +141,15 @@ export default function PulseApp() {
         setCloseError(`The app stayed open because changes could not be saved. ${error instanceof Error ? error.message : String(error)}`);
       },
     });
-    const expired = () => useConnection.getState().expireSession();
+    const expired = (event: Event) => {
+      const owner = (event as CustomEvent<SessionOwner | null>).detail;
+      if (owner) useConnection.getState().expireSession(owner);
+    };
     window.addEventListener("pulse-session-expired", expired);
     return () => {
       window.removeEventListener("pulse-session-expired", expired);
       unsubscribeDesktop();
+      unsubscribeAuthor();
     };
   }, []);
   useEffect(() => {

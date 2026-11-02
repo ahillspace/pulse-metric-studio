@@ -6,7 +6,7 @@ import type {
   PulseVariantSummary,
 } from "@pulse-metric-studio/shared";
 import { createRegistryController } from "./controller";
-import { deferred, draft, inventory } from "../testing/fixtures";
+import { deferred, draft, inventory, session } from "../testing/fixtures";
 import { unavailableFollowState } from "../follow-state";
 import type { RegistryApi } from "../api/registry";
 import { PulseApiError, type PulseApi } from "../api/client";
@@ -116,6 +116,8 @@ test("explicit refresh replaces inventory while earlier follower enrichment is p
   await enriching.promise;
   assert.equal(store.getState().loading, false);
   assert.equal(store.getState().followLoading, true);
+  const navigationWhileEnriching = store.getState().ensureLoaded();
+  assert.equal(store.getState().loading, false, "joining pending follow enrichment keeps manual Refresh available");
   try {
     const refreshing = store.getState().invalidate(context);
     const navigation = store.getState().ensureLoaded();
@@ -137,6 +139,7 @@ test("explicit refresh replaces inventory while earlier follower enrichment is p
   } finally {
     oldFollowers.resolve(freshFollowers);
     await initial;
+    await navigationWhileEnriching;
   }
 });
 
@@ -222,7 +225,7 @@ test("selection-scoped follower refresh batches exact IDs and preserves inventor
       userFollowerIdsByMetricId: Object.fromEntries(ids.map(id => [id, ["subscriber"]])) };
   } });
   store.getState().setContext(draft().context);
-  const before = store.getState().followState;
+  const before = store.getState().inventory;
   const ids = Array.from({length: 405}, (_, index) => `m${index}`);
   const result = await store.getState().refreshFollowState([...ids, "m0"]);
   assert.deepEqual(requests.flat(), ids);
@@ -230,7 +233,8 @@ test("selection-scoped follower refresh batches exact IDs and preserves inventor
   assert.deepEqual(result?.userFollowerIdsByMetricId?.m404, ["subscriber"]);
   assert.equal(result?.availabilityByMetricId?.m200.status, "unavailable");
   assert.equal(result?.userFollowerIdsByMetricId?.m200, undefined);
-  assert.equal(store.getState().followState, before);
+  assert.equal(store.getState().inventory, before);
+  assert.deepEqual(store.getState().followState?.userFollowerIdsByMetricId?.m404, ["subscriber"]);
 });
 
 test("follower refresh discards identities after the datasource context changes", async () => {
@@ -833,7 +837,7 @@ test("author preload and manager navigation share one request and fresh snapshot
   assert.equal(calls, 2);
 });
 
-test("follow and unfollow invalidate their original datasource after navigation, including lost responses", async () => {
+test("follow and unfollow reconcile only their original affected metrics after navigation, including lost responses", async () => {
   for (const kind of ["follow", "unfollow"] as const) {
     for (const lost of [false, true]) {
       const response = deferred<Awaited<ReturnType<RegistryApi["follow"]>>>();
@@ -853,10 +857,10 @@ test("follow and unfollow invalidate their original datasource after navigation,
       assert.equal(store.getState().inventory?.definitions[0].name, "b");
       assert.equal(store.getState().results, null);
       store.getState().setContext(draft("a").context);
-      assert.equal(store.getState().inventory, null);
+      assert.equal(store.getState().inventory?.definitions[0].name, "a");
       assert.equal(store.getState().results?.kind, kind);
       await store.getState().ensureLoaded();
-      assert.deepEqual(reads, ["a", "b", "a"]);
+      assert.deepEqual(reads, ["a", "b"]);
     }
   }
 });
@@ -933,4 +937,162 @@ test("incomplete inventory offers an explicit by-ID deletion review", async () =
   assert.deepEqual(previews, [false, true]);
   assert.deepEqual(executed, [true]);
   assert.equal(store.getState().results?.items[0].status, "removed");
+});
+
+
+test("unchanged autosave contexts never refresh inventory across TTL expiry", async (t) => {
+  let now = 1000;
+  t.mock.method(Date, "now", () => now);
+  let reads = 0;
+  const store = fixture({ inventory: async () => { reads++; return inventory(); } });
+  const context = draft().context;
+  await store.getState().activateContext(context, "Source", session);
+  for (let index = 0; index < 4; index++) {
+    now += 90_000;
+    await store.getState().activateContext(structuredClone(context), "Updated source", { ...session });
+  }
+  assert.equal(reads, 1);
+  await store.getState().activateContext(draft("b").context, "B", session);
+  assert.equal(reads, 2);
+});
+
+test("returning A-B-A shares the pending A operation and failures permit retry", async () => {
+  const a = deferred<PulseInventoryResponse>();
+  const reads: string[] = [];
+  const store = fixture({ inventory: async (context) => {
+    reads.push(context.datasourceLuid);
+    return context.datasourceLuid === "a" ? a.promise : inventory("b");
+  } });
+  const first = store.getState().activateContext(draft("a").context, "A", session);
+  await store.getState().activateContext(draft("b").context, "B", session);
+  const returned = store.getState().activateContext(draft("a").context, "A", session);
+  assert.deepEqual(reads, ["a", "b"]);
+  a.resolve(inventory("a"));
+  await Promise.all([first, returned]);
+  assert.equal(store.getState().inventory?.snapshotId, "snapshot-a");
+  let attempts = 0;
+  const retry = fixture({ inventory: async () => { if (++attempts === 1) throw new Error("temporary"); return inventory(); } });
+  retry.getState().setContext(draft().context, "A", session);
+  await retry.getState().ensureLoaded();
+  await retry.getState().ensureLoaded();
+  assert.equal(attempts, 2);
+  assert.equal(retry.getState().error, null);
+});
+
+test("a replacement principal or session cannot reuse inventory, reviews, or pending reads", async () => {
+  let reads = 0;
+  const store = fixture({ inventory: async () => { reads++; return inventory(); } });
+  const context = draft().context;
+  await store.getState().activateContext(context, "A", session);
+  await store.getState().previewDelete(["metric"], []);
+  assert.ok(store.getState().deletePlan);
+  for (const owner of [{ ...session, sessionGeneration: 2 }, { ...session, sessionGeneration: 2, userId: "other" }]) {
+    store.getState().setContext(context, "A", owner);
+    assert.equal(store.getState().inventory, null);
+    assert.equal(store.getState().deletePlan, null);
+    await store.getState().ensureLoaded();
+  }
+  assert.equal(reads, 3);
+});
+
+test("close and unavailable admission blocks mutations and cancellation restores them", async () => {
+  let forks = 0;
+  let follows = 0;
+  const store = fixture({
+    fork: async () => { forks++; return { attempted: 0, created: 0, existing: 0, failed: 0, pendingVisibility: 0, results: [] }; },
+    follow: async () => { follows++; return { results: [] }; },
+  });
+  store.getState().setContext(draft().context, "A", session);
+  store.getState().setMutationAvailable(false);
+  await store.getState().fork({ version: 1, sourceMetricIds: ["metric"], timeframe: { key: "mtd" } } as any, new Map());
+  await store.getState().follow("follow", [{ metricId: "metric", target: { kind: "USER", id: "user" } }], [], []);
+  assert.deepEqual({ forks, follows }, { forks: 0, follows: 0 });
+  store.getState().setMutationAvailable(true);
+  await store.getState().fork({ version: 1, sourceMetricIds: ["metric"], timeframe: { key: "mtd" } } as any, new Map());
+  assert.equal(forks, 1);
+});
+
+test("initial counts defer identities and following one of 405 metrics refreshes only it", async () => {
+  let inventories = 0;
+  const requests: Array<{ ids: string[]; detail: boolean }> = [];
+  const source = inventory();
+  const template = source.definitions[0].metrics[0];
+  source.definitions[0].metrics = Array.from({ length: 405 }, (_, index) => ({ ...template, metricId: `m${index}` }));
+  const store = fixture({
+    inventory: async () => { inventories++; return source; },
+    followState: async (ids, detail = true) => {
+      requests.push({ ids, detail });
+      return {
+        ...unavailableFollowState(ids, "test"),
+        selectedGroupId: null,
+        groupContextUnavailable: false,
+        groupFollowerIdsByMetricId: {},
+        followerCountsByMetricId: Object.fromEntries(ids.map((id) => [id, detail ? 2 : 1])),
+        userFollowerIdsByMetricId: detail ? Object.fromEntries(ids.map((id) => [id, ["person"]])) : {},
+        availabilityByMetricId: Object.fromEntries(ids.map((id) => [id, { status: detail ? "available" : "partial", relationshipStatus: detail ? "available" : "not_requested", followerIdsStatus: detail ? "available" : "not_requested", followerCountStatus: "available", diagnostics: [] }])),
+      };
+    },
+    follow: async () => ({ results: [{ metricId: "m200", targetKind: "USER", targetId: "person", status: "followed", ok: true }] }),
+  });
+  await store.getState().activateContext(draft().context, "A", session);
+  assert.equal(requests.length, 3);
+  assert.ok(requests.every((request) => !request.detail));
+  requests.length = 0;
+  await store.getState().follow("follow", [{ metricId: "m200", target: { kind: "USER", id: "person" } }], [], []);
+  assert.equal(inventories, 1);
+  assert.deepEqual(requests, [{ ids: ["m200"], detail: true }]);
+  assert.equal(store.getState().followState?.followerCountsByMetricId.m199, 1);
+  assert.equal(store.getState().followState?.followerCountsByMetricId.m200, 2);
+  requests.length = 0;
+  await store.getState().ensureFollowState(["m200", "m201"]);
+  await store.getState().ensureFollowState(["m200", "m201"]);
+  assert.deepEqual(requests, [{ ids: ["m201"], detail: true }]);
+});
+
+test("follow directory shares mounts but explicit refresh and new session reload", async () => {
+  let reads = 0;
+  const store = fixture({ followTargets: async () => { reads++; return { targets: [], errors: [] }; } });
+  store.getState().setContext(draft().context, "A", session);
+  await Promise.all([store.getState().loadTargets(), store.getState().loadTargets()]);
+  await store.getState().loadTargets();
+  assert.equal(reads, 1);
+  await store.getState().loadTargets(true);
+  assert.equal(reads, 2);
+  store.getState().setContext(draft().context, "A", { ...session, sessionGeneration: 2 });
+  await store.getState().loadTargets();
+  assert.equal(reads, 3);
+});
+
+test("a slow initial count response cannot erase newer targeted mutation reconciliation", async () => {
+  const oldCounts = deferred<Awaited<ReturnType<RegistryApi["followState"]>>>();
+  const countStarted = deferred<void>();
+  const fresh = { ...unavailableFollowState(["metric"], "fresh"), selectedGroupId: null, groupContextUnavailable: false,
+    userFollowerIdsByMetricId: { metric: ["person"] }, groupFollowerIdsByMetricId: {},
+    followerCountsByMetricId: { metric: 2 }, availabilityByMetricId: { metric: { status: "available" as const, relationshipStatus: "available" as const, followerCountStatus: "available" as const, diagnostics: [] } } };
+  const store = fixture({
+    followState: async (_ids, detail) => { if (!detail) { countStarted.resolve(); return oldCounts.promise; } return fresh; },
+    follow: async () => ({ results: [{ metricId: "metric", targetKind: "USER", targetId: "person", status: "followed", ok: true }] }),
+  });
+  const initial = store.getState().activateContext(draft().context, "A", session);
+  await countStarted.promise;
+  await store.getState().follow("follow", [{ metricId: "metric", target: { kind: "USER", id: "person" } }], [], []);
+  oldCounts.resolve({ ...fresh, followerCountsByMetricId: { metric: 1 }, userFollowerIdsByMetricId: {}, availabilityByMetricId: { metric: { status: "partial", relationshipStatus: "not_requested", followerCountStatus: "available", diagnostics: [] } } });
+  await initial;
+  assert.equal(store.getState().followState?.followerCountsByMetricId.metric, 2);
+  assert.deepEqual(store.getState().followState?.userFollowerIdsByMetricId?.metric, ["person"]);
+});
+
+test("unavailable initial counts do not prevent an explicit row identity read", async () => {
+  const details: string[][] = [];
+  const store = fixture({ followState: async (ids, detail) => {
+    if (!detail) throw new Error("count service unavailable");
+    details.push(ids);
+    return { ...unavailableFollowState(ids, "counts unavailable"), selectedGroupId: null, groupContextUnavailable: false,
+      userFollowerIdsByMetricId: { metric: ["person"] }, groupFollowerIdsByMetricId: {}, availabilityByMetricId: {} };
+  } });
+  await store.getState().activateContext(draft().context, "A", session);
+  assert.equal(store.getState().followState?.availabilityByMetricId?.metric.relationshipStatus, "not_requested");
+  await store.getState().ensureFollowState(["metric"]);
+  assert.deepEqual(details, [["metric"]]);
+  assert.deepEqual(store.getState().followState?.userFollowerIdsByMetricId?.metric, ["person"]);
 });

@@ -7,6 +7,7 @@ import type {
 } from "@pulse-metric-studio/shared";
 import { pulseApi, type PulseApi } from "../api/client";
 import { errorMessage } from "../shell/notifications";
+import { captureSessionOwner, type SessionOwner } from "../shell/session-events";
 
 interface ActivityState {
   receipts: PulsePublishReceiptSummary[];
@@ -35,7 +36,7 @@ interface ActivityState {
 export function createActivityController(
   transport: Pick<PulseApi, "listReceipts" | "readReceipt" | "undo"> = pulseApi,
   deleteGroup: PulseApi["deletePublicationGroup"] = pulseApi.deletePublicationGroup,
-  onInventoryChanged: (context: PulseDraftContext | null) => void = () => {},
+  onInventoryChanged: (context: PulseDraftContext | null, owner: SessionOwner | null) => void = () => {},
 ) {
   let listRequest = 0;
   let selectionRequest = 0;
@@ -118,6 +119,7 @@ export function createActivityController(
     async deleteGroup(id, groupId) {
       if (get().undoBusy || get().groupBusy) return;
       const context = get().receiptById[id]?.context ?? null;
+      const owner = captureSessionOwner();
       const request = ++selectionRequest;
       set({ groupBusy: true, groupError: null, groupReceiptId: id });
       try {
@@ -127,7 +129,7 @@ export function createActivityController(
       } catch (error) {
         set({ groupError: errorMessage(error) });
       } finally {
-        if (context) onInventoryChanged(context);
+        if (context) onInventoryChanged(context, owner);
         set({ groupBusy: false });
       }
     },
@@ -135,6 +137,7 @@ export function createActivityController(
       if (get().undoBusy || get().groupBusy) return;
       selectionRequest += 1;
       const request = selectionRequest;
+      const owner = captureSessionOwner();
       set({ undoBusy: true, error: null, undoError: null, undoReceiptId: id });
       try {
         const receipt = await transport.undo(id);
@@ -144,12 +147,12 @@ export function createActivityController(
         set({ error: errorMessage(error), undoError: errorMessage(error) });
       } finally {
         const context = get().receiptById[id]?.context;
-        if (context) onInventoryChanged(context);
+        if (context) onInventoryChanged(context, owner);
         set({ undoBusy: false });
       }
     },
   }));
 }
-export const useActivity = createActivityController(pulseApi, pulseApi.deletePublicationGroup, (context) => {
-  void useRegistry.getState().invalidate(context);
+export const useActivity = createActivityController(pulseApi, pulseApi.deletePublicationGroup, (context, owner) => {
+  void useRegistry.getState().invalidate(context, owner);
 });

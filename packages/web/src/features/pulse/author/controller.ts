@@ -24,6 +24,7 @@ import {
 } from "../connections/controller";
 import { errorMessage } from "../shell/notifications";
 import { useActivity } from "../activity/controller";
+import type { SessionOwner } from "../shell/session-events";
 
 export interface DraftEditor {
   record: PulseDraftRecord;
@@ -169,7 +170,7 @@ export function createAuthorController(
     useConnection.getState().session,
   onReceipt: (receipt: PulsePublishReceipt) => void = () => {},
   debounceMs = 600,
-  onInventoryChanged: (context: PulseDraftContext) => void = () => {},
+  onInventoryChanged: (context: PulseDraftContext, owner: SessionOwner | null) => void = () => {},
 ) {
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
   const writers = new Map<string, Promise<PulseDraftRecord>>();
@@ -762,6 +763,7 @@ export function createAuthorController(
           publishCommandId: commandId,
         });
         let sent = false;
+        const owner = session();
         try {
           if (!entry.publishCommandId) requireRemote(entry);
           sent = true;
@@ -785,7 +787,7 @@ export function createAuthorController(
           });
         } finally {
           update(id, { publishBusy: false });
-          if (sent) onInventoryChanged(entry.preview.context);
+          if (sent) onInventoryChanged(entry.preview.context, owner);
         }
       },
       closeReceipt() {
@@ -843,5 +845,5 @@ export const useAuthor = createAuthorController(
     useActivity.getState().received(receipt);
   },
   600,
-  (context) => { void useRegistry.getState().invalidate(context); },
+  (context, owner) => { void useRegistry.getState().invalidate(context, owner); },
 );

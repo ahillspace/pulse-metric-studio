@@ -9,40 +9,42 @@ import {
   type PulseFollowOperation,
   type PulseVariantRequestV1,
 } from "@pulse-metric-studio/shared";
-import { notifySessionExpired } from "../shell/session-events";
+import { captureSessionOwner, notifySessionExpired, ownedPulseUrl, type SessionOwner } from "../shell/session-events";
 import { desktopFetch } from "../../../desktop-transport";
 import { extractErrorMessage } from "../../../api/client";
 import { PulseApiError, pulseRequest } from "./client";
 
 export const registryApi = {
-  inventory: async (context: PulseDraftContext) =>
+  inventory: async (context: PulseDraftContext, owner = captureSessionOwner()) =>
     PulseInventoryResponseSchema.parse(
       await pulseRequest(
-        `/api/pulse/existing-metrics?datasourceLuid=${encodeURIComponent(context.datasourceLuid)}`,
+        ownedPulseUrl(`/api/pulse/existing-metrics?datasourceLuid=${encodeURIComponent(context.datasourceLuid)}`, owner),
       ),
     ),
-  followState: async (metricIds: string[]) =>
+  followState: async (metricIds: string[], detail = true, owner = captureSessionOwner()) =>
     PulseFollowStateSchema.parse(
-      await pulseRequest("/api/pulse/follow-state", "POST", { metricIds }),
+      await pulseRequest(ownedPulseUrl("/api/pulse/follow-state", owner), "POST", { metricIds, detail }),
     ),
-  followTargets: async () =>
+  followTargets: async (owner = captureSessionOwner()) =>
     PulseFollowTargetsSchema.parse(
-      await pulseRequest("/api/pulse/follow-targets"),
+      await pulseRequest(ownedPulseUrl("/api/pulse/follow-targets", owner)),
     ),
-  followers: async (metricIds: string[]) =>
+  followers: async (metricIds: string[], owner = captureSessionOwner()) =>
     PulseFollowersDetailsSchema.parse(
-      await pulseRequest("/api/pulse/followers-detail", "POST", { metricIds }),
+      await pulseRequest(ownedPulseUrl("/api/pulse/followers-detail", owner), "POST", { metricIds }),
     ),
   follow: async (
     context: PulseDraftContext,
     operations: PulseFollowOperation[],
-  ) => subscriptionRequest("/api/pulse/follow", context, operations),
+    owner = captureSessionOwner(),
+  ) => subscriptionRequest("/api/pulse/follow", context, operations, owner),
   unfollow: async (
     context: PulseDraftContext,
     operations: PulseFollowOperation[],
-  ) => subscriptionRequest("/api/pulse/unfollow", context, operations),
-  fork: async (context: PulseDraftContext, request: PulseVariantRequestV1) => {
-    const response = await desktopFetch("/api/pulse/metrics/fork", {
+    owner = captureSessionOwner(),
+  ) => subscriptionRequest("/api/pulse/unfollow", context, operations, owner),
+  fork: async (context: PulseDraftContext, request: PulseVariantRequestV1, owner = captureSessionOwner()) => {
+    const response = await desktopFetch(ownedPulseUrl("/api/pulse/metrics/fork", owner), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...request, context }),
@@ -50,6 +52,7 @@ export const registryApi = {
     return decodeVariantResponse(
       response,
       await response.json().catch(() => null),
+      owner,
     );
   },
 };
@@ -60,8 +63,9 @@ async function subscriptionRequest(
   path: string,
   context: PulseDraftContext,
   operations: PulseFollowOperation[],
+  owner: SessionOwner | null,
 ) {
-  const response = await desktopFetch(path, {
+  const response = await desktopFetch(ownedPulseUrl(path, owner), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ context, operations }),
@@ -69,7 +73,7 @@ async function subscriptionRequest(
   const data = await response.json().catch(() => null);
   const parsed = PulseFollowResultsSchema.safeParse(data);
   if (response.status === 401 || (parsed.success && parsed.data.terminated))
-    notifySessionExpired();
+    notifySessionExpired(owner);
   if (parsed.success) return parsed.data;
   if (!response.ok)
     throw new PulseApiError(
@@ -84,10 +88,11 @@ async function subscriptionRequest(
 export function decodeVariantResponse(
   response: { ok: boolean; status: number },
   data: unknown,
+  owner: SessionOwner | null = null,
 ) {
   const parsed = PulseVariantSummarySchema.safeParse(data);
   if (response.status === 401 || (parsed.success && parsed.data.terminated))
-    notifySessionExpired();
+    notifySessionExpired(owner);
   if (parsed.success)
     return {
       ...parsed.data,

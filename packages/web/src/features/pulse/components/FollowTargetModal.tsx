@@ -80,12 +80,12 @@ export function FollowTargetModal({
   // explicit "Refresh targets" reload and StrictMode's double-invoke. The
   // current user is KEPT in the inventory (not filtered out) so their real
   // username shows and stays searchable; the decoration happens at render.
-  const loadTargets = async () => {
+  const loadTargets = async (refresh = false) => {
     const seq = ++requestSeq.current;
     setLoading(true);
     setError(null);
     try {
-      const response = await useRegistry.getState().loadTargets();
+      const response = await useRegistry.getState().loadTargets(refresh);
       if (seq !== requestSeq.current) return;
       const next: FollowTarget[] = response.targets.map((target) => ({
         id: target.id,
@@ -344,7 +344,7 @@ export function FollowTargetModal({
             className="btn small"
             type="button"
             disabled={Boolean(busy) || addingExisting}
-            onClick={() => void loadTargets()}
+            onClick={() => void loadTargets(true)}
           >
             Refresh targets
           </button>

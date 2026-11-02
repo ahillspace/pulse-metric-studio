@@ -1,5 +1,21 @@
 import type { FollowState } from './registry/view-types';
 
+/** A failed targeted replacement must not leave old identities looking current. */
+export function replaceFollowMetrics(previous: FollowState | null, replacement: FollowState, metricIds: string[]): FollowState {
+  if (!previous) return replacement;
+  const retained = structuredClone(previous);
+  for (const id of metricIds) {
+    delete retained.userFollowsByMetricId[id];
+    delete retained.groupFollowsByMetricId[id];
+    if (retained.groupFollowerIdsByMetricId) delete retained.groupFollowerIdsByMetricId[id];
+    if (retained.userFollowerIdsByMetricId) delete retained.userFollowerIdsByMetricId[id];
+    delete retained.followerCountsByMetricId[id];
+    delete retained.availabilityByMetricId?.[id];
+  }
+  retained.errors = retained.errors.filter((error) => !metricIds.some((id) => error.startsWith(`${id}:`)));
+  return mergeFollowStates([retained, replacement]);
+}
+
 export function mergeFollowStates(states: FollowState[]): FollowState {
   return states.reduce<FollowState>((merged, state) => ({
     userFollowsByMetricId: { ...merged.userFollowsByMetricId, ...state.userFollowsByMetricId },
@@ -45,6 +61,8 @@ export function followStateLabel(followState: FollowState | null, metricId: stri
       ? 'You follow'
       : groupFollows
         ? 'Group follows'
+        : relationshipStatus === 'not_requested'
+          ? 'Follow details not loaded'
         : relationshipStatus === 'unavailable'
           ? 'Follow state unavailable'
           : relationshipStatus === 'partial'
