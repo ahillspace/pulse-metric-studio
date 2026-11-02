@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import type { TableauSession } from './rest-client.js';
 import { getFieldCatalog, getLoadedFieldCatalog, invalidateFieldsCache } from './vds-fields.js';
+import { clearSession, setSession } from './session.js';
 
 const datasourceLuid = '11111111-1111-1111-1111-111111111111';
 const originalFetch = globalThis.fetch;
@@ -9,6 +10,7 @@ const originalFetch = globalThis.fetch;
 afterEach(() => {
   globalThis.fetch = originalFetch;
   invalidateFieldsCache();
+  clearSession();
 });
 
 function session(serverUrl: string, siteId: string, userId: string, token: string): TableauSession {
@@ -64,10 +66,13 @@ test('field catalog cache isolates server, site, and user while excluding creden
   ]);
 
   const refreshedCredential = { ...sessions[0], token: 'replacement-secret' };
-  const cached = await getFieldCatalog(refreshedCredential, datasourceLuid);
-  assert.equal(cached.source, 'cache');
+  const cached = await getFieldCatalog(sessions[0]!, datasourceLuid);
+  assert.equal(cached.source, 'vds');
   assert.equal(cached.timeDimensions[0]?.id, 'date_token-a');
   assert.equal(requestCount, 8);
+  const replacement = await getFieldCatalog(refreshedCredential, datasourceLuid);
+  assert.equal(replacement.timeDimensions[0]?.id, 'date_replacement-secret');
+  assert.equal(requestCount, 10);
 
   globalThis.fetch = async () => { throw new Error('Metadata network unavailable'); };
   assert.equal(getLoadedFieldCatalog(sessions[0]!, datasourceLuid)?.timeDimensions[0]?.id, 'date_token-a');
@@ -290,4 +295,44 @@ test('datasource invalidation clears every session boundary for that datasource'
   await getFieldCatalog(first, datasourceLuid);
   await getFieldCatalog(second, datasourceLuid);
   assert.equal(requestCount, 8);
+});
+
+test('catalog requests share in flight, preserve provenance, and refresh on session activation', async () => {
+  const owner = session('https://catalog.example.test', 'site', 'user', 'token');
+  setSession(owner, { connectionId: 'connection', patSecret: '' });
+  let metadata = 0;
+  let exact = 0;
+  globalThis.fetch = async (input, init) => {
+    if (init?.method === 'GET') {
+      exact++;
+      assert.ok(String(input).endsWith(`/datasources/${datasourceLuid}`));
+      return Response.json({ datasource: { id: datasourceLuid, name: 'Orders' } });
+    }
+    metadata++;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    return Response.json({ data: [{ fieldName: 'date', dataType: 'DATE', fieldRole: 'DIMENSION' }] });
+  };
+  const [first, shared] = await Promise.all([getFieldCatalog(owner, datasourceLuid), getFieldCatalog(owner, datasourceLuid)]);
+  assert.equal(first.source, 'vds');
+  assert.equal(shared.datasourceName, 'Orders');
+  assert.equal((await getFieldCatalog(owner, datasourceLuid)).source, 'vds');
+  assert.equal(metadata, 1);
+  assert.equal(exact, 1);
+  setSession(owner, { connectionId: 'connection', patSecret: '' });
+  assert.equal(getLoadedFieldCatalog(owner, datasourceLuid), undefined);
+  await getFieldCatalog(owner, datasourceLuid, 'Known name');
+  assert.equal(metadata, 2);
+  assert.equal(exact, 1);
+});
+
+test('execution refresh invalidates only the requested session catalog', async () => {
+  const first = session('https://one.example.test', 'site', 'user', 'first');
+  const second = session('https://two.example.test', 'site', 'user', 'second');
+  let reads = 0;
+  globalThis.fetch = async () => { reads++; return Response.json({ data: [{ fieldName: 'date', dataType: 'DATE', fieldRole: 'DIMENSION' }] }); };
+  await getFieldCatalog(first, datasourceLuid, 'Orders');
+  await getFieldCatalog(second, datasourceLuid, 'Orders');
+  await getFieldCatalog(first, datasourceLuid, 'Orders', { refresh: true });
+  await getFieldCatalog(second, datasourceLuid, 'Orders');
+  assert.equal(reads, 3);
 });

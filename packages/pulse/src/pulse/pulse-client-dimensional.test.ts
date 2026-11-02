@@ -166,7 +166,7 @@ test('user subscription creation uses the same batchCreate endpoint and media ty
     const headers = new Headers(init?.headers as HeadersInit | undefined);
     contentType = headers.get('content-type');
     requestBody = JSON.parse(String(init?.body));
-    return Response.json({});
+    return Response.json({ subscriptions: [{ follower: { user_id: 'user-exact' } }] });
   };
   const result = await batchCreateUserSubscriptions(session, [{ metricId: 'metric-exact', userId: 'user-exact' }]);
   assert.equal(url, 'https://example.test/api/-/pulse/subscriptions:batchCreate');

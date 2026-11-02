@@ -1,4 +1,4 @@
-import { TableauError,type TableauSession } from '@pulse-metric-studio/core';
+import { clearSession, setSession, TableauError,type TableauSession } from '@pulse-metric-studio/core';
 import {
 DIMENSIONAL_FORK_LIMITS,
 DIMENSION_VALUE_FETCH_CEILING,
@@ -471,6 +471,39 @@ test('count query returns the distinct-member total for an eligible field', asyn
     () => service.countDimensionMembers(session, { sourceMetricIds: ['m1'], fieldId: 'Missing' }),
     /not eligible/,
   );
+});
+
+test('dimension fields, count and searches reuse one session/source context', async () => {
+  let catalogs = 0;
+  let metricReads = 0;
+  const base = dependencies();
+  const service = new PulseDimensionalForkService(dependencies({
+    getMetric: async (owner, id) => { metricReads++; return base.getMetric(owner, id); },
+    getCatalog: async (owner, id) => { catalogs++; return base.getCatalog(owner, id); },
+  }));
+  await service.listEligibleDimensions(session, ['m1', 'm2']);
+  await service.countDimensionMembers(session, { sourceMetricIds: ['m2', 'm1'], fieldId: 'Region' });
+  await service.listDimensionValues(session, { sourceMetricIds: ['m1', 'm2'], fieldId: 'Region' });
+  await service.listDimensionValues(session, { sourceMetricIds: ['m1', 'm2'], fieldId: 'Region', search: 'West' });
+  assert.equal(catalogs, 1);
+  assert.equal(metricReads, 2);
+});
+
+test('dimension context shares pending resolution and partitions source sets and session generations', async () => {
+  const owner = { ...session };
+  setSession(owner, { connectionId: 'dimension-context', patSecret: '' });
+  let catalogs = 0;
+  const base = dependencies();
+  const service = new PulseDimensionalForkService(dependencies({ getCatalog: async (active, id) => { catalogs++; await new Promise<void>((resolve) => setImmediate(resolve)); return base.getCatalog(active, id); } }));
+  try {
+    await Promise.all([service.listEligibleDimensions(owner, ['m1']), service.countDimensionMembers(owner, { sourceMetricIds: ['m1'], fieldId: 'Region' })]);
+    assert.equal(catalogs, 1);
+    await service.listEligibleDimensions(owner, ['m2']);
+    assert.equal(catalogs, 2);
+    setSession(owner, { connectionId: 'dimension-context', patSecret: '' });
+    await service.listEligibleDimensions(owner, ['m1']);
+    assert.equal(catalogs, 3);
+  } finally { clearSession(); }
 });
 
 test('fetch-all values return the full sorted, deduped, blank-free domain without a cursor', async () => {

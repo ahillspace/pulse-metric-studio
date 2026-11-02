@@ -27,6 +27,7 @@ import {
   defaultDependencies,
   type InventoryDependencies,
 } from './registry-dependencies.js';
+import { sessionCacheKey } from './session-cache-key.js';
 const PROVIDER_CONCURRENCY = 5;
 const DEFINITION_CACHE_TTL_MS = 15000;
 const MAX_DEFINITION_CACHE_ENTRIES = 8;
@@ -55,6 +56,7 @@ export async function getExistingMetrics(
       ? await cachedDefinitionInventory(session, dependencies)
       : await dependencies.listDefinitions(session);
   const failures: InventoryFailure[] = [];
+  let metricsTruncated = false;
   const matching: PulseDefinition[] = [];
   for (const [index, candidate] of inventory.definitions.entries()) {
     const inventoryId = `inventory-record-${index + 1}`;
@@ -111,11 +113,11 @@ export async function getExistingMetrics(
     async (definition) => {
       const definitionId = String(definition.metadata?.id ?? '').trim();
       if (!definitionId) return null;
-      let summaries: Awaited<
+      let listed: Awaited<
         ReturnType<InventoryDependencies['listMetrics']>
       >;
       try {
-        summaries = await dependencies.listMetrics(session, definitionId);
+        listed = await dependencies.listMetrics(session, definitionId);
       } catch (error) {
         if (error instanceof TableauError && error.kind === 'auth') throw error;
         failures.push({
@@ -124,6 +126,13 @@ export async function getExistingMetrics(
           diagnostic: boundedProviderDiagnostic(error),
         });
         return definitionNode(definition, definitionId, [], 'unavailable');
+      }
+
+      const summaries = Array.isArray(listed) ? listed : listed.metrics;
+      const incomplete = !Array.isArray(listed) && listed.truncated;
+      if (!Array.isArray(listed) && incomplete) {
+        metricsTruncated = true;
+        failures.push({ definitionId, stage: 'list_metrics', diagnostic: listed.diagnostic ?? { message: 'Pulse metric inventory is incomplete.' } });
       }
 
       const variants = await mapWithConcurrency(
@@ -149,8 +158,17 @@ export async function getExistingMetrics(
             return null;
           }
           let metric: PulseExactMetric;
+          const listedMetric = summary as PulseExactMetric;
+          const listedDefinitionId = metricDefinitionId(listedMetric);
+          const listedSiteId = listedMetric.site_id ?? listedMetric.site?.id;
+          if ((listedDefinitionId && listedDefinitionId !== definitionId) || (listedSiteId && listedSiteId !== session.siteId)) {
+            failures.push({ definitionId, metricId, stage: 'parse_metric', diagnostic: { message: 'Pulse metric inventory record does not match its definition and site.' } });
+            return null;
+          }
           try {
-            metric = await dependencies.getMetric(session, metricId);
+            metric = listedDefinitionId && metricSpecification(listedMetric) && typeof listedMetric.is_default === 'boolean'
+              ? listedMetric
+              : await dependencies.getMetric(session, metricId);
           } catch (error) {
             if (error instanceof TableauError && error.kind === 'auth')
               throw error;
@@ -170,6 +188,8 @@ export async function getExistingMetrics(
               );
             }
             const returnedDefinitionId = metricDefinitionId(metric);
+            const returnedSiteId = metric.site_id ?? metric.site?.id;
+            if (returnedSiteId && returnedSiteId !== session.siteId) throw new Error('Pulse metric belongs to a different site.');
             if (
               !returnedDefinitionId ||
               returnedDefinitionId !== definitionId
@@ -201,7 +221,7 @@ export async function getExistingMetrics(
         definition,
         definitionId,
         metrics,
-        summaries.length === metrics.length ? 'complete' : 'partial',
+        !incomplete && summaries.length === metrics.length ? 'complete' : 'partial',
       );
     },
   );
@@ -209,7 +229,7 @@ export async function getExistingMetrics(
   return {
     definitions: nodes.filter((node): node is DefinitionNode => node !== null),
     totalScanned: inventory.definitions.length,
-    truncated: inventory.truncated,
+    truncated: inventory.truncated || metricsTruncated,
     failures: failures.sort(compareInventoryFailures),
   };
 }
@@ -330,7 +350,7 @@ export function invalidatePulseDefinitionInventory(
 }
 
 function definitionCacheKey(session: TableauSession): string {
-  return `${session.serverUrl}\u0000${session.siteId}\u0000${session.userId}`;
+  return sessionCacheKey(session);
 }
 
 function pulseMetricId(metric: PulseExactMetric): string {

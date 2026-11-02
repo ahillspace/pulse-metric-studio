@@ -5,10 +5,10 @@ import {
   classifyStatus,
   DEFAULT_MAX_RESPONSE_BYTES,
   getJson,
-  isPastEndError,
   readBoundedBody,
   tableauFetch,
 } from "@pulse-metric-studio/core";
+import { listTableauGroups } from "./pulse-client.js";
 
 /**
  * Group ensure/lookup for the digest-follow flow.
@@ -39,8 +39,12 @@ export async function ensureGroup(
 
   // Pulse groups endpoint is authoritative when available
   try {
-    const data = await getJson<any>(session, "/api/-/groups");
-    const groups = (data?.groups ?? []) as any[];
+    const data = await getJson<unknown>(session, "/api/-/groups");
+    if (!data || typeof data !== 'object' || !('groups' in data) || !Array.isArray(data.groups))
+      throw new Error('Unsupported Pulse groups response shape.');
+    const groups = data.groups as Array<{ id?: unknown; name?: unknown }>;
+    if (groups.some((group) => !group || typeof group !== 'object' || typeof group.id !== 'string' || !group.id.trim() || typeof group.name !== 'string' || !group.name.trim()))
+      throw new Error('Unsupported Pulse groups record shape.');
     const match = groups.find(
       (g) =>
         typeof g?.name === "string" &&
@@ -57,39 +61,10 @@ export async function ensureGroup(
     // fall through to REST search
   }
 
-  // REST API fallback with paging
-  const pageSize = 1000;
-  let pageNumber = 1;
-  for (;;) {
-    let data: any;
-    try {
-      data = await getJson<any>(
-        session,
-        apiPath(
-          session,
-          `/sites/${encodeURIComponent(session.siteId)}/groups?pageSize=${pageSize}&pageNumber=${pageNumber}`,
-        ),
-      );
-    } catch (e) {
-      if (isPastEndError(e)) break;
-      throw e;
-    }
-    const groupsRaw = data?.groups?.group ?? data?.group;
-    const groups = Array.isArray(groupsRaw) ? (groupsRaw as any[]) : [];
-    const match = groups.find(
-      (g) =>
-        typeof g?.name === "string" &&
-        g.name.toLowerCase() === safeName.toLowerCase(),
-    );
-    if (match?.id)
-      return {
-        id: String(match.id),
-        name: String(match.name),
-        existedBefore: true,
-      };
-    if (groups.length < pageSize) break;
-    pageNumber++;
-  }
+  // A malformed directory is not evidence that the group is absent.
+  const groups = await listTableauGroups(session);
+  const match = groups.find((group) => group.name.toLowerCase() === safeName.toLowerCase());
+  if (match) return { ...match, existedBefore: true };
 
   // Create via tsRequest XML
   const resp = await tableauFetch(

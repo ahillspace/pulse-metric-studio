@@ -1,7 +1,6 @@
 import type { TableauSession } from '@pulse-metric-studio/core';
 import {
   getFieldCatalog,
-  invalidateFieldsCache,
   TableauError,
 } from '@pulse-metric-studio/core';
 import type {
@@ -34,6 +33,7 @@ import {
   metricDefinitionId,
   metricSpecification,
   reconcileMetricOwnership,
+  createMetricReconciliationOperation,
   type MetricReconciliationResult,
 } from './reconciliation.js';
 
@@ -86,10 +86,8 @@ const defaultDependencies: PulseForkPlanDependencies = {
   getMetric: getPulseMetric,
   getDefinition: getPulseDefinition,
   getCatalog: async (session, datasourceLuid) => {
-    const catalog = await getFieldCatalog(session, datasourceLuid);
-    if (catalog.source !== 'cache') return catalog;
-    invalidateFieldsCache(datasourceLuid);
-    return getFieldCatalog(session, datasourceLuid);
+    // Execution revalidates the current field catalog and selected domain before any write.
+    return getFieldCatalog(session, datasourceLuid, undefined, { refresh: true });
   },
   queryValues: queryPulseDimensionValues,
   getOrCreate: getOrCreatePulseMetric,
@@ -136,6 +134,9 @@ export class PulseForkPlanService {
     input: unknown,
   ): Promise<PulseForkPlanSummary> {
     const request = canonicalizeForkPlanRequest(input);
+    const reconcile = this.dependencies === defaultDependencies
+      ? createMetricReconciliationOperation(session)
+      : (expected: Parameters<PulseForkPlanDependencies['reconcile']>[1]) => this.dependencies.reconcile(session, expected);
     const requiresAllowedDimensions = request.clauses.length > 0;
     const definitionPromises = new Map<string, Promise<PulseDefinition>>();
     const resolved: ResolvedSource[] = [];
@@ -225,7 +226,7 @@ export class PulseForkPlanService {
       : undefined;
     const plans = new Map<
       string,
-      { source: ResolvedSource; specification: Record<string, unknown> }
+      { source: ResolvedSource; specification: Record<string, unknown>; sourceMetricIds: string[] }
     >();
     for (const source of resolved) {
       try {
@@ -241,8 +242,10 @@ export class PulseForkPlanService {
             clause.exclude,
           );
         }
-        const key = `${source.metricId}\u0000${stableJson(specification)}`;
-        if (!plans.has(key)) plans.set(key, { source, specification });
+        const key = `${source.definitionId}\u0000${canonicalDestination(specification)}`;
+        const retained = plans.get(key);
+        if (retained) retained.sourceMetricIds.push(source.metricId);
+        else plans.set(key, { source, specification, sourceMetricIds: [source.metricId] });
       } catch (error) {
         failures.push(failedResult(source.metricId, error, false));
       }
@@ -295,7 +298,7 @@ export class PulseForkPlanService {
               { creationStatus: 'unknown' },
             );
           }
-          const reconciliation = await this.dependencies.reconcile(session, {
+          const reconciliation = await reconcile({
             metricId: response.metricId,
             definitionId: source.definitionId,
             datasourceLuid: source.datasourceLuid,
@@ -337,12 +340,20 @@ export class PulseForkPlanService {
     let providerFailures = failures.filter(
       (failure) => failure.providerFailure,
     ).length;
-    for (const outcome of created) {
+    const planned = [...plans.values()];
+    for (const [index, outcome] of created.entries()) {
       if ('result' in outcome) {
         results.push(outcome.result);
         if (outcome.providerFailure) providerFailures++;
       } else {
         results.push(outcome);
+      }
+      const primary = 'result' in outcome ? outcome.result : outcome;
+      for (const sourceMetricId of planned[index]!.sourceMetricIds.slice(1)) {
+        results.push({ ...structuredClone(primary), sourceMetricId,
+          ...(primary.creationStatus === 'created' ? { creationStatus: 'existing' as const } : {}),
+        });
+        if ('result' in outcome && outcome.providerFailure) providerFailures++;
       }
     }
     const summary = summarizeResults(results, providerFailures);
@@ -796,6 +807,21 @@ function normalizedDomain(rows: unknown[]): Set<string> {
 
 function stableJson(value: unknown): string {
   return JSON.stringify(stableValue(value));
+}
+
+function canonicalDestination(specification: Record<string, unknown>): string {
+  const normalized = structuredClone(specification);
+  if (Array.isArray(normalized.filters)) {
+    normalized.filters = normalized.filters.map((filter: unknown) => {
+      if (!isRecord(filter)) return filter;
+      if (Array.isArray(filter.categorical_values)) {
+        filter.categorical_values = [...new Map(filter.categorical_values.map((value: unknown) => [stableJson(value), value])).values()]
+          .sort((left, right) => compareCanonicalStrings(stableJson(left), stableJson(right)));
+      }
+      return filter;
+    }).sort((left, right) => compareCanonicalStrings(stableJson(left), stableJson(right)));
+  }
+  return stableJson(normalized);
 }
 
 function stableValue(value: unknown): unknown {

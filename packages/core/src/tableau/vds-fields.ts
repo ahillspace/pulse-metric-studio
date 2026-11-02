@@ -9,12 +9,18 @@ import type { TableauSession } from './rest-client.js';
 import { TableauError, apiPath, getJson, postJson } from './rest-client.js';
 import { fetchCaptionMap, fetchFieldsViaMetadataGraphql } from './metadata-fallback.js';
 import { classifyNormalizedTimeType, normalizeProviderType } from './field-classification.js';
-import { normalizeServerUrl } from './session.js';
+import { getSessionContext, normalizeServerUrl } from './session.js';
+
+const sessionIds = new WeakMap<TableauSession, number>();
+let nextSessionId = 0;
 
 /** Build a stable cache key from session boundary + datasource LUID. No secrets. */
 function fieldCatalogCacheKey(session: TableauSession, luid: string): string {
   const server = normalizeServerUrl(session.serverUrl);
-  return `${server}|${session.siteId}|${session.userId}|${luid}`;
+  let identity = sessionIds.get(session);
+  if (identity === undefined) { identity = ++nextSessionId; sessionIds.set(session, identity); }
+  const owner = getSessionContext(session);
+  return `${identity}|${owner?.connectionId ?? ''}|${owner?.generation ?? ''}|${server}|${session.siteId}|${session.userId}|${luid}`;
 }
 
 /**
@@ -119,10 +125,12 @@ export interface FieldsCacheEntry {
 const CACHE_TTL_MS = 5 * 60_000;
 const SUSPICIOUS_ZERO_TIME_CACHE_TTL_MS = 15_000;
 const cache = new Map<string, FieldsCacheEntry>();
+const pending = new Map<string, Promise<DatasourceCatalog>>();
 
 /** Authoring can use an already loaded catalog; publishing still requests fresh validation. */
 export function getLoadedFieldCatalog(session: TableauSession, luid: string): DatasourceCatalog | undefined {
-  return cache.get(fieldCatalogCacheKey(session, luid))?.catalog;
+  const catalog = cache.get(fieldCatalogCacheKey(session, luid))?.catalog;
+  return catalog ? structuredClone(catalog) : undefined;
 }
 
 export function invalidateFieldsCache(luid?: string): void {
@@ -130,8 +138,10 @@ export function invalidateFieldsCache(luid?: string): void {
     for (const key of cache.keys()) {
       if (key.endsWith(`|${luid}`)) cache.delete(key);
     }
+    for (const key of pending.keys()) if (key.endsWith(`|${luid}`)) pending.delete(key);
   } else {
     cache.clear();
+    pending.clear();
   }
 }
 
@@ -506,19 +516,46 @@ function sortFields(fields: CatalogField[]): CatalogField[] {
 
 // -- public entrypoint --------------------------------------------------------
 
-export async function getFieldCatalog(session: TableauSession, luid: string): Promise<DatasourceCatalog> {
+export async function getFieldCatalog(session: TableauSession, luid: string, datasourceName?: string, options: { refresh?: boolean } = {}): Promise<DatasourceCatalog> {
   const cacheKey = fieldCatalogCacheKey(session, luid);
+  if (options.refresh) { cache.delete(cacheKey); pending.delete(cacheKey); }
   const cached = cache.get(cacheKey);
   if (cached && Date.now() - cached.fetchedAt < fieldCatalogCacheTtlMs(cached.catalog)) {
-    return { ...cached.catalog, source: 'cache' };
+    return structuredClone(cached.catalog);
   }
-
-  let dsName = luid;
+  const existing = pending.get(cacheKey);
+  if (existing) {
+    const catalog = await existing;
+    if (fieldCatalogCacheKey(session, luid) !== cacheKey) throw new TableauError('The Tableau session changed while loading field metadata.', 401, '', 'auth');
+    return structuredClone(catalog);
+  }
+  const request = loadFieldCatalog(session, luid, datasourceName);
+  pending.set(cacheKey, request);
   try {
-    const all = await listDatasources(session);
-    dsName = all.find((d) => d.luid === luid)?.name ?? luid;
-  } catch {
-    // listing failure shouldn't block field loading; name falls back to luid
+    const catalog = await request;
+    if (fieldCatalogCacheKey(session, luid) !== cacheKey) throw new TableauError('The Tableau session changed while loading field metadata.', 401, '', 'auth');
+    if (pending.get(cacheKey) === request && fieldCatalogCacheKey(session, luid) === cacheKey) {
+      cache.delete(cacheKey);
+      cache.set(cacheKey, { catalog: structuredClone(catalog), fetchedAt: Date.now() });
+      while (cache.size > 32) cache.delete(cache.keys().next().value!);
+    }
+    return structuredClone(catalog);
+  } finally {
+    if (pending.get(cacheKey) === request) pending.delete(cacheKey);
+  }
+}
+
+async function loadFieldCatalog(session: TableauSession, luid: string, datasourceName?: string): Promise<DatasourceCatalog> {
+  let dsName = datasourceName?.trim() || luid;
+  if (!datasourceName?.trim()) {
+    try {
+      const data = await getJson<{ datasource?: { id?: string; name?: string } }>(session,
+        apiPath(session, `/sites/${encodeURIComponent(session.siteId)}/datasources/${encodeURIComponent(luid)}`));
+      if (data.datasource?.id === luid && typeof data.datasource.name === 'string') dsName = data.datasource.name;
+    } catch (error) {
+      if (error instanceof TableauError && error.kind === 'auth') throw error;
+      // Name enrichment is best effort and never requires a site-wide scan.
+    }
   }
 
   let model = await tryVdsReadMetadata(session, luid);
@@ -527,7 +564,6 @@ export async function getFieldCatalog(session: TableauSession, luid: string): Pr
   }
   if (!model || !vdsLooksPopulated(model)) {
     const graphqlCatalog = await fetchFieldsViaMetadataGraphql(session, luid, { luid, name: dsName });
-    cache.set(cacheKey, { catalog: graphqlCatalog, fetchedAt: Date.now() });
     return graphqlCatalog;
   }
 
@@ -539,6 +575,5 @@ export async function getFieldCatalog(session: TableauSession, luid: string): Pr
     if (e instanceof TableauError && e.kind === 'auth') throw e;
     // Enrichment is best-effort; a Metadata API failure leaves the raw ids.
   }
-  cache.set(cacheKey, { catalog, fetchedAt: Date.now() });
   return catalog;
 }

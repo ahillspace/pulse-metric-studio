@@ -1,7 +1,7 @@
 import type { TableauSession } from '@pulse-metric-studio/core';
 import assert from 'node:assert/strict';
 import { afterEach,test } from 'node:test';
-import { listUserGroupIds } from '../application/subscriptions.js';
+import { clearSubscriptionCaches, listUserGroupIds } from '../application/subscriptions.js';
 
 const originalFetch = globalThis.fetch;
 const session: TableauSession = {
@@ -15,6 +15,7 @@ const session: TableauSession = {
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  clearSubscriptionCaches();
 });
 
 test('user-group inventory supports nested and flat provider envelopes', async () => {
@@ -23,6 +24,7 @@ test('user-group inventory supports nested and flat provider envelopes', async (
     { group: [{ id: 'group-2', name: 'Support' }] },
   ];
   for (const [index, response] of responses.entries()) {
+    clearSubscriptionCaches();
     globalThis.fetch = async () => Response.json(response);
     assert.deepEqual(await listUserGroupIds(session, session.userId), [{
       id: `group-${index + 1}`,

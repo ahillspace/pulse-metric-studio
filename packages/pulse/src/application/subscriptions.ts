@@ -20,6 +20,7 @@ import {
 } from "../pulse/provider-diagnostics.js";
 import {
   SubscriptionBatchInterrupted,
+  SUBSCRIPTION_REQUEST_LIMIT,
   type FollowerCountBatchResult,
   type SubscriptionRecord,
 } from "../pulse/pulse-client.js";
@@ -41,16 +42,18 @@ import {
   defaultDependencies,
   type SubscriptionDependencies,
 } from "./registry-dependencies.js";
+import { sessionCacheKey } from './session-cache-key.js';
 const PROVIDER_CONCURRENCY = 5;
 const NAME_CACHE_TTL_MS = 300000;
 const MAX_NAME_CACHE_ENTRIES = 512;
-export const FOLLOW_OPERATION_BATCH_LIMIT = 200;
+export const FOLLOW_OPERATION_BATCH_LIMIT = SUBSCRIPTION_REQUEST_LIMIT;
 interface NameCacheEntry {
   name: string | null;
   expiresAt: number;
 }
 
 const nameCache = new Map<string, NameCacheEntry>();
+const memberships = new Map<string, { expiresAt: number; request: Promise<Array<{ id: string; name: string }>> }>();
 export type MetricAvailability =
   PulseFollowState["availabilityByMetricId"][string];
 
@@ -61,7 +64,7 @@ export async function getFollowState(
   userId: string,
   userGroupIds: string[],
   metricIds: string[],
-  options: { selectedGroupId?: string; groupContextUnavailable?: boolean } = {},
+  options: { selectedGroupId?: string; groupContextUnavailable?: boolean; detail?: boolean } = {},
   dependencies: SubscriptionDependencies = defaultDependencies,
 ): Promise<FollowStateResult> {
   const uniqueMetricIds = canonicalIds(metricIds);
@@ -93,6 +96,21 @@ export async function getFollowState(
     };
   }
   Object.assign(result.followerCountsByMetricId, countResult.countsByMetricId);
+
+  if (options.detail === false) {
+    for (const metricId of uniqueMetricIds) {
+      const error = countResult.errorsByMetricId[metricId];
+      const countAvailable = !error && typeof countResult.countsByMetricId[metricId] === 'number';
+      const diagnostics = error ? [error] : [];
+      result.availabilityByMetricId[metricId] = {
+        status: countAvailable ? 'partial' : 'unavailable',
+        relationshipStatus: 'not_requested', followerIdsStatus: 'not_requested',
+        followerCountStatus: countAvailable ? 'available' : 'unavailable', diagnostics,
+      };
+      result.errors.push(...diagnostics.map((diagnostic) => `${metricId}: ${diagnosticMessage(diagnostic)}`));
+    }
+    return result;
+  }
 
   const subscriptionResults = await mapWithConcurrency(
     uniqueMetricIds,
@@ -216,6 +234,19 @@ export async function listUserGroupIds(
   session: TableauSession,
   userId: string,
 ): Promise<Array<{ id: string; name: string }>> {
+  const key = `${sessionCacheKey(session)}\u0000${userId}`;
+  const cached = memberships.get(key);
+  if (cached && cached.expiresAt > Date.now()) return structuredClone(await cached.request);
+  const request = loadUserGroupIds(session, userId);
+  const entry = { expiresAt: Date.now() + 60_000, request };
+  memberships.delete(key);
+  memberships.set(key, entry);
+  while (memberships.size > 8) memberships.delete(memberships.keys().next().value!);
+  try { return structuredClone(await request); }
+  catch (error) { if (memberships.get(key) === entry) memberships.delete(key); throw error; }
+}
+
+async function loadUserGroupIds(session: TableauSession, userId: string): Promise<Array<{ id: string; name: string }>> {
   const out: Array<{ id: string; name: string }> = [];
   let pageNumber = 1;
   const pageSize = 1000;
@@ -342,10 +373,11 @@ export async function followTargets(
   });
 
   let terminated = false;
-  for (const kind of ["GROUP", "USER"] as const) {
+  const kinds = dependencies.createSubscriptions ? ['MIXED'] as const : ['GROUP', 'USER'] as const;
+  for (const kind of kinds) {
     if (terminated) break;
     const kindOperations = pending.filter(
-      (operation) => operation.target.kind === kind,
+      (operation) => kind === 'MIXED' || operation.target.kind === kind,
     );
     for (
       let index = 0;
@@ -357,8 +389,10 @@ export async function followTargets(
         index + FOLLOW_OPERATION_BATCH_LIMIT,
       );
       try {
-        const created =
-          kind === "GROUP"
+        const created: import('../pulse/pulse-client.js').SubscriptionWriteResult[] =
+          kind === 'MIXED'
+            ? await dependencies.createSubscriptions!(session, batch.map((operation) => ({ metricId: operation.metricId, targetId: operation.target.id, targetType: operation.target.kind })))
+            : kind === "GROUP"
             ? await dependencies.createGroupSubscriptions(
                 session,
                 batch.map((operation) => ({
@@ -375,7 +409,7 @@ export async function followTargets(
               );
         const createdByKey = new Map(
           created.map((result) => [
-            followOperationKeyParts(result.metricId, kind, result.targetId),
+            followOperationKeyParts(result.metricId, result.targetType ?? (kind === 'MIXED' ? 'USER' : kind), result.targetId),
             result,
           ]),
         );
@@ -386,7 +420,7 @@ export async function followTargets(
               followOperationKey(operation),
               operationResult(
                 operation,
-                "failed",
+                "unknown",
                 false,
                 "Tableau returned no result for this metric and target.",
               ),
@@ -405,7 +439,7 @@ export async function followTargets(
               followOperationKey(operation),
               operationResult(
                 operation,
-                "failed",
+                createdResult.unknown ? "unknown" : "failed",
                 false,
                 createdResult.error ?? "Tableau rejected the follow request.",
               ),
@@ -427,7 +461,8 @@ export async function followTargets(
             const operation = batch.find(
               (candidate) =>
                 candidate.metricId === item.metricId &&
-                candidate.target.id === item.targetId,
+                candidate.target.id === item.targetId &&
+                (!item.targetType || candidate.target.kind === item.targetType),
             );
             if (operation)
               results.set(
@@ -438,7 +473,7 @@ export async function followTargets(
                     ? item.alreadyExists
                       ? "already_followed"
                       : "followed"
-                    : "failed",
+                    : item.unknown ? "unknown" : "failed",
                   item.ok,
                   item.error,
                 ),
@@ -448,8 +483,9 @@ export async function followTargets(
             if (results.has(followOperationKey(operation))) continue;
             const rejected =
               error instanceof SubscriptionBatchInterrupted &&
-              error.failed.metricId === operation.metricId &&
-              error.failed.targetId === operation.target.id;
+              (error.failedTargets.length
+                ? error.failedTargets.some((item) => item.metricId === operation.metricId && item.targetId === operation.target.id && item.targetType === operation.target.kind)
+                : error.failed.metricId === operation.metricId && error.failed.targetId === operation.target.id);
             const authentication = error.kind === "auth";
             results.set(followOperationKey(operation), {
               ...operationResult(
@@ -792,7 +828,7 @@ function nameCacheKey(
   type: "USER" | "GROUP",
   id: string,
 ): string {
-  return `${session.serverUrl}\u0000${session.siteId}\u0000${type}\u0000${id}`;
+  return `${sessionCacheKey(session)}\u0000${type}\u0000${id}`;
 }
 
 function evictNameCache(): void {
@@ -851,4 +887,5 @@ function rethrowIfAuth(error: unknown): void {
 
 export function clearSubscriptionCaches(): void {
   nameCache.clear();
+  memberships.clear();
 }

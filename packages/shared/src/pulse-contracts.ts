@@ -352,8 +352,8 @@ export const PulseFollowStateSchema = z.object({
   availabilityByMetricId: z.record(
     z.object({
       status: availability,
-      relationshipStatus: availability,
-      followerIdsStatus: availability.optional(),
+      relationshipStatus: z.enum(['available', 'partial', 'unavailable', 'not_requested']),
+      followerIdsStatus: z.enum(['available', 'partial', 'unavailable', 'not_requested']).optional(),
       followerCountStatus: z.enum(['available', 'unavailable']),
       diagnostics: z.array(PulseProviderDiagnosticSchema),
     }),

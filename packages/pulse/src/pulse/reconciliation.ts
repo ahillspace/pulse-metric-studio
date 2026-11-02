@@ -1,12 +1,14 @@
 import type { TableauSession } from '@pulse-metric-studio/core';
 import { TableauError } from '@pulse-metric-studio/core';
 import { boundedProviderDiagnostic,type PulseProviderDiagnostic } from './provider-diagnostics.js';
+import { sessionCacheKey } from '../application/session-cache-key.js';
 import {
 getPulseDefinition,
 getPulseMetric,
-listMetricsForDefinition,
+listMetricsInventory,
 type PulseDefinition,
 type PulseExactMetric,
+type PulseMetricInventory,
 } from './pulse-client.js';
 
 const DEFAULT_DELAYS_MS = [0, 250, 750, 1_500, 3_000] as const;
@@ -30,14 +32,14 @@ export interface MetricReconciliationResult {
 export interface MetricReconciliationDependencies {
   getMetric(session: TableauSession, metricId: string): Promise<PulseExactMetric>;
   getDefinition(session: TableauSession, definitionId: string): Promise<PulseDefinition>;
-  listMetrics(session: TableauSession, definitionId: string): Promise<Array<{ id?: string; metadata?: { id?: string } }>>;
+  listMetrics(session: TableauSession, definitionId: string): Promise<Array<{ id?: string; metadata?: { id?: string } }> | PulseMetricInventory>;
   wait(ms: number): Promise<void>;
 }
 
 const defaultDependencies: MetricReconciliationDependencies = {
   getMetric: getPulseMetric,
   getDefinition: getPulseDefinition,
-  listMetrics: listMetricsForDefinition,
+  listMetrics: listMetricsInventory,
   wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 };
 
@@ -50,67 +52,74 @@ export async function reconcileMetricOwnership(
   let exactMetricResolved = false;
   let ownershipVerified = false;
   let inventoryFailure: PulseProviderDiagnostic | undefined;
+  const owner = sessionCacheKey(session);
 
   for (let attempt = 0; attempt < delaysMs.length; attempt++) {
     const delay = delaysMs[attempt] ?? 0;
     if (delay > 0) await dependencies.wait(delay);
+    if (sessionCacheKey(session) !== owner) throw new TableauError('The Tableau session changed during visibility reconciliation.', 401, '', 'auth');
 
-    let metric: PulseExactMetric;
-    try {
-      metric = await dependencies.getMetric(session, expected.metricId);
-      exactMetricResolved = true;
-    } catch (error) {
-      if (error instanceof TableauError && error.kind === 'auth') throw error;
-      if (error instanceof TableauError && error.status === 404) continue;
-      return failed(expected.metricId, attempt + 1, error, exactMetricResolved);
-    }
+    if (!ownershipVerified) {
+      let metric: PulseExactMetric;
+      try {
+        metric = await dependencies.getMetric(session, expected.metricId);
+        exactMetricResolved = true;
+      } catch (error) {
+        if (error instanceof TableauError && error.kind === 'auth') throw error;
+        if (error instanceof TableauError && error.status === 404) continue;
+        return failed(expected.metricId, attempt + 1, error, exactMetricResolved);
+      }
 
-    const actualMetricId = metricId(metric);
-    if (actualMetricId && actualMetricId !== expected.metricId) {
-      return mismatch(expected.metricId, attempt + 1, `Tableau returned metric ${actualMetricId} for ${expected.metricId}.`);
-    }
-    const actualDefinitionId = metricDefinitionId(metric);
-    if (!actualDefinitionId || actualDefinitionId !== expected.definitionId) {
-      return mismatch(
-        expected.metricId,
-        attempt + 1,
-        `Metric belongs to definition ${actualDefinitionId || 'unknown'}, not ${expected.definitionId}.`,
-      );
-    }
-    const actualSiteId = metric.site_id ?? metric.site?.id;
-    if (actualSiteId && actualSiteId !== session.siteId) {
-      return mismatch(expected.metricId, attempt + 1, `Metric belongs to site ${actualSiteId}, not ${session.siteId}.`);
-    }
+      const actualMetricId = metricId(metric);
+      if (actualMetricId && actualMetricId !== expected.metricId) {
+        return mismatch(expected.metricId, attempt + 1, `Tableau returned metric ${actualMetricId} for ${expected.metricId}.`);
+      }
+      const actualDefinitionId = metricDefinitionId(metric);
+      if (!actualDefinitionId || actualDefinitionId !== expected.definitionId) {
+        return mismatch(
+          expected.metricId,
+          attempt + 1,
+          `Metric belongs to definition ${actualDefinitionId || 'unknown'}, not ${expected.definitionId}.`,
+        );
+      }
+      const actualSiteId = metric.site_id ?? metric.site?.id;
+      if (actualSiteId && actualSiteId !== session.siteId) {
+        return mismatch(expected.metricId, attempt + 1, `Metric belongs to site ${actualSiteId}, not ${session.siteId}.`);
+      }
 
-    let definition: PulseDefinition;
-    try {
-      definition = await dependencies.getDefinition(session, actualDefinitionId);
-    } catch (error) {
-      if (error instanceof TableauError && error.kind === 'auth') throw error;
-      return failed(expected.metricId, attempt + 1, error, true);
+      let definition: PulseDefinition;
+      try {
+        definition = await dependencies.getDefinition(session, actualDefinitionId);
+      } catch (error) {
+        if (error instanceof TableauError && error.kind === 'auth') throw error;
+        return failed(expected.metricId, attempt + 1, error, true);
+      }
+      const returnedDefinitionId = String(definition.metadata?.id ?? '').trim();
+      if (returnedDefinitionId && returnedDefinitionId !== expected.definitionId) {
+        return mismatch(
+          expected.metricId,
+          attempt + 1,
+          `Tableau returned definition ${returnedDefinitionId} for ${expected.definitionId}.`,
+        );
+      }
+      const datasourceLuid = definition.specification?.datasource?.id;
+      if (!datasourceLuid || datasourceLuid !== expected.datasourceLuid) {
+        return mismatch(
+          expected.metricId,
+          attempt + 1,
+          `Metric definition belongs to datasource ${datasourceLuid || 'unknown'}, not ${expected.datasourceLuid}.`,
+        );
+      }
+      ownershipVerified = true;
     }
-    const returnedDefinitionId = String(definition.metadata?.id ?? '').trim();
-    if (returnedDefinitionId && returnedDefinitionId !== expected.definitionId) {
-      return mismatch(
-        expected.metricId,
-        attempt + 1,
-        `Tableau returned definition ${returnedDefinitionId} for ${expected.definitionId}.`,
-      );
-    }
-    const datasourceLuid = definition.specification?.datasource?.id;
-    if (!datasourceLuid || datasourceLuid !== expected.datasourceLuid) {
-      return mismatch(
-        expected.metricId,
-        attempt + 1,
-        `Metric definition belongs to datasource ${datasourceLuid || 'unknown'}, not ${expected.datasourceLuid}.`,
-      );
-    }
-    ownershipVerified = true;
 
     try {
       const inventory = await dependencies.listMetrics(session, expected.definitionId);
-      inventoryFailure = undefined;
-      if (inventory.some((entry) => metricId(entry) === expected.metricId)) {
+      const records = Array.isArray(inventory) ? inventory : inventory.metrics;
+      inventoryFailure = !Array.isArray(inventory) && inventory.truncated
+        ? inventory.diagnostic ?? { message: 'Pulse metric inventory is incomplete.' }
+        : undefined;
+      if (records.some((entry) => metricId(entry) === expected.metricId)) {
         return {
           metricId: expected.metricId,
           status: 'visible',
@@ -145,6 +154,43 @@ export async function reconcileMetricOwnership(
     ownershipVerified,
     attempts: delaysMs.length,
   };
+}
+
+/** Successful evidence belongs only to this captured operation and session. */
+export function createMetricReconciliationOperation(
+  session: TableauSession,
+  dependencies: MetricReconciliationDependencies = defaultDependencies,
+): (expected: { metricId: string; definitionId: string; datasourceLuid: string }) => Promise<MetricReconciliationResult> {
+  const definitions = new Map<string, Promise<PulseDefinition>>();
+  type Listing = Awaited<ReturnType<MetricReconciliationDependencies['listMetrics']>>;
+  const listings = new Map<string, Listing>();
+  const pending = new Map<string, Promise<Listing>>();
+  const owner = sessionCacheKey(session);
+  return (expected) => reconcileMetricOwnership(session, expected, {
+    ...dependencies,
+    getDefinition: (active, id) => {
+      let request = definitions.get(id);
+      if (!request) {
+        request = dependencies.getDefinition(active, id);
+        definitions.set(id, request);
+        void request.catch(() => { if (definitions.get(id) === request) definitions.delete(id); });
+      }
+      return request;
+    },
+    listMetrics: async (active, id) => {
+      if (sessionCacheKey(active) !== owner) throw new TableauError('The Tableau session changed during visibility reconciliation.', 401, '', 'auth');
+      const retained = listings.get(id);
+      const records = retained && (Array.isArray(retained) ? retained : retained.metrics);
+      if (records?.some((record) => metricId(record) === expected.metricId)) return retained!;
+      let request = pending.get(id);
+      if (!request) {
+        request = dependencies.listMetrics(active, id);
+        pending.set(id, request);
+      }
+      try { const records = await request; listings.set(id, records); return records; }
+      finally { if (pending.get(id) === request) pending.delete(id); }
+    },
+  });
 }
 
 function failed(metricIdValue: string, attempts: number, error: unknown, exactMetricResolved: boolean): MetricReconciliationResult {

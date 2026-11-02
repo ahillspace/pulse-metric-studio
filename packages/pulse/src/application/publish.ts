@@ -2,7 +2,6 @@ import {
   getFieldCatalog,
   getJson,
   apiPath,
-  invalidateFieldsCache,
   sanitizeProviderMessage,
   TableauError,
   type TableauSession,
@@ -58,8 +57,7 @@ export async function currentPulseCatalog(
   session: TableauSession,
   datasourceLuid: string,
 ): Promise<DatasourceCatalog> {
-  invalidateFieldsCache(datasourceLuid);
-  return getFieldCatalog(session, datasourceLuid);
+  return getFieldCatalog(session, datasourceLuid, undefined, { refresh: true });
 }
 const defaultDependencies: PublishDependencies = {
   catalog: currentPulseCatalog,

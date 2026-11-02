@@ -1,11 +1,12 @@
-import { getSession } from "@pulse-metric-studio/core";
+import { getSession, getSessionContext, isSessionCurrent } from "@pulse-metric-studio/core";
 import {
   PulseFollowCommandSchema,
   PulseVariantCommandSchema,
 } from "@pulse-metric-studio/shared";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { requirePulseOwner } from "../application/context.js";
+import { PulseApplicationError } from "../application/errors.js";
 import { loadPulseInventory } from "../application/inventory-snapshots.js";
 import {
   followTargets,
@@ -41,8 +42,33 @@ const DimensionValuesSchema = DimensionFieldSchema.extend({
   all: z.boolean().optional(),
 });
 
-function requireSession() {
+const ExpectedOwnerSchema = z.object({
+  connectionId: z.string().min(1).max(512),
+  serverUrl: z.string().url().max(2048),
+  siteId: z.string().min(1).max(512),
+  userId: z.string().min(1).max(512),
+  sessionGeneration: z.number().int().nonnegative(),
+}).strict();
+
+function requireSession(request?: FastifyRequest) {
   const s = getSession();
+  const encodedOwner = (request?.query as { expectedOwner?: unknown } | undefined)?.expectedOwner;
+  if (encodedOwner !== undefined) {
+    let input: unknown;
+    try {
+      if (typeof encodedOwner !== "string" || encodedOwner.length > 8192) throw new Error();
+      input = JSON.parse(encodedOwner);
+    } catch { throw new PulseApplicationError("invalid_request", "expectedOwner must be a valid session owner."); }
+    const parsed = ExpectedOwnerSchema.safeParse(input);
+    if (!parsed.success) throw new PulseApplicationError("invalid_request", "expectedOwner must be a valid session owner.");
+    const owner = parsed.data;
+    const context = s && getSessionContext(s);
+    if (!s || !context || !isSessionCurrent(s) || owner.connectionId !== context.connectionId ||
+      owner.sessionGeneration !== context.generation || owner.serverUrl !== s.serverUrl ||
+      owner.siteId !== s.siteId || owner.userId !== s.userId)
+      throw new PulseApplicationError("tableau_context_changed", "The Tableau session changed before this request started. Retry from the current connection.", 409);
+  }
+  // Older callers omit expectedOwner; retain their existing arrival-session contract.
   if (!s) {
     const err = new Error("Not connected to Tableau") as Error & {
       statusCode?: number;
@@ -72,7 +98,7 @@ export function registerPulseRoutes(
   }));
 
   app.get("/api/pulse/existing-metrics", async (req) => {
-    const session = requireSession();
+    const session = requireSession(req);
     const { datasourceLuid } = req.query as { datasourceLuid?: string };
     if (!datasourceLuid)
       throw app.httpErrors.badRequest(
@@ -82,7 +108,7 @@ export function registerPulseRoutes(
   });
 
   app.post("/api/pulse/dimensions", async (req) => {
-    const session = requireSession();
+    const session = requireSession(req);
     const body = DimensionSourcesSchema.safeParse(req.body);
     if (!body.success) throw new PulseDimensionalForkError(body.error.message, 400);
     return dimensions.listEligibleDimensions(
@@ -92,14 +118,14 @@ export function registerPulseRoutes(
   });
 
   app.post("/api/pulse/dimensions/count", async (req) => {
-    const session = requireSession();
+    const session = requireSession(req);
     const body = DimensionFieldSchema.safeParse(req.body);
     if (!body.success) throw new PulseDimensionalForkError(body.error.message, 400);
     return dimensions.countDimensionMembers(session, body.data);
   });
 
   app.post("/api/pulse/dimensions/values", async (req) => {
-    const session = requireSession();
+    const session = requireSession(req);
     const body = DimensionValuesSchema.safeParse(req.body);
     if (!body.success) throw new PulseDimensionalForkError(body.error.message, 400);
     return dimensions.listDimensionValues(session, body.data);
@@ -108,23 +134,25 @@ export function registerPulseRoutes(
   app.post("/api/pulse/metrics/fork", async (req, reply) => {
     const parsed = PulseVariantCommandSchema.safeParse(req.body);
     if (!parsed.success) throw app.httpErrors.badRequest(parsed.error.message);
-    const session = requirePulseOwner(parsed.data.context);
+    const session = requirePulseOwner(parsed.data.context, requireSession(req));
     const summary = await forkPlanService.forkMetrics(session, parsed.data);
     return reply.code(forkPlanHttpStatus(summary)).send(summary);
   });
 
   app.post("/api/pulse/follow-state", async (req) => {
-    const session = requireSession();
-    const body = req.body as { metricIds?: string[]; selectedGroupId?: string };
+    const session = requireSession(req);
+    const body = req.body as { metricIds?: string[]; selectedGroupId?: string; detail?: boolean };
     if (!Array.isArray(body.metricIds))
       throw app.httpErrors.badRequest("metricIds array required");
     const selectedGroupId = String(body.selectedGroupId ?? "").trim();
     let groups: Array<{ id: string; name: string }> = [];
     let groupContextUnavailable = false;
-    if (!selectedGroupId) {
+    if (body.detail !== undefined && typeof body.detail !== 'boolean') throw app.httpErrors.badRequest('detail must be a boolean');
+    if (body.detail !== false && !selectedGroupId) {
       try {
         groups = await listUserGroupIds(session, session.userId);
-      } catch {
+      } catch (error) {
+        if (error instanceof Error && 'kind' in error && error.kind === 'auth') throw error;
         groupContextUnavailable = true;
       }
     }
@@ -136,17 +164,18 @@ export function registerPulseRoutes(
       {
         selectedGroupId: selectedGroupId || undefined,
         groupContextUnavailable,
+        detail: body.detail,
       },
     );
   });
 
-  app.get("/api/pulse/groups", async () => {
-    const session = requireSession();
+  app.get("/api/pulse/groups", async (req) => {
+    const session = requireSession(req);
     return { groups: await listUserGroupIds(session, session.userId) };
   });
 
-  app.get("/api/pulse/follow-targets", async () => {
-    const session = requireSession();
+  app.get("/api/pulse/follow-targets", async (req) => {
+    const session = requireSession(req);
     // No server-side search: REST API 3.27 rejects `name:has:` (400065). The
     // client loads the full inventory once and filters locally.
     return getFollowTargets(session);
@@ -155,7 +184,7 @@ export function registerPulseRoutes(
   app.post("/api/pulse/follow", async (req) => {
     const parsed = PulseFollowCommandSchema.safeParse(req.body);
     if (!parsed.success) throw app.httpErrors.badRequest(parsed.error.message);
-    const session = requirePulseOwner(parsed.data.context);
+    const session = requirePulseOwner(parsed.data.context, requireSession(req));
     const operations = parsed.data.operations;
     const results = await followTargets(session, { operations });
     return {
@@ -174,7 +203,7 @@ export function registerPulseRoutes(
   app.post("/api/pulse/unfollow", async (req) => {
     const parsed = PulseFollowCommandSchema.safeParse(req.body);
     if (!parsed.success) throw app.httpErrors.badRequest(parsed.error.message);
-    const session = requirePulseOwner(parsed.data.context);
+    const session = requirePulseOwner(parsed.data.context, requireSession(req));
     const operations = parsed.data.operations;
     const results = await unfollowTargets(session, { operations });
     return {
@@ -191,7 +220,7 @@ export function registerPulseRoutes(
   });
 
   app.post("/api/pulse/followers-detail", async (req) => {
-    const session = requireSession();
+    const session = requireSession(req);
     const body = req.body as { metricIds?: string[] };
     if (!Array.isArray(body.metricIds))
       throw app.httpErrors.badRequest("metricIds array required");

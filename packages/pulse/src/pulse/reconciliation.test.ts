@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
 reconcileMetricOwnership,
+createMetricReconciliationOperation,
 type MetricReconciliationDependencies,
 } from './reconciliation.js';
 
@@ -62,6 +63,32 @@ test('exact-ID reconciliation reports pending visibility after bounded polling',
   assert.equal(result.attempts, 3);
 });
 
+test('visibility lag retries only listings after exact ownership succeeds', async () => {
+  const calls = { metric: 0, definition: 0, listing: 0 };
+  const base = dependencies();
+  const result = await reconcileMetricOwnership(session, { metricId: 'metric-1', definitionId: 'definition-1', datasourceLuid: 'datasource-1' }, dependencies({
+    getMetric: async (owner, id) => { calls.metric++; return base.getMetric(owner, id); },
+    getDefinition: async (owner, id) => { calls.definition++; return base.getDefinition(owner, id); },
+    listMetrics: async () => { calls.listing++; return calls.listing === 5 ? [{ id: 'metric-1' }] : []; },
+  }), [0, 0, 0, 0, 0]);
+  assert.equal(result.status, 'visible');
+  assert.deepEqual(calls, { metric: 1, definition: 1, listing: 5 });
+});
+
+test('one operation shares parent ownership and compatible listing evidence between metrics', async () => {
+  let parents = 0;
+  let listings = 0;
+  const reconcile = createMetricReconciliationOperation(session, dependencies({
+    getMetric: async (_owner, id) => ({ id, definition_id: 'definition-1', specification: {} }),
+    getDefinition: async () => { parents++; return { specification: { datasource: { id: 'datasource-1' } } }; },
+    listMetrics: async () => { listings++; await new Promise<void>((resolve) => setImmediate(resolve)); return [{ id: 'metric-1' }, { id: 'metric-2' }]; },
+  }));
+  const results = await Promise.all(['metric-1', 'metric-2'].map((metricId) => reconcile({ metricId, definitionId: 'definition-1', datasourceLuid: 'datasource-1' })));
+  assert.ok(results.every((result) => result.status === 'visible'));
+  assert.equal(parents, 1);
+  assert.equal(listings, 1);
+});
+
 test('exact-ID reconciliation rejects ownership mismatches', async () => {
   const result = await reconcileMetricOwnership(session, {
     metricId: 'metric-1',
@@ -88,4 +115,15 @@ test('exact-ID reconciliation keeps bounded provider diagnostics for inventory f
   assert.equal(result.status, 'failed');
   assert.equal(result.diagnostic?.status, 503);
   assert.ok((result.diagnostic?.detail?.length ?? 0) <= 800);
+});
+
+test('partial visibility inventory proves presence but never proves an omitted metric absent', async () => {
+  for (const present of [true, false]) {
+    const result = await reconcileMetricOwnership(session, { metricId: 'metric-1', definitionId: 'definition-1', datasourceLuid: 'datasource-1' }, dependencies({
+      listMetrics: async () => ({ metrics: present ? [{ id: 'metric-1' }] : [], truncated: true, diagnostic: { message: 'A later metric page failed.' } }),
+    }), [0]);
+    assert.equal(result.status, present ? 'visible' : 'failed');
+    assert.equal(result.ownershipVerified, true);
+    if (!present) assert.match(result.diagnostic!.message, /later metric page/);
+  }
 });
