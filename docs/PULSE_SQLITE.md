@@ -112,6 +112,10 @@ Listing profiles reads references without resolving the secrets.
 Saving writes new vault entries before updating the profile; failed saves attempt to discard newly created entries.
 Successful replacements and deletions attempt to remove obsolete entries.
 Cleanup errors produce warnings without reverting a committed profile change, so unused vault entries can remain.
+Mutations serialize per profile across stores and registries that share the database.
+The queue covers effective-profile resolution, new vault entries, database persistence, and cleanup, including deletion.
+Different profiles can progress independently.
+This prevents an overlapping update from restoring a secret reference that another update has removed.
 
 The [encryption module](../packages/core/src/db/crypto.ts), `machineKey`, stores the fallback key beside the database and caches it in process memory.
 This fallback does not provide OS credential-store isolation from a process that can read the data directory.
