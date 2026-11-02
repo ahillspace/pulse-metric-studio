@@ -93,6 +93,125 @@ test("refresh retains known follows until replacement data arrives", async () =>
   await refresh;
 });
 
+test("explicit refresh replaces inventory while earlier follower enrichment is pending", async () => {
+  const oldFollowers = deferred<Awaited<ReturnType<RegistryApi["followState"]>>>();
+  const enriching = deferred<void>();
+  let reads = 0;
+  const freshFollowers: Awaited<ReturnType<RegistryApi["followState"]>> = {
+    ...unavailableFollowState(["new"], "fresh"),
+    selectedGroupId: null, groupContextUnavailable: false,
+    groupFollowerIdsByMetricId: {}, userFollowerIdsByMetricId: {}, availabilityByMetricId: {},
+    followerCountsByMetricId: { new: 7 },
+  };
+  const store = fixture({
+    inventory: async () => inventory(++reads === 1 ? "old" : "new"),
+    followState: async (ids) => {
+      if (ids.includes("old")) { enriching.resolve(); return oldFollowers.promise; }
+      return freshFollowers;
+    },
+  });
+  const context = draft().context;
+  store.getState().setContext(context);
+  const initial = store.getState().ensureLoaded();
+  await enriching.promise;
+  assert.equal(store.getState().loading, false);
+  assert.equal(store.getState().followLoading, true);
+  try {
+    const refreshing = store.getState().invalidate(context);
+    const navigation = store.getState().ensureLoaded();
+    assert.equal(reads, 2, "explicit refresh starts a new inventory read while navigation joins it");
+    await Promise.all([refreshing, navigation]);
+    assert.equal(store.getState().inventory?.snapshotId, "snapshot-new");
+    assert.equal(store.getState().followState?.followerCountsByMetricId.new, 7);
+    const replacement = structuredClone(store.getState().followState);
+    oldFollowers.resolve({
+      ...unavailableFollowState(["old"], "stale"),
+      selectedGroupId: null, groupContextUnavailable: false,
+      groupFollowerIdsByMetricId: {}, userFollowerIdsByMetricId: {}, availabilityByMetricId: {},
+      followerCountsByMetricId: { old: 99 },
+    });
+    await initial;
+    assert.deepEqual(store.getState().followState, replacement, "late old followers cannot replace refreshed state");
+    await store.getState().ensureLoaded();
+    assert.equal(reads, 2, "the stale completion cannot displace the fresh inventory cache");
+  } finally {
+    oldFollowers.resolve(freshFollowers);
+    await initial;
+  }
+});
+
+test("deletion review requires displayed inventory without fetching a replacement", async () => {
+  let reads = 0;
+  let previews = 0;
+  const store = fixture(
+    { inventory: async () => { reads++; return inventory(); } },
+    { previewDelete: async () => { previews++; throw new Error("Unexpected preview"); } },
+  );
+  store.getState().setContext(draft().context);
+  await store.getState().previewDelete(["metric"], []);
+  assert.equal(reads, 0);
+  assert.equal(previews, 0);
+  assert.equal(store.getState().deletePlan, null);
+  assert.match(store.getState().deleteError ?? "", /Refresh metrics/);
+});
+
+test("deletion review freezes cached names and known follower counts without additional reads", async () => {
+  const source = inventory();
+  const sample = source.definitions[0].metrics[0];
+  source.definitions[0].metrics = [
+    { ...sample, name: "Loaded revenue" },
+    { ...sample, metricId: "unknown", name: "Loaded margin" },
+    { ...sample, metricId: "stale", name: "Loaded cost" },
+  ];
+  let reads = 0;
+  let follows = 0;
+  let details = 0;
+  const reviewing = deferred<PulseDeletePlan>();
+  const requests: unknown[] = [];
+  const store = fixture({
+    inventory: async () => { reads++; return source; },
+    followState: async (ids) => {
+      follows++;
+      const unavailable = unavailableFollowState(ids, "Unavailable");
+      const state: Awaited<ReturnType<RegistryApi["followState"]>> = {
+        ...unavailable, selectedGroupId: null, groupContextUnavailable: false,
+        groupFollowerIdsByMetricId: {}, userFollowerIdsByMetricId: {},
+        availabilityByMetricId: unavailable.availabilityByMetricId ?? {},
+      };
+      state.followerCountsByMetricId = { metric: 7, stale: 3 };
+      state.availabilityByMetricId.metric = { status: "available", relationshipStatus: "available", followerCountStatus: "available", diagnostics: [] };
+      return state;
+    },
+    followers: async () => { details++; return { details: [] }; },
+  }, {
+    previewDelete: async (input) => { requests.push(input); return reviewing.promise; },
+  });
+  store.getState().setContext(draft().context);
+  await store.getState().load();
+  const preview = store.getState().previewDelete(["metric", "unknown", "stale"], []);
+  store.getState().followState!.followerCountsByMetricId.metric = 99;
+  reviewing.resolve({
+    context: draft().context, snapshotId: source.snapshotId,
+    metricIds: ["metric", "unknown", "stale"], definitionIds: [],
+    allowIncompleteInventory: false, previewFingerprint: "reviewed", warnings: [],
+    targets: ["metric", "unknown", "stale"].map((id) => ({
+      kind: "metric", id, name: id, definitionId: "definition", inventoryComplete: true,
+      affectedMetricIds: [id],
+    })),
+  });
+  await preview;
+  assert.deepEqual(requests, [{
+    context: draft().context, snapshotId: source.snapshotId,
+    metricIds: ["metric", "unknown", "stale"], definitionIds: [], allowIncompleteInventory: false,
+  }]);
+  assert.deepEqual(store.getState().deletePlan?.targets.flatMap((target) => target.affectedMetrics ?? []), [
+    { id: "metric", name: "Loaded revenue", followerCount: 7 },
+    { id: "unknown", name: "Loaded margin", followerCount: null },
+    { id: "stale", name: "Loaded cost", followerCount: null },
+  ]);
+  assert.deepEqual({ reads, follows, details }, { reads: 1, follows: 1, details: 0 });
+});
+
 test("selection-scoped follower refresh batches exact IDs and preserves inventory state", async () => {
   const requests: string[][] = [];
   const store = fixture({ followState: async (ids) => {
@@ -140,12 +259,14 @@ test("dismissed results stay dismissed after switching context", async () => {
 test("reviewed deletion chunks all 1001 selected variants without omissions", async () => {
   const previews: number[] = [],
     deleted: string[] = [];
+  let reads = 0;
   const store = fixture(
-    {},
+    { inventory: async () => { reads++; return inventory(); } },
     {
       previewDelete: async (input) => {
         previews.push(input.metricIds.length);
         assert.ok(input.metricIds.length <= 1000);
+        assert.equal(input.snapshotId, "snapshot-metric");
         return {
           ...input,
           previewFingerprint: `review-${previews.length}`,
@@ -161,6 +282,7 @@ test("reviewed deletion chunks all 1001 selected variants without omissions", as
         };
       },
       delete: async (input) => {
+        assert.equal(input.snapshotId, "snapshot-metric");
         deleted.push(...input.metricIds);
         return {
           definitionsDeleted: 0,
@@ -176,17 +298,21 @@ test("reviewed deletion chunks all 1001 selected variants without omissions", as
   );
   store.getState().setContext(draft().context);
   const ids = Array.from({ length: 1001 }, (_, index) => `variant-${index}`);
+  await store.getState().load();
   await store.getState().previewDelete(ids, []);
+  assert.equal(reads, 1, "review uses the displayed snapshot without reloading");
   assert.equal(store.getState().deletePlan?.targets.length, 1001);
   await store.getState().executeDelete();
   assert.deepEqual(previews, [1000, 1]);
   assert.deepEqual(deleted, ids);
   assert.equal(store.getState().results?.items.length, 1001);
+  assert.equal(reads, 2, "all deletion batches share one final refresh");
 });
 
 test("mixed bulk review removes covered children before splitting and retains earlier outcomes when a later plan changes", async () => {
   const ids = Array.from({ length: 1001 }, (_, index) => `variant-${index}`);
   let executions = 0;
+  let reads = 0;
   const previews: Array<{ metricIds: string[]; definitionIds: string[] }> = [];
   const source = inventory();
   source.definitions[0].definitionId = "parent";
@@ -198,7 +324,7 @@ test("mixed bulk review removes covered children before splitting and retains ea
     },
   ];
   const store = fixture(
-    { inventory: async () => source },
+    { inventory: async () => { reads++; return source; } },
     {
       previewDelete: async (input) => {
         previews.push(input);
@@ -267,6 +393,59 @@ test("mixed bulk review removes covered children before splitting and retains ea
   );
   assert.equal(results.at(-1)?.status, "not_attempted");
   assert.match(results.at(-1)?.detail ?? "", /Review again/);
+  assert.equal(reads, 2, "a later rejected batch refreshes once after earlier deletions");
+});
+
+test("uncertain bulk deletion stops unsent batches and refreshes inventory exactly once", async () => {
+  const ids = Array.from({ length: 2001 }, (_, index) => `variant-${index}`);
+  let reads = 0;
+  let executions = 0;
+  const store = fixture({ inventory: async () => { reads++; return inventory(); } }, {
+    delete: async (input) => {
+      executions++;
+      assert.equal(input.snapshotId, "snapshot-metric");
+      if (executions === 1) return {
+        definitionsDeleted: 0, metricsDeleted: input.metricIds.length, failures: [],
+        outcomes: input.metricIds.map((metricId) => ({ metricId, status: "deleted" as const })),
+      };
+      return {
+        definitionsDeleted: 0, metricsDeleted: 0, failures: ["Provider response lost"],
+        outcomes: input.metricIds.map((metricId, index) => ({ metricId,
+          status: index === 0 ? "unknown" as const : "not_attempted" as const,
+        })),
+      };
+    },
+  });
+  store.getState().setContext(draft().context);
+  await store.getState().load();
+  await store.getState().previewDelete(ids, []);
+  assert.equal(reads, 1);
+  await store.getState().executeDelete();
+  assert.equal(executions, 2);
+  assert.equal(reads, 2);
+  const items = store.getState().results!.items;
+  assert.equal(items.filter((item) => item.status === "removed").length, 1000);
+  assert.equal(items.filter((item) => item.status === "unknown").length, 1);
+  assert.equal(items.filter((item) => item.status === "not_attempted").length, 1000);
+  assert.equal(items.at(-1)?.metricId, "variant-2000");
+});
+
+test("navigation joins the deletion refresh already in progress", async () => {
+  const refreshed = deferred<PulseInventoryResponse>();
+  let reads = 0;
+  const store = fixture({ inventory: async () => ++reads === 1 ? inventory() : refreshed.promise });
+  store.getState().setContext(draft().context);
+  await store.getState().load();
+  await store.getState().previewDelete(["metric"], []);
+  const deletion = store.getState().executeDelete();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const navigation = store.getState().ensureLoaded();
+  try {
+    assert.equal(reads, 2, "navigation must not start a second final refresh");
+  } finally {
+    refreshed.resolve(inventory("new"));
+    await Promise.all([deletion, navigation]);
+  }
 });
 
 test("unknown follow outcomes are excluded from automatic retry and later pairs remain not sent", async () => {
@@ -408,11 +587,13 @@ test("metric selection cannot imply definition deletion and execute uses exactly
   );
   const context = draft().context;
   store.getState().setContext(context);
+  await store.getState().load();
   await store.getState().previewDelete(["child"], []);
   await store.getState().executeDelete();
   assert.deepEqual(previews, [
     {
       context,
+      snapshotId: "snapshot-metric",
       metricIds: ["child"],
       definitionIds: [],
       allowIncompleteInventory: false,
@@ -421,6 +602,7 @@ test("metric selection cannot imply definition deletion and execute uses exactly
   assert.deepEqual(commands, [
     {
       context,
+      snapshotId: "snapshot-metric",
       metricIds: ["child"],
       definitionIds: [],
       previewFingerprint: "exact",
@@ -469,6 +651,7 @@ test("explicit whole-definition previews retain the backend blast radius and par
     },
   );
   store.getState().setContext(draft().context);
+  await store.getState().load();
   await store.getState().previewDelete(["other"], ["parent"]);
   assert.deepEqual(store.getState().deletePlan?.targets[0].affectedMetricIds, [
     "visible",
@@ -495,6 +678,7 @@ test("changed deletion plans clear approval without claiming success", async () 
     },
   );
   store.getState().setContext(draft().context);
+  await store.getState().load();
   await store.getState().previewDelete(["child"], []);
   await store.getState().executeDelete();
   assert.equal(store.getState().deletePlan, null);
@@ -600,6 +784,7 @@ test("completed follower batches appear while a slower batch is still loading", 
   );
   const store = fixture({
     inventory: async () => ({
+      snapshotId: "snapshot-many",
       definitions,
       totalScanned: 201,
       truncated: false,
@@ -736,6 +921,7 @@ test("incomplete inventory offers an explicit by-ID deletion review", async () =
     },
   );
   store.getState().setContext(draft().context);
+  await store.getState().load();
   await store.getState().previewDelete([], ["parent"]);
   assert.equal(store.getState().deletePlan, null);
   assert.equal(store.getState().deleteOverridable, true);

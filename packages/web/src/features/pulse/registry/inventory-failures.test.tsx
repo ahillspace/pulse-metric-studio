@@ -17,6 +17,7 @@ const unavailable = (definitionId: string, name: string) => ({
 
 test("partial inventory names each failed definition and why it failed", () => {
   const inventory: PulseInventoryResponse = {
+    snapshotId: "snapshot",
     definitions: [unavailable("d1", "Net Profit"), unavailable("d2", "Order Cost")],
     totalScanned: 2,
     truncated: false,
@@ -33,6 +34,6 @@ test("partial inventory names each failed definition and why it failed", () => {
 });
 
 test("complete inventory renders no failure banner", () => {
-  const inventory: PulseInventoryResponse = { definitions: [], totalScanned: 0, truncated: false, failures: [] };
+  const inventory: PulseInventoryResponse = { snapshotId: "snapshot", definitions: [], totalScanned: 0, truncated: false, failures: [] };
   assert.equal(renderToStaticMarkup(<InventoryFailures inventory={inventory} />), "");
 });

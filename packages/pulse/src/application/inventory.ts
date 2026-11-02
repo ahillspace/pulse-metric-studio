@@ -36,7 +36,7 @@ export type MetricVariant = PulseMetricVariant;
 
 export type InventoryFailure = PulseInventoryResponse['failures'][number];
 
-export type ExistingMetricsResult = PulseInventoryResponse;
+export type ExistingMetricsResult = Omit<PulseInventoryResponse, 'snapshotId'>;
 
 interface DefinitionCacheEntry {
   inventory: PulseDefinitionInventory;

@@ -232,15 +232,17 @@ export const PulseAuthorProposalSchema = z.object({
 export type PulseAuthorProposal = z.infer<typeof PulseAuthorProposalSchema>;
 export const PreparePulseDeleteRequestSchema = z.object({
   context: PulseDraftContextSchema,
+  snapshotId: id,
   metricIds: z.array(id).max(1000),
   definitionIds: z.array(id).max(1000),
-  /** Deletes selected resources by ID when Tableau cannot return their complete current inventory. */
+  /** Reviews known definitions with incomplete cached child inventory. Unknown identities remain forbidden. */
   allowIncompleteInventory: z.boolean().default(false),
 });
 export const ExecutePulseDeleteRequestSchema =
   PreparePulseDeleteRequestSchema.extend({ previewFingerprint: id });
 export const PulseDeletePlanSchema = z.object({
   context: PulseDraftContextSchema,
+  snapshotId: id,
   metricIds: z.array(id),
   definitionIds: z.array(id),
   allowIncompleteInventory: z.boolean(),
@@ -250,7 +252,7 @@ export const PulseDeletePlanSchema = z.object({
       kind: z.enum(['definition', 'metric']),
       id,
       name: z.string(),
-      /** Null when the metric is absent from current inventory and is deleted by ID. */
+      /** Owning definition from the displayed inventory snapshot. */
       definitionId: id.nullable(),
       /** False when Tableau did not return every metric this target removes. */
       inventoryComplete: z.boolean(),
@@ -329,6 +331,7 @@ export const PulseInventoryFailureSchema = z.object({
   diagnostic: PulseProviderDiagnosticSchema,
 });
 export const PulseInventoryResponseSchema = z.object({
+  snapshotId: id,
   definitions: z.array(PulseDefinitionNodeSchema),
   totalScanned: z.number().int(),
   truncated: z.boolean(),

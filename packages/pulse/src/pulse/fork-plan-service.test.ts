@@ -495,29 +495,27 @@ test('dimension routes read every source from POST bodies and reject invalid inp
   } finally { clearSession(); await app.close(); }
 });
 
-test('deletion accepts reordered metrics but rejects a changed metric specification', async () => {
+test('cached deletion accepts reordered metrics but rejects a tampered fingerprint', async () => {
   let reversed = false;
-  let changed = false;
   let deletes = 0;
   const app = Fastify();
   const context = { connectionId: 'delete-order-test', serverUrl: session.serverUrl, siteId: session.siteId, datasourceLuid: 'datasource-1' };
   registerPulseRoutes(app, { deletion: {
     inventory: async () => ({ totalScanned: 1, truncated: false, failures: [], definitions: [{
       definitionId: 'definition', name: 'Sales', description: '', measure: 'Sales', aggregation: 'SUM', timeDimension: 'Date', inventoryStatus: 'complete',
-      metrics: (reversed ? ['b', 'a'] : ['a', 'b']).map(metricId => ({ metricId, name: metricId, measurementPeriod: {}, timeframeLabel: 'Custom', filters: [], comparison: {}, isDefault: false, isScoped: false, scopedState: 'variant', specification: { comparison: changed && metricId === 'a' ? 'changed' : 'original' } })),
+      metrics: (reversed ? ['b', 'a'] : ['a', 'b']).map(metricId => ({ metricId, name: metricId, measurementPeriod: {}, timeframeLabel: 'Custom', filters: [], comparison: {}, isDefault: false, isScoped: false, scopedState: 'variant', specification: { comparison: 'original' } })),
     }] }),
     execute: async () => { deletes++; return { definitionsDeleted: 1, metricsDeleted: 0, failures: [], outcomes: [] }; },
   } });
   setSession(session, { connectionId: context.connectionId, patSecret: 'test' });
-  const selection = { context, definitionIds: ['definition'], metricIds: [] };
+  const selection = { context, snapshotId: 'snapshot', definitionIds: ['definition'], metricIds: [] };
   try {
     const preview = await app.inject({ method: 'POST', url: '/api/pulse/registry/delete-preview', payload: selection });
     assert.equal(preview.statusCode, 200, preview.body);
     reversed = true;
     const accepted = await app.inject({ method: 'POST', url: '/api/pulse/registry/delete', payload: { ...selection, previewFingerprint: preview.json().previewFingerprint } });
     assert.equal(accepted.statusCode, 200, accepted.body);
-    changed = true;
-    const rejected = await app.inject({ method: 'POST', url: '/api/pulse/registry/delete', payload: { ...selection, previewFingerprint: preview.json().previewFingerprint } });
+    const rejected = await app.inject({ method: 'POST', url: '/api/pulse/registry/delete', payload: { ...selection, previewFingerprint: 'tampered' } });
     assert.equal(rejected.statusCode, 409, rejected.body);
     assert.equal(rejected.json().code, 'delete_plan_changed');
     assert.equal(deletes, 1);

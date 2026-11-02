@@ -107,7 +107,7 @@ test("real follow API retains confirmed pairs when authentication stops the next
   }
 });
 
-test("real deletion review retains every cascade name and follower count before mixed bulk execution", async () => {
+test("cached deletion review retains cascade names and rejects a tampered fingerprint before mixed bulk execution", async () => {
   const session = {
     serverUrl: "https://tableau.test",
     siteId: "site",
@@ -145,7 +145,6 @@ test("real deletion review retains every cascade name and follower count before 
     inventoryStatus: "complete" as const,
     metrics: [metric(`${id}-default`, true), metric(`${id}-variant`, false)],
   }));
-  let changed = false;
   const executions: unknown[] = [];
   const server = buildApp({
     registerPulseRoutes: (app) =>
@@ -155,23 +154,7 @@ test("real deletion review retains every cascade name and follower count before 
             totalScanned: 3,
             truncated: false,
             failures: [],
-            definitions: changed
-              ? definitions.map((definition) =>
-                  definition.definitionId === "a"
-                    ? {
-                        ...definition,
-                        metrics: [
-                          ...definition.metrics,
-                          metric("later", false),
-                        ],
-                      }
-                    : definition,
-                )
-              : definitions,
-          }),
-          followerCounts: async (_session, ids) => ({
-            countsByMetricId: Object.fromEntries(ids.map((id) => [id, 7])),
-            errorsByMetricId: {},
+            definitions,
           }),
           execute: async (_session, entries) => {
             executions.push(entries);
@@ -188,6 +171,7 @@ test("real deletion review retains every cascade name and follower count before 
   try {
     const selection = {
       context,
+      snapshotId: "inventory-snapshot",
       definitionIds: ["a", "b"],
       metricIds: ["a-default", "a-variant", "c-variant"],
     };
@@ -200,18 +184,16 @@ test("real deletion review retains every cascade name and follower count before 
     const plan = preview.json();
     assert.equal(plan.targets.length, 3);
     assert.deepEqual(plan.targets[0].affectedMetrics, [
-      { id: "a-default", name: "Metric a-default", followerCount: 7 },
-      { id: "a-variant", name: "Metric a-variant", followerCount: 7 },
+      { id: "a-default", name: "Metric a-default", followerCount: null },
+      { id: "a-variant", name: "Metric a-variant", followerCount: null },
     ]);
-    changed = true;
     const stale = await server.inject({
       method: "POST",
       url: "/api/pulse/registry/delete",
-      payload: { ...selection, previewFingerprint: plan.previewFingerprint },
+      payload: { ...selection, previewFingerprint: "tampered" },
     });
     assert.equal(stale.statusCode, 409);
     assert.equal(executions.length, 0);
-    changed = false;
     const response = await server.inject({
       method: "POST",
       url: "/api/pulse/registry/delete",

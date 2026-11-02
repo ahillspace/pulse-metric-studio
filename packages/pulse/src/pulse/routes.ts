@@ -6,7 +6,7 @@ import {
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { requirePulseOwner } from "../application/context.js";
-import { getExistingMetrics } from "../application/inventory.js";
+import { loadPulseInventory } from "../application/inventory-snapshots.js";
 import {
   followTargets,
   getFollowersDetail,
@@ -78,7 +78,7 @@ export function registerPulseRoutes(
       throw app.httpErrors.badRequest(
         "datasourceLuid query parameter is required",
       );
-    return getExistingMetrics(session, datasourceLuid);
+    return loadPulseInventory(session, datasourceLuid);
   });
 
   app.post("/api/pulse/dimensions", async (req) => {
