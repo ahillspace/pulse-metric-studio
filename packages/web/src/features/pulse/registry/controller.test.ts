@@ -668,6 +668,41 @@ test("explicit whole-definition previews retain the backend blast radius and par
   );
 });
 
+test("denied cached deletion records errors only in results and keeps one final refresh", async () => {
+  const calls: string[] = [];
+  const store = fixture({
+    inventory: async () => { calls.push("inventory"); return inventory(); },
+    followState: async (ids) => { calls.push("counts"); return { ...unavailableFollowState(ids, "unavailable"),
+      groupFollowerIdsByMetricId: {}, userFollowerIdsByMetricId: {}, availabilityByMetricId: {}, selectedGroupId: null, groupContextUnavailable: false }; },
+  }, {
+    previewDelete: async (input) => {
+      calls.push("cached-preview");
+      return { ...input, previewFingerprint: "cached-reviewed", warnings: [], targets: input.metricIds.map(id => ({
+        kind: "metric" as const, id, name: id, definitionId: "definition", inventoryComplete: true, affectedMetricIds: [id],
+      })) };
+    },
+    delete: async (input) => {
+      assert.deepEqual(input.metricIds, ["metric"]); assert.deepEqual(input.definitionIds, []);
+      calls.push("DELETE metric");
+      return { definitionsDeleted: 0, metricsDeleted: 0, failures: ["This account cannot delete the metric."],
+        outcomes: [{ metricId: "metric", status: "failed", error: "This account cannot delete the metric." }] };
+    },
+  });
+  store.getState().setContext(draft().context); await store.getState().load();
+  await store.getState().previewDelete(["metric"], []);
+  assert.deepEqual(calls, ["inventory", "counts", "cached-preview"], "review performs no new provider reads");
+  await store.getState().executeDelete();
+  assert.deepEqual(calls, ["inventory", "counts", "cached-preview", "DELETE metric", "inventory", "counts"]);
+  assert.equal(store.getState().deletePlan, null);
+  assert.equal(store.getState().deleteError, null, "recorded execution errors must not reopen deletion review");
+  assert.equal(store.getState().results?.items[0].status, "failed");
+  assert.match(store.getState().results?.items[0].detail ?? "", /cannot delete/);
+  assert.match(store.getState().results?.summary ?? "", /cannot delete/);
+  store.getState().dismissResults();
+  assert.equal(store.getState().results, null);
+  assert.equal(store.getState().deleteError, null);
+});
+
 test("changed deletion plans clear approval without claiming success", async () => {
   const store = fixture(
     {},

@@ -80,7 +80,7 @@ test("permission retry delegates only to the access-only refresh", async (t) => 
 test("self-follow results and Activity name the captured publisher and retain partial outcomes", () => {
   const result = receipt();
   result.follow = { ...result.follow, mode: "self", requested: true, selfRecipient: { id: "publisher", name: "Publishing account" },
-    group: { status: "skipped" }, membership: { status: "skipped" },
+    group: { status: "not_attempted" }, membership: { status: "not_attempted" },
     subscriptions: [{ itemIndex: 0, metricId: "metric", status: "unknown", error: "The follow outcome is unconfirmed. Check Tableau before retrying." }] } as any;
   for (const html of [renderToStaticMarkup(<PublicationResult receipt={result} onClose={() => {}} onActivity={() => {}} />), renderToStaticMarkup(<Receipt receipt={result} showActions={false} />)]) {
     assert.match(html, /Publishing account/);
@@ -88,6 +88,44 @@ test("self-follow results and Activity name the captured publisher and retain pa
     assert.doesNotMatch(html, /Digest setup|Your membership|Digest group/);
   }
 });
+
+const receiptRenderers = {
+  PublicationResult: (result: ReturnType<typeof receipt>) => renderToStaticMarkup(<PublicationResult receipt={result} onClose={() => {}} onActivity={() => {}} />),
+  Activity: (result: ReturnType<typeof receipt>) => renderToStaticMarkup(<Receipt receipt={result} showActions={false} />),
+};
+
+for (const [renderer, render] of Object.entries(receiptRenderers)) {
+  test(`${renderer} does not warn for successful serialized self-follow with unattempted group stages`, () => {
+    const result = receipt();
+    // Serialized backend shape: emptyFollowReceipt leaves inapplicable group stages not_attempted.
+    result.follow = JSON.parse('{"version":1,"mode":"self","requested":true,"selfRecipient":{"id":"publisher"},"group":{"status":"not_attempted"},"membership":{"status":"not_attempted"},"subscriptions":[{"itemIndex":0,"metricId":"metric","status":"created"}]}');
+    const html = render(result);
+    assert.match(html, /Personal follow|Personal follow target/);
+    assert.doesNotMatch(html, /needs attention|Digest setup|Your membership/);
+  });
+
+  for (const status of ["failed", "unknown", "not_attempted"] as const) {
+    test(`${renderer} still warns for a ${status} personal subscription`, () => {
+      const result = receipt();
+      result.follow = { version: 1, mode: "self", requested: true, selfRecipient: { id: "publisher" },
+        group: { status: "not_attempted" }, membership: { status: "not_attempted" },
+        subscriptions: [{ itemIndex: 0, metricId: "metric", status, error: "Personal subscription requires inspection." }] };
+      const html = render(result);
+      assert.match(html, /Personal follow(?: -)? needs attention/);
+      assert.match(html, /Personal subscription requires inspection/);
+      if (status === "unknown" && renderer === "Activity") assert.match(html, /Unconfirmed/);
+    });
+  }
+
+  test(`${renderer} retains group-stage attention and ignores unrequested none stages`, () => {
+    const result = receipt();
+    result.follow = { version: 1, mode: "group", requested: true, group: { status: "not_attempted" }, membership: { status: "not_attempted" },
+      subscriptions: [{ itemIndex: 0, metricId: "metric", status: "created" }] };
+    assert.match(render(result), /(?:Digest setup|Digest group -) needs attention/);
+    result.follow.mode = "none"; result.follow.requested = false;
+    assert.doesNotMatch(render(result), /needs attention/);
+  });
+}
 
 for (const mode of ["self", "group", "none"] as const) {
   test(`publication review states ${mode} intent and the captured self target`, async (t) => {

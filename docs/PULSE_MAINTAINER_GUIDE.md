@@ -304,6 +304,7 @@ See the [Pulse API reference](https://help.tableau.com/current/api/rest_api/en-u
 Deletion review uses names and metric identities from the immutable inventory snapshot without changing reviewed IDs or fingerprints.
 Follower counts come from the Manager's cached follow state; unavailable counts remain unknown.
 Deletion review does not fetch follower identities or refresh counts.
+Completed deletion outcomes use one results dialog; admission errors remain in the review dialog.
 Outside deletion review, deliberate follower inspection uses the per-metric follower-detail endpoint; unavailable or partial reads remain explicit.
 
 Metric Manager previews use Tableau's springboard insight and metric card image APIs through the existing authenticated connection.

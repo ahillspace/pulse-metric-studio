@@ -3,6 +3,7 @@ import type { PulsePublishReceipt } from "@pulse-metric-studio/shared";
 import { useActivity } from "./controller";
 import { ReceiptActions } from "./ReceiptActions";
 import { TableauDiagnosticDetails } from "../components/TableauDiagnosticDetails";
+import { publicationFollowProblems } from "../publication-follow";
 import "./activity.css";
 
 const followLabels = {
@@ -31,15 +32,7 @@ export function Receipt({
   const readError = useActivity((state) =>
     state.readReceiptId === receipt.id ? state.readError : null,
   );
-  const followNeedsAttention =
-    receipt.follow.requested &&
-    [
-      receipt.follow.group,
-      receipt.follow.membership,
-      ...receipt.follow.subscriptions,
-    ].some((item) =>
-      ["failed", "unknown", "not_attempted"].includes(item.status),
-    );
+  const followNeedsAttention = publicationFollowProblems(receipt.follow).length > 0;
   const personal = receipt.follow.mode === "self";
   return (
     <section className="pulse-receipt" aria-label="Publication receipt">

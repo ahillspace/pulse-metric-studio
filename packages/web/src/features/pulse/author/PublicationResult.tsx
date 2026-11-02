@@ -9,6 +9,7 @@ import { createPublishedPreviewCache, PublishedMetrics } from "./PublishedMetric
 import { sessionOwnerKey } from "../shell/session-events";
 import { ConfirmUndo } from "../activity/ConfirmUndo";
 import { TableauDiagnosticDetails } from "../components/TableauDiagnosticDetails";
+import { publicationFollowProblems } from "../publication-follow";
 
 export function PublicationResult({ receipt, onClose, onActivity }: {
   receipt: PulsePublishReceipt;
@@ -32,7 +33,7 @@ export function PublicationResult({ receipt, onClose, onActivity }: {
   const canUndo = receipt.undoEligible || receipt.items.some((item) => item.undoStatus === "failed" || item.undoStatus === "unknown");
   const canDeleteGroup = mode === "group" && group.status === "created" && Boolean(group.id) && group.deletion?.status !== "deleted";
   const failures = receipt.items.filter((item) => item.creationStatus !== "created");
-  const followProblems = [group, receipt.follow.membership, ...receipt.follow.subscriptions].filter((item) => ['failed', 'unknown', 'not_attempted'].includes(item.status));
+  const followProblems = publicationFollowProblems(receipt.follow);
   const undone = receipt.items.filter((item) => item.undoStatus === "deleted").length;
   const published = receipt.items.filter((item) => item.creationStatus === "created" && item.undoStatus !== "deleted");
   const live = connected && receipt.context && contentUrl !== undefined && session ? { context: receipt.context, siteContentUrl: contentUrl, owner: session } : null;
