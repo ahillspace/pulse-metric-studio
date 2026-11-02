@@ -24,7 +24,7 @@ import {
 } from "../connections/controller";
 import { errorMessage } from "../shell/notifications";
 import { useActivity } from "../activity/controller";
-import type { SessionOwner } from "../shell/session-events";
+import { sessionOwnerKey, type SessionOwner } from "../shell/session-events";
 
 export interface DraftEditor {
   record: PulseDraftRecord;
@@ -85,7 +85,7 @@ interface AuthorState {
   toggleSlicer: (id: string) => void;
   setAudience: (value: string) => void;
   setAudienceLocked: (value: boolean) => void;
-  setGroupFollow: (value: boolean) => void;
+  setFollowMode: (value: PulseWorkspaceDocumentV1["followMode"]) => void;
   clearConfiguration: () => void;
   setComposer: (value: string) => void;
   flush: (id?: string) => Promise<PulseDraftRecord>;
@@ -346,7 +346,7 @@ export function createAuthorController(
             set((state) => ({
               entries: { ...state.entries, [record.id]: editor(record) },
             }));
-          if (request !== navigation || owner !== session()) return;
+          if (request !== navigation || sessionOwnerKey(owner) !== sessionOwnerKey(session())) return;
           set({ activeId: record.id, loading: false });
           await get().refreshCatalog(record.id);
         } catch (error) {
@@ -367,7 +367,7 @@ export function createAuthorController(
             entry.record.context.datasourceLuid,
             refresh,
           );
-          if (catalogRequests.get(id) !== request || owner !== session())
+          if (catalogRequests.get(id) !== request || sessionOwnerKey(owner) !== sessionOwnerKey(session()))
             return;
           update(id, (current) => {
             const document = PulseWorkspaceDocumentV1Schema.parse({
@@ -478,9 +478,9 @@ export function createAuthorController(
         get().edit((document) => {
           document.digestAudienceLocked = value;
         }),
-      setGroupFollow: (value) =>
+      setFollowMode: (value) =>
         get().edit((document) => {
-          document.groupFollow = value;
+          document.followMode = value;
         }),
       clearConfiguration: () => {
         if (get().closeStatus !== "open") return;
@@ -777,7 +777,7 @@ export function createAuthorController(
           update(id, { receipt, preview: null, publishCommandId: null });
           onReceipt(receipt);
         } catch (error) {
-          directoryChanged = entry.preview.groupFollow && (!(error instanceof PulseApiError) || error.status >= 500);
+          directoryChanged = entry.preview.followMode === "group" && (!(error instanceof PulseApiError) || error.status >= 500);
           const message =
             error instanceof PulseApiError
               ? error.message

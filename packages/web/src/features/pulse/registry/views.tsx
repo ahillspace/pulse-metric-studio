@@ -16,6 +16,7 @@ import {
   registryActionCounts,
   registryActionOutcome,
   registryActionLabel,
+  registryFailureMessages,
   summarizeRegistryTargets,
   registryTargetHeadline,
   type RegistryActionResults,
@@ -312,6 +313,7 @@ export function RegistryResultsModal({
 }) {
   const outcome = registryActionOutcome(results.items);
   const headlines = registryResultHeadlines(results);
+  const failures = registryFailureMessages(results);
   return (
     <Modal
       title={results.title}
@@ -335,6 +337,10 @@ export function RegistryResultsModal({
           </div>
         ))}
       </div>
+      {failures.messages.length > 0 && <div className="warning-banner" role="alert">
+        <ul>{failures.messages.map(message => <li key={message}>{message}</li>)}</ul>
+        {failures.remaining > 0 && <p>{failures.remaining} more reason{failures.remaining === 1 ? "" : "s"} in per-metric detail.</p>}
+      </div>}
       <details className="pulse-results-detail">
         <summary>Per-metric detail ({results.items.length})</summary>
         <ul className="result-list">

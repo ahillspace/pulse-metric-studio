@@ -57,6 +57,17 @@ export interface CatalogParameter {
   dataType: string;
 }
 
+export const VdsFailureSchema = z.object({
+  operation: z.enum(['read-metadata', 'describe-datasource']),
+  message: z.string().min(1).max(500),
+  status: z.number().int().min(100).max(599).optional(),
+  providerCode: z.string().min(1).max(80).optional(),
+  detail: z.string().max(500).optional(),
+  kind: z.enum(['auth', 'http', 'network', 'invalid-response']).optional(),
+});
+export const VdsFailuresSchema = z.array(VdsFailureSchema).max(2);
+export type VdsFailure = z.infer<typeof VdsFailureSchema>;
+
 export interface DatasourceCatalog {
   datasourceLuid: string;
   datasourceName: string;
@@ -70,6 +81,8 @@ export interface DatasourceCatalog {
   diagnostics?: FieldCatalogDiagnostics;
   source: 'vds' | 'metadata' | 'cache';
   warnings: string[];
+  /** Primary VDS failures retained when another discovery path supplies a usable catalog. */
+  vdsFailures?: VdsFailure[];
 }
 
 export interface FieldCatalogDiagnostics {

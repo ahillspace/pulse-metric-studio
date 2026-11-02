@@ -1,4 +1,4 @@
-import { getSession, getSessionContext, isSessionCurrent } from "@pulse-metric-studio/core";
+import { getSession, getSessionContext, isSessionCurrent, TableauError, type TableauSession } from "@pulse-metric-studio/core";
 import {
   PulseFollowCommandSchema,
   PulseVariantCommandSchema,
@@ -30,6 +30,15 @@ import {
   pulseForkPlanService,
   type PulseForkPlanService,
 } from "./fork-plan-service.js";
+import { pulseOperationErrorMessage } from './operation-errors.js';
+
+async function dimensionOperation<T>(session: TableauSession, operation: () => Promise<T>): Promise<T> {
+  try { return await operation(); }
+  catch (error) {
+    if (!(error instanceof TableauError)) throw error;
+    throw new PulseDimensionalForkError(pulseOperationErrorMessage(error, 'dimension-fields', [session.token]), error.kind === 'auth' ? 401 : 502);
+  }
+}
 
 const DimensionSourcesSchema = z.object({
   sourceMetricIds: z.array(z.string().trim().min(1).max(512)).min(1),
@@ -111,24 +120,24 @@ export function registerPulseRoutes(
     const session = requireSession(req);
     const body = DimensionSourcesSchema.safeParse(req.body);
     if (!body.success) throw new PulseDimensionalForkError(body.error.message, 400);
-    return dimensions.listEligibleDimensions(
+    return dimensionOperation(session, () => dimensions.listEligibleDimensions(
       session,
       body.data.sourceMetricIds,
-    );
+    ));
   });
 
   app.post("/api/pulse/dimensions/count", async (req) => {
     const session = requireSession(req);
     const body = DimensionFieldSchema.safeParse(req.body);
     if (!body.success) throw new PulseDimensionalForkError(body.error.message, 400);
-    return dimensions.countDimensionMembers(session, body.data);
+    return dimensionOperation(session, () => dimensions.countDimensionMembers(session, body.data));
   });
 
   app.post("/api/pulse/dimensions/values", async (req) => {
     const session = requireSession(req);
     const body = DimensionValuesSchema.safeParse(req.body);
     if (!body.success) throw new PulseDimensionalForkError(body.error.message, 400);
-    return dimensions.listDimensionValues(session, body.data);
+    return dimensionOperation(session, () => dimensions.listDimensionValues(session, body.data));
   });
 
   app.post("/api/pulse/metrics/fork", async (req, reply) => {

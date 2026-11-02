@@ -7,8 +7,9 @@ import {
   type PulsePublishReceipt,
   type PulseInventoryResponse,
 } from "@pulse-metric-studio/shared";
+import type { TableauSessionInfo } from "../../../api/client";
 
-export const session = {
+export const session: TableauSessionInfo = {
   connectionId: "connection",
   sessionGeneration: 1,
   serverUrl: "https://tableau.example",
@@ -104,6 +105,7 @@ export function receipt(id = "receipt"): PulsePublishReceipt {
     ],
     follow: {
       version: 1,
+      mode: "none",
       requested: false,
       group: { status: "skipped" },
       membership: { status: "skipped" },

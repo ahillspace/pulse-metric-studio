@@ -4,6 +4,8 @@ import {
   apiPath,
   sanitizeProviderMessage,
   TableauError,
+  getGroupCreationAccess,
+  getSessionContext,
   type TableauSession,
 } from "@pulse-metric-studio/core";
 import {
@@ -17,6 +19,8 @@ import {
   type PulsePublishItemReceipt,
   type PulsePublishPlan,
   type PulsePublishReceipt,
+  type PulseFollowReceipt,
+  type PulseSelfRecipient,
 } from "@pulse-metric-studio/shared";
 import {
   buildCreatePayloads,
@@ -30,6 +34,8 @@ import {
 import { addUserToGroup, ensureGroup, deleteGroup } from "../pulse/groups.js";
 import {
   batchCreateGroupSubscriptions,
+  batchCreateUserSubscriptions,
+  SubscriptionBatchInterrupted,
   createDefinition,
   deleteDefinition,
   resolveDefaultMetricId,
@@ -38,6 +44,7 @@ import { requirePulseOwner } from "./context.js";
 import { PulseApplicationError } from "./errors.js";
 import { fingerprint } from "./fingerprint.js";
 import { invalidatePulseDefinitionInventory } from "./inventory.js";
+import { pulseOperationDiagnostic, pulseOperationErrorMessage, type PulseOperation } from '../pulse/operation-errors.js';
 
 export interface PublishDependencies {
   catalog(
@@ -49,6 +56,8 @@ export interface PublishDependencies {
   ensureGroup: typeof ensureGroup;
   addMember: typeof addUserToGroup;
   subscribe: typeof batchCreateGroupSubscriptions;
+  subscribeUser: typeof batchCreateUserSubscriptions;
+  groupCreationAccess: typeof getGroupCreationAccess;
   deleteDefinition: typeof deleteDefinition;
   deleteGroup: typeof deleteGroup;
   currentUser(session: TableauSession): Promise<string>;
@@ -66,6 +75,8 @@ const defaultDependencies: PublishDependencies = {
   ensureGroup,
   addMember: addUserToGroup,
   subscribe: batchCreateGroupSubscriptions,
+  subscribeUser: batchCreateUserSubscriptions,
+  groupCreationAccess: getGroupCreationAccess,
   deleteDefinition,
   deleteGroup,
   currentUser: async (session) => {
@@ -84,12 +95,9 @@ export function digestGroupName(
   return `pmStudio - ${datasourceName} - ${audience}`;
 }
 
-function diagnostic(error: unknown): PulseDiagnostic {
+function diagnostic(error: unknown, operation: PulseOperation = 'publish', session?: TableauSession): PulseDiagnostic {
   return {
-    message: sanitizeProviderMessage(
-      error instanceof Error ? error.message : String(error),
-    ),
-    ...(error instanceof TableauError ? { status: error.status } : {}),
+    ...pulseOperationDiagnostic(error, operation, session ? [session.token] : []),
     ...(error instanceof PulseApplicationError ? { code: error.code } : {}),
   };
 }
@@ -133,11 +141,30 @@ export class PulsePublishService {
   private async prepare(draftId: string, revision: number) {
     const draft = this.repository.assertRevision(draftId, revision);
     const session = requirePulseOwner(draft.context);
+    const capturedUserId = session.userId;
+    const capturedContext = getSessionContext(session);
+    const assertOwner = () => {
+      requirePulseOwner(draft.context, session);
+      if (session.userId !== capturedUserId || getSessionContext(session) !== capturedContext)
+        throw new PulseApplicationError('tableau_context_changed', 'The Tableau account changed. Review this publication again.', 409);
+    };
+    const mode = draft.document.followMode;
+    if (mode === 'self' && !capturedUserId?.trim())
+      throw new PulseApplicationError('tableau_user_unavailable', 'Reconnect to Tableau to identify the account that will follow these metrics.', 401);
+    const selfRecipient: PulseSelfRecipient | undefined = mode === 'self' ? { id: capturedUserId, ...(session.userName ? { name: session.userName } : {}) } : undefined;
     const catalog = await this.dependencies.catalog(
       session,
       draft.context.datasourceLuid,
     );
-    requirePulseOwner(draft.context, session);
+    assertOwner();
+    const groupAccess = mode === 'group' ? this.dependencies.groupCreationAccess(session) : undefined;
+    const assertGroupAccess = () => {
+      assertOwner();
+      if (mode !== 'group') return;
+      const access = this.dependencies.groupCreationAccess(session);
+      if (access.state !== 'allowed')
+        throw new PulseApplicationError('tableau_group_creation_unavailable', access.message, access.state === 'denied' ? 403 : 409, { groupCreation: access });
+    };
     this.repository.assertRevision(draftId, revision);
     if (catalog.datasourceLuid !== draft.context.datasourceLuid)
       throw new PulseApplicationError(
@@ -155,6 +182,7 @@ export class PulsePublishService {
     const issues = [
       ...validatePulseDocument(draft.document, catalog),
       ...validateSelection(input),
+      ...(groupAccess && groupAccess.state !== 'allowed' ? [{ field: 'followMode', message: groupAccess.message }] : []),
     ];
     const uniqueIssues = [
       ...new Map(
@@ -170,10 +198,12 @@ export class PulsePublishService {
         description: metric.description,
       }));
     const previewFingerprint = fingerprint({
-      serializerVersion: 1,
+      serializerVersion: 2,
       context: draft.context,
       payloads,
-      groupFollow: draft.document.groupFollow,
+      followMode: mode,
+      authenticatedOwner: { connectionId: capturedContext?.connectionId, serverUrl: session.serverUrl, siteId: session.siteId, userId: capturedUserId, sessionGeneration: capturedContext?.generation },
+      selfTarget: selfRecipient?.id,
       audience: draft.document.digestAudience,
     });
     const plan: PulsePublishPlan = {
@@ -184,10 +214,11 @@ export class PulsePublishService {
       previewFingerprint,
       metrics: summaries,
       digestAudience: draft.document.digestAudience,
-      groupFollow: draft.document.groupFollow,
+      followMode: mode,
+      ...(selfRecipient ? { selfRecipient } : {}),
       issues: uniqueIssues,
     };
-    return { draft, session, payloads, plan };
+    return { draft, session, payloads, plan, assertGroupAccess, assertOwner };
   }
   async preview(draftId: string, revision: number): Promise<PulsePublishPlan> {
     return (await this.prepare(draftId, revision)).plan;
@@ -204,10 +235,11 @@ export class PulsePublishService {
     });
     const existing = this.repository.findReceipt(request.commandId);
     if (existing) return this.duplicate(request.commandId, requestHash);
-    const { draft, session, payloads, plan } = await this.prepare(
+    const { draft, session, payloads, plan, assertGroupAccess, assertOwner } = await this.prepare(
       draftId,
       request.expectedRevision,
     );
+    assertGroupAccess();
     if (plan.issues.length)
       throw new PulseApplicationError(
         "publish_validation_failed",
@@ -238,7 +270,9 @@ export class PulsePublishService {
         undoDiagnostic: null,
       }),
     );
-    const follow = emptyFollowReceipt(draft.document.groupFollow, items.length);
+    const follow = emptyFollowReceipt(draft.document.followMode, items.length, plan.selfRecipient);
+    // No await separates this current permission/owner check, admission, and the first write.
+    assertGroupAccess();
     this.repository.admit({
       id: request.commandId,
       requestHash,
@@ -254,7 +288,7 @@ export class PulsePublishService {
     let authenticationFailed = false;
     try {
       for (const item of items) {
-        requirePulseOwner(draft.context, session);
+        assertOwner();
         item.creationStatus = "unknown";
         this.repository.saveItem(request.commandId, item);
         let created: Awaited<ReturnType<typeof createDefinition>>;
@@ -264,7 +298,7 @@ export class PulsePublishService {
             payloads[item.itemIndex]!,
           );
         } catch (error) {
-          item.diagnostic = diagnostic(error);
+          item.diagnostic = diagnostic(error, 'publish', session);
           // Only definitive validation/auth/permission rejection establishes no creation.
           if (
             error instanceof TableauError &&
@@ -294,7 +328,7 @@ export class PulsePublishService {
         this.repository.saveItem(request.commandId, item);
         invalidatePulseDefinitionInventory(session);
         try {
-          requirePulseOwner(draft.context, session);
+          assertOwner();
           item.metricId = await this.dependencies.resolve(
             session,
             created.definitionId,
@@ -302,7 +336,7 @@ export class PulsePublishService {
           item.resolutionStatus = item.metricId ? "resolved" : "pending";
         } catch (error) {
           item.resolutionStatus = "failed";
-          item.diagnostic = diagnostic(error);
+          item.diagnostic = diagnostic(error, 'visibility', session);
           authenticationFailed =
             error instanceof TableauError && error.kind === "auth";
         }
@@ -311,10 +345,10 @@ export class PulsePublishService {
       }
       if (
         !authenticationFailed &&
-        follow.requested &&
+        follow.mode === 'group' &&
         items.some((item) => item.creationStatus === "created")
       ) {
-        requirePulseOwner(draft.context, session);
+        assertOwner();
         const name = digestGroupName(
           draft.datasourceName,
           draft.document.digestAudience,
@@ -328,7 +362,7 @@ export class PulsePublishService {
           follow.group = {
             status: "unknown",
             name,
-            error: diagnostic(error).message,
+            error: pulseOperationErrorMessage(error, 'group', [session.token]),
           };
         }
         if (group)
@@ -339,7 +373,7 @@ export class PulsePublishService {
           };
         this.repository.saveFollow(request.commandId, follow);
         if (group) {
-          requirePulseOwner(draft.context, session);
+          assertOwner();
           follow.membership = { status: "unknown" };
           this.repository.saveFollow(request.commandId, follow);
           let membershipRequested = false;
@@ -358,48 +392,60 @@ export class PulsePublishService {
               error instanceof TableauError && error.kind === "auth";
             follow.membership = {
               status: membershipRequested ? "unknown" : "failed",
-              error: diagnostic(error).message,
+              error: pulseOperationErrorMessage(error, 'membership', [session.token]),
             };
           }
           this.repository.saveFollow(request.commandId, follow);
-          for (const subscription of follow.subscriptions) {
-            if (authenticationFailed) break;
-            const item = items[subscription.itemIndex]!;
-            if (!item.metricId) {
-              subscription.status = "skipped";
-              subscription.error = "No confirmed default metric is available.";
-              this.repository.saveFollow(request.commandId, follow);
-              continue;
-            }
-            requirePulseOwner(draft.context, session);
-            subscription.metricId = item.metricId;
-            subscription.status = "unknown";
-            this.repository.saveFollow(request.commandId, follow);
-            try {
-              const [result] = await this.dependencies.subscribe(session, [
-                { metricId: item.metricId, groupId: group.id },
-              ]);
-              subscription.status = result?.ok
-                ? result.alreadyExists
-                  ? "reused"
-                  : "created"
-                : "unknown";
-              if (result?.error)
-                subscription.error = sanitizeProviderMessage(result.error);
-            } catch (error) {
-              authenticationFailed =
-                error instanceof TableauError && error.kind === "auth";
-              subscription.error = diagnostic(error).message;
-            }
-            this.repository.saveFollow(request.commandId, follow);
-          }
+          if (!authenticationFailed)
+            authenticationFailed = await this.subscribeConfirmedMetrics(session, request.commandId, follow, items, { kind: 'GROUP', id: group.id }, assertOwner);
         }
       }
+      if (!authenticationFailed && follow.mode === 'self' && plan.selfRecipient && items.some((item) => item.creationStatus === 'created'))
+        await this.subscribeConfirmedMetrics(session, request.commandId, follow, items, { kind: 'USER', id: plan.selfRecipient.id }, assertOwner);
       this.repository.finish(request.commandId);
     } finally {
       activePublishRuns.delete(request.commandId);
     }
     return this.repository.getReceipt(request.commandId);
+  }
+  private async subscribeConfirmedMetrics(
+    session: TableauSession,
+    commandId: string,
+    follow: PulseFollowReceipt,
+    items: PulsePublishItemReceipt[],
+    target: { kind: 'USER' | 'GROUP'; id: string },
+    assertOwner: () => void,
+  ): Promise<boolean> {
+    for (const subscription of follow.subscriptions) {
+      const item = items[subscription.itemIndex]!;
+      if (item.creationStatus !== 'created' || !item.metricId) {
+        subscription.status = 'skipped';
+        subscription.error = 'No confirmed default metric is available.';
+        this.repository.saveFollow(commandId, follow);
+        continue;
+      }
+      assertOwner();
+      subscription.metricId = item.metricId;
+      subscription.status = 'unknown';
+      this.repository.saveFollow(commandId, follow);
+      let authenticationFailed = false;
+      try {
+        const [result] = target.kind === 'USER'
+          ? await this.dependencies.subscribeUser(session, [{ metricId: item.metricId, userId: target.id }])
+          : await this.dependencies.subscribe(session, [{ metricId: item.metricId, groupId: target.id }]);
+        subscription.status = result?.ok ? result.alreadyExists ? 'reused' : 'created' : result?.unknown ? 'unknown' : result ? 'failed' : 'unknown';
+        if (result?.error) subscription.error = sanitizeProviderMessage(result.error);
+      } catch (error) {
+        authenticationFailed = error instanceof TableauError && error.kind === 'auth';
+        const confirmation = error instanceof SubscriptionBatchInterrupted && error.phase === 'confirmation';
+        if (error instanceof TableauError && !confirmation && (authenticationFailed || [400, 403, 404, 422].includes(error.status)))
+          subscription.status = 'failed';
+        subscription.error = pulseOperationErrorMessage(error, 'follow', [session.token]);
+      }
+      this.repository.saveFollow(commandId, follow);
+      if (authenticationFailed) return true;
+    }
+    return false;
   }
   private duplicate(id: string, hash: string): PulsePublishReceipt {
     if (this.repository.requestHash(id) !== hash)
@@ -454,7 +500,7 @@ export class PulsePublishService {
                   [400, 401, 403, 422].includes(error.status)
                     ? "failed"
                     : "unknown",
-                message: diagnostic(error).message,
+                message: pulseOperationErrorMessage(error, 'group-delete', [session.token]),
               };
       }
       this.repository.saveFollow(id, receipt.follow);
@@ -502,7 +548,7 @@ export class PulsePublishService {
                 ? "failed"
                 : "unknown";
           item.undoDiagnostic =
-            item.undoStatus === "deleted" ? null : diagnostic(error);
+            item.undoStatus === "deleted" ? null : diagnostic(error, 'delete', session);
         }
         this.repository.saveItem(id, item);
         invalidatePulseDefinitionInventory(session);

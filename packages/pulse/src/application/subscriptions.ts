@@ -42,6 +42,7 @@ import {
   defaultDependencies,
   type SubscriptionDependencies,
 } from "./registry-dependencies.js";
+import { pulseOperationErrorMessage } from '../pulse/operation-errors.js';
 import { sessionCacheKey } from './session-cache-key.js';
 import { cachedUserGroupMemberships, clearUserGroupMemberships } from '../pulse/user-group-memberships.js';
 const PROVIDER_CONCURRENCY = 5;
@@ -438,7 +439,7 @@ export async function followTargets(
           }
         }
       } catch (error) {
-        const message = diagnosticMessage(boundedProviderDiagnostic(error));
+        const message = pulseOperationErrorMessage(error, 'follow', [session.token]);
         if (
           error instanceof SubscriptionBatchInterrupted ||
           (error instanceof TableauError && error.kind === "auth")
@@ -590,7 +591,7 @@ export async function unfollowTargets(
           operation,
           unknown ? "unknown" : auth && !attempted ? "not_attempted" : "failed",
           false,
-          diagnosticMessage(boundedProviderDiagnostic(error)),
+          pulseOperationErrorMessage(error, 'unfollow', [session.token]),
         ),
         ...(auth
           ? { code: "authentication_required" }

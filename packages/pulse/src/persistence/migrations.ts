@@ -8,16 +8,23 @@ import {
   PulsePublishReceiptSchema,
   type PulseDefinitionSummary,
   type PulseFollowReceipt,
+  type PulseFollowMode,
+  type PulseSelfRecipient,
 } from '@pulse-metric-studio/shared';
 import type { LegacyItemRow, LegacyRunRow } from './rows.js';
 
 export function emptyFollowReceipt(
-  requested = false,
+  selection: PulseFollowMode | boolean = 'none',
   itemCount = 0,
+  selfRecipient?: PulseSelfRecipient,
 ): PulseFollowReceipt {
+  const mode = typeof selection === 'boolean' ? selection ? 'group' : 'none' : selection;
+  const requested = mode !== 'none';
   return {
     version: 1,
+    mode,
     requested,
+    ...(mode === 'self' && selfRecipient ? { selfRecipient: structuredClone(selfRecipient) } : {}),
     group: { status: 'not_attempted' },
     membership: { status: 'not_attempted' },
     subscriptions: requested

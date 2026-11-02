@@ -10,6 +10,9 @@ import { invalidateFieldsCache, listDatasources } from './vds-fields.js';
 import { discoverRestApiVersion, patSignin } from './signin.js';
 import {
   clearSession,
+  captureTableauUserAccess,
+  getGroupCreationAccess,
+  markTableauUserAccessUnavailable,
   deleteConnection,
   getStoredConnection,
   getSession,
@@ -172,6 +175,7 @@ export function registerTableauRoutes(
       }
     }
 
+    const owner = getSessionContext(session);
     try {
       const response = await fetchImpl(
         `${session.serverUrl}${apiPath(session, `/sites/${encodeURIComponent(session.siteId)}/users/current`)}`,
@@ -185,15 +189,17 @@ export function registerTableauRoutes(
         const body = await readBoundedBody(response, DEFAULT_MAX_RESPONSE_BYTES, 10_000).catch(() => '');
         throw new TableauError('Tableau status check failed.', response.status, '', classifyStatus(response.status, body));
       }
-      captureCurrentUserName(session, await readBoundedBody(response, DEFAULT_MAX_RESPONSE_BYTES, 10_000).then(text => JSON.parse(text)).catch(() => null));
-      if (!isSessionCurrent(session)) return currentStatusAfterSwitch();
+      const payload = await readBoundedBody(response, DEFAULT_MAX_RESPONSE_BYTES, 10_000).then(text => JSON.parse(text)).catch(() => null);
+      if (!isSessionCurrent(session) || getSessionContext(session) !== owner) return currentStatusAfterSwitch();
+      captureCurrentUserName(session, payload);
       return { connected: true, reachable: true, restored: false, session: publicSession(session) };
     } catch (error) {
-      if (!isSessionCurrent(session)) return currentStatusAfterSwitch();
+      if (!isSessionCurrent(session) || getSessionContext(session) !== owner) return currentStatusAfterSwitch();
       if (error instanceof TableauError && error.kind === 'auth') {
         clearSession();
         return { connected: false, hasStoredProfile: getStoredConnection() != null };
       }
+      markTableauUserAccessUnavailable(session);
       return { connected: true, reachable: false, session: publicSession(session),
         availabilityError: 'Tableau is temporarily unavailable. Retry connection status to check again.' };
     }
@@ -636,13 +642,15 @@ function publicSession(session: TableauSession) {
     siteContentUrl: session.siteContentUrl,
     siteId: session.siteId,
     userId: session.userId,
+    ...(session.siteRole ? { siteRole: session.siteRole } : {}),
+    groupCreation: getGroupCreationAccess(session),
     ...(session.userName ? { userName: session.userName } : {}),
   };
 }
 
 /** Extract the current user's display name from a `/users/current` payload onto the session. */
 function captureCurrentUserName(session: TableauSession, payload: unknown): void {
-  if (session.userName) return;
+  if (!captureTableauUserAccess(session, payload)) return;
   const user = payload && typeof payload === 'object' ? (payload as { user?: unknown }).user : undefined;
   if (!user || typeof user !== 'object') return;
   const { fullName, name } = user as { fullName?: unknown; name?: unknown };
@@ -659,7 +667,6 @@ async function ensureCurrentUserName(
   session: TableauSession,
   fetchImpl: typeof fetch,
 ): Promise<void> {
-  if (session.userName) return;
   try {
     const response = await fetchImpl(
       `${session.serverUrl}${apiPath(session, `/sites/${encodeURIComponent(session.siteId)}/users/current`)}`,
@@ -669,9 +676,10 @@ async function ensureCurrentUserName(
         signal: AbortSignal.timeout(10_000),
       },
     );
-    if (!response.ok) return;
+    if (!response.ok) { markTableauUserAccessUnavailable(session); return; }
     captureCurrentUserName(session, await readBoundedBody(response, DEFAULT_MAX_RESPONSE_BYTES, 10_000).then(text => JSON.parse(text)).catch(() => null));
   } catch {
+    markTableauUserAccessUnavailable(session);
     // display name is best-effort; the picker falls back to a generic "(you)" label
   }
 }

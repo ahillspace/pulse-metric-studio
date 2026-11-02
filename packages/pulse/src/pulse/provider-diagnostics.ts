@@ -6,6 +6,7 @@ const MAX_DETAIL_CHARACTERS = 800;
 export interface PulseProviderDiagnostic {
   message: string;
   status?: number;
+  providerCode?: string;
   kind?: 'auth' | 'http' | 'network';
   detail?: string;
 }
@@ -23,6 +24,7 @@ export function boundedProviderDiagnostic(
     message,
     status: error.status,
     kind: error.kind,
+    ...(error.providerCode ? { providerCode: error.providerCode } : {}),
     ...(detail ? { detail } : {}),
   };
 }

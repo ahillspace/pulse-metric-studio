@@ -90,7 +90,7 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
       !registry.busy
         ? { context, siteContentUrl: session.siteContentUrl }
         : null,
-    [contextKey, connected, session, existing, registry.loading, registry.busy],
+    [contextKey, connected, session?.siteContentUrl, existing, registry.loading, registry.busy],
   );
   useEffect(() => {
     usePreview.getState().setScope(previewScope);

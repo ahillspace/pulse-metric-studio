@@ -973,11 +973,19 @@
   font-size: 12px;
 }
 .pulse-digest-settings > label { font-weight: 500; }
+.pulse-follow-options { display: flex; flex-wrap: wrap; gap: 4px; }
+.pulse-follow-options button[aria-pressed="true"] { background: #304b66; border-color: #6e9bc4; color: #fff; }
+.pulse-follow-options button:disabled { opacity: .5; }
+.pulse-follow-access { flex-basis: 100%; margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.pulse-command-diagnostic pre { max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
 .pulse-digest-audience {
   display: flex;
   align-items: center;
   gap: 9px;
   min-width: 0;
+  border: 0;
+  padding: 0;
+  margin: 0;
 }
 .pulse-digest-audience label {
   display: flex;

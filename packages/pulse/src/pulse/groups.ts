@@ -6,6 +6,8 @@ import {
   DEFAULT_MAX_RESPONSE_BYTES,
   getJson,
   readBoundedBody,
+  parseTableauProviderError,
+  safeTableauProviderCode,
   tableauFetch,
 } from "@pulse-metric-studio/core";
 import { listTableauGroups } from "./pulse-client.js";
@@ -91,6 +93,8 @@ export async function ensureGroup(
       resp.status,
       text.slice(0, 300),
       classifyStatus(resp.status, text),
+      safeTableauProviderCode(resp.headers.get('validation_code'), [session.token]),
+      parseTableauProviderError(text, [session.token]),
     );
   }
   const id = extractId(text);
@@ -129,6 +133,8 @@ export async function addUserToGroup(
       response.status,
       text.slice(0, 200),
       classifyStatus(response.status, text),
+      safeTableauProviderCode(response.headers.get('validation_code'), [session.token]),
+      parseTableauProviderError(text, [session.token]),
     );
   } finally {
     if (!response || response.ok || response.status === 409 || response.status === 408 || response.status >= 500) invalidate();
@@ -163,6 +169,8 @@ export async function deleteGroup(
       response.status,
       body.slice(0, 300),
       classifyStatus(response.status, body),
+      safeTableauProviderCode(response.headers.get('validation_code'), [session.token]),
+      parseTableauProviderError(body, [session.token]),
     );
   } finally {
     if (!response || response.ok || response.status === 404 || response.status === 408 || response.status >= 500) invalidate();

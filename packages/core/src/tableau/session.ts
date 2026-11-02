@@ -6,6 +6,7 @@ import {
   type CredentialBrokerClient,
 } from './credential-broker.js';
 import type { TableauSession } from './rest-client.js';
+import type { TableauGroupCreationAccess } from '@pulse-metric-studio/shared';
 
 /**
  * Connection profiles contain Tableau coordinates and a credential location.
@@ -117,6 +118,65 @@ export interface TableauSessionContext {
   readonly siteId: string;
 }
 const sessionContexts = new WeakMap<TableauSession, TableauSessionContext>();
+interface UserAccessFacts {
+  context: TableauSessionContext | null;
+  serverUrl: string;
+  siteId: string;
+  userId: string;
+  siteRole?: string;
+  checkedAt: number;
+  verified: boolean;
+}
+const userAccess = new WeakMap<TableauSession, UserAccessFacts>();
+
+/** Permission metadata is evidence about this authenticated user, never a decoded PAT. */
+export function captureTableauUserAccess(session: TableauSession, payload: unknown): boolean {
+  const user = payload && typeof payload === 'object' && !Array.isArray(payload)
+    ? (payload as { user?: unknown }).user : null;
+  const record = user && typeof user === 'object' && !Array.isArray(user)
+    ? user as { id?: unknown; luid?: unknown; siteRole?: unknown } : null;
+  const id = record?.id ?? record?.luid;
+  const matched = typeof id === 'string' && id === session.userId
+    && !(record?.id && record?.luid && record.id !== record.luid);
+  const role = matched && typeof record?.siteRole === 'string' && /^[a-z][a-z0-9_-]{0,79}$/i.test(record.siteRole)
+    ? record.siteRole : undefined;
+  if (role) session.siteRole = role;
+  else delete session.siteRole;
+  userAccess.set(session, {
+    context: getSessionContext(session), serverUrl: session.serverUrl, siteId: session.siteId,
+    userId: session.userId, ...(role ? { siteRole: role } : {}), checkedAt: Date.now(), verified: matched,
+  });
+  return matched;
+}
+
+export function markTableauUserAccessUnavailable(session: TableauSession): void {
+  captureTableauUserAccess(session, null);
+}
+
+/** Availability is advisory; the provider still authorizes every actual write. */
+export function getGroupCreationAccess(session: TableauSession): TableauGroupCreationAccess {
+  const unknown = (reasonCode: string, message: string, checkedAt?: number): TableauGroupCreationAccess => ({
+    state: 'unknown', reasonCode, message, ...(checkedAt !== undefined ? { checkedAt } : {}),
+  });
+  const context = getSessionContext(session);
+  if (!context || !isSessionCurrent(session)) return unknown('session_changed', 'Reconnect to verify group creation access for the current Tableau account.');
+  const facts = userAccess.get(session);
+  if (!facts || facts.context !== context || facts.serverUrl !== session.serverUrl || facts.siteId !== session.siteId || facts.userId !== session.userId || !facts.verified) {
+    return unknown('user_access_unverified', 'Group creation access could not be verified. Retry the permission check, or choose Follow Me.', facts?.checkedAt);
+  }
+  if (!facts.siteRole) return unknown('site_role_unavailable', 'Tableau did not return a site role. Retry the permission check, or choose Follow Me.', facts.checkedAt);
+  if (['ServerAdministrator', 'SiteAdministratorCreator', 'SiteAdministratorExplorer'].includes(facts.siteRole)) {
+    return { state: 'allowed', reasonCode: 'administrator_role', message: 'This Tableau account has an administrator role for group creation.', checkedAt: facts.checkedAt };
+  }
+  const hostname = new URL(session.serverUrl).hostname.toLowerCase();
+  if (hostname !== 'online.tableau.com' && !hostname.endsWith('.online.tableau.com')) {
+    return unknown('server_permissions_unverified', 'Group creation access cannot be inferred from this Tableau Server role because delegated permissions can differ. Choose Follow Me or contact your administrator.', facts.checkedAt);
+  }
+  if (['Creator', 'ExplorerCanPublish', 'Explorer', 'Viewer', 'ReadOnly', 'Unlicensed'].includes(facts.siteRole)) {
+    return { state: 'denied', reasonCode: 'site_role_cannot_create_groups', message: 'Creating a Tableau Cloud group requires a site administrator. Choose Follow Me to follow metrics without creating a group.', checkedAt: facts.checkedAt };
+  }
+  return unknown('site_role_unknown', 'This Tableau site role does not establish group creation access. Choose Follow Me or contact your administrator.', facts.checkedAt);
+}
 
 export function getSessionGeneration(): number {
   return sessionGeneration;
@@ -301,6 +361,13 @@ export function setSession(
     connectionId, generation: sessionGeneration, serverUrl: session.serverUrl,
     siteContentUrl: session.siteContentUrl, siteId: session.siteId,
   }));
+  const facts = userAccess.get(session);
+  if (facts && facts.context === null && facts.serverUrl === session.serverUrl && facts.siteId === session.siteId && facts.userId === session.userId) {
+    facts.context = getSessionContext(session);
+  } else {
+    userAccess.delete(session);
+    delete session.siteRole;
+  }
   activeSession = session;
   activeCredential = credential ?? null;
 }

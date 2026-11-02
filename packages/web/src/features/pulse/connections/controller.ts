@@ -16,6 +16,8 @@ interface ConnectionState {
   error: string | null;
   datasources: DatasourceChoice[];
   loadingDatasources: boolean;
+  accessChecking: boolean;
+  refreshAccess: () => Promise<void>;
   init: () => Promise<void>;
   connected: (
     session: TableauSessionInfo,
@@ -33,6 +35,7 @@ export function createConnectionController(
 ) {
   let generation = 0;
   let sourceRequest = 0;
+  let accessRequest = 0;
   return create<ConnectionState>((set, get) => ({
     session: null,
     checked: false,
@@ -41,7 +44,10 @@ export function createConnectionController(
     error: null,
     datasources: [],
     loadingDatasources: false,
+    accessChecking: false,
     async init() {
+      accessRequest++;
+      set({ accessChecking: false });
       const request = ++generation;
       try {
         const status = await transport.status();
@@ -60,12 +66,14 @@ export function createConnectionController(
     },
     async connected(session, connectionId) {
       generation += 1;
+      accessRequest++;
       sourceRequest += 1;
       set({
         session: { ...session, connectionId },
         checked: true,
         error: null,
         reachable: true,
+        accessChecking: false,
         datasources: [],
       });
       useNotices.getState().show("success", "Connected to Tableau");
@@ -117,14 +125,37 @@ export function createConnectionController(
         if (request === sourceRequest) set({ loadingDatasources: false });
       }
     },
+    async refreshAccess() {
+      const owner = get().session;
+      if (!owner || get().accessChecking) return;
+      const request = ++accessRequest;
+      const ownerGeneration = generation;
+      const current = () => request === accessRequest && ownerGeneration === generation && sessionOwnerKey(owner) === sessionOwnerKey(get().session);
+      set({ accessChecking: true });
+      try {
+        const status = await transport.status();
+        if (!current()) return;
+        if (!status.connected) { get().expireSession(owner); return; }
+        if (!status.session || sessionOwnerKey(status.session) !== sessionOwnerKey(owner)) {
+          set({ session: { ...get().session!, siteRole: undefined, groupCreation: { state: "unknown", reasonCode: "connection_changed", message: "Group creation permission is not verified for this connection." } }, error: "The Tableau connection changed while checking permissions. Check the current connection before continuing." });
+          return;
+        }
+        const groupCreation = status.session.groupCreation ?? { state: "unknown" as const, reasonCode: "not_verified", message: "Group creation permission is not verified." };
+        set({ session: { ...get().session!, ...status.session, siteRole: status.session.siteRole, groupCreation }, error: status.availabilityError ?? null });
+      } catch (error) {
+        if (current()) set({ session: { ...get().session!, siteRole: undefined, groupCreation: { state: "unknown", reasonCode: "check_failed", message: "Group creation permission is not verified. Try checking permissions again." } }, error: errorMessage(error) });
+      } finally { if (request === accessRequest) set({ accessChecking: false }); }
+    },
     expireSession(owner = get().session) {
       if (!owner || sessionOwnerKey(owner) !== sessionOwnerKey(get().session)) return;
       generation += 1;
+      accessRequest++;
       sourceRequest += 1;
       set({
         session: null,
         datasources: [],
         loadingDatasources: false,
+        accessChecking: false,
         error:
           "Your Tableau session ended. Reconnect to continue Tableau actions. Local drafts and history are still available.",
       });

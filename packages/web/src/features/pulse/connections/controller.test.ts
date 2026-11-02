@@ -128,3 +128,77 @@ test("temporary status unavailability retains authentication and communicates re
   assert.equal(store.getState().reachable, false);
   assert.match(store.getState().error ?? "", /temporarily unavailable/);
 });
+
+test("permission refresh updates only current owner metadata without datasource scans", async () => {
+  let sources = 0;
+  const store = createConnectionController({
+    status: async () => ({ connected: true, session: { ...session, groupCreation: { state: "allowed", reasonCode: "test", message: "Group creation is available." } } as any }),
+    disconnect: async () => ({ ok: true }), datasources: async () => { sources++; return { datasources: [] }; },
+  });
+  await store.getState().connected(session, session.connectionId);
+  await (store.getState() as any).refreshAccess();
+  assert.equal(sources, 1);
+  assert.equal((store.getState().session as any).groupCreation.state, "allowed");
+});
+
+test("late permission refresh cannot replace a newer authenticated owner", async () => {
+  const held = deferred<any>();
+  const store = createConnectionController({ status: () => held.promise, disconnect: async () => ({ ok: true }), datasources: async () => ({ datasources: [] }) });
+  await store.getState().connected(session, session.connectionId);
+  const checking = (store.getState() as any).refreshAccess();
+  await store.getState().connected({ ...session, userId: "new-user", sessionGeneration: 2 }, session.connectionId);
+  held.resolve({ connected: true, session: { ...session, groupCreation: { state: "allowed", reasonCode: "test", message: "Allowed" } } });
+  await checking;
+  assert.equal(store.getState().session?.userId, "new-user");
+  assert.equal((store.getState().session as any).groupCreation?.state, undefined);
+});
+
+test("permission checks cannot silently adopt another backend owner or clear authentication on failure", async () => {
+  for (const failure of ["switched", "unavailable"] as const) {
+    let sources = 0;
+    const store = createConnectionController({
+      status: async () => { if (failure === "unavailable") throw new Error("Temporary status failure"); return { connected: true, session: { ...session, userId: "other", sessionGeneration: 2 } }; },
+      disconnect: async () => ({ ok: true }), datasources: async () => { sources++; return { datasources: [] }; },
+    });
+    await store.getState().connected(session, session.connectionId);
+    await store.getState().refreshAccess();
+    assert.equal(store.getState().session?.userId, session.userId);
+    assert.equal(store.getState().session?.groupCreation?.state, "unknown");
+    assert.equal(store.getState().reachable, true);
+    assert.equal(store.getState().accessChecking, false);
+    assert.equal(sources, 1);
+  }
+});
+
+for (const result of ["unknown", "legacy", "mismatched", "failed"] as const) {
+  test(`permission refresh clears stale verified role after ${result} verification`, async () => {
+    let sources = 0;
+    const choices = [{ luid: "datasource", name: "Preserved datasource", projectName: "Project" }];
+    const store = createConnectionController({
+      status: async () => {
+        if (result === "failed") throw new Error("Permission verification unavailable");
+        return { connected: true, session: { ...session,
+          ...(result === "mismatched" ? { userId: "other-user" } : {}),
+          ...(result === "unknown" ? { groupCreation: { state: "unknown" as const, reasonCode: "profile_unavailable", message: "Not verified" } } : {}),
+        } };
+      },
+      disconnect: async () => ({ ok: true }),
+      datasources: async () => { sources++; return { datasources: choices }; },
+    });
+    await store.getState().connected({ ...session, userName: "Preserved account", siteRole: "SiteAdministratorCreator",
+      groupCreation: { state: "allowed", reasonCode: "verified", message: "Allowed" } }, session.connectionId);
+    const before = store.getState();
+    await store.getState().refreshAccess();
+    const after = store.getState();
+    assert.equal(after.session?.siteRole, undefined, "unverified metadata must not keep the previous admin claim");
+    assert.equal(after.session?.groupCreation?.state, "unknown");
+    assert.equal(after.session?.userId, session.userId);
+    assert.equal(after.session?.sessionGeneration, session.sessionGeneration);
+    assert.equal(after.session?.userName, "Preserved account");
+    assert.equal(after.datasources, before.datasources);
+    assert.equal(after.checked, before.checked);
+    assert.equal(after.reachable, before.reachable);
+    assert.equal(after.accessChecking, false);
+    assert.equal(sources, 1, "permission verification must not reload navigation choices");
+  });
+}

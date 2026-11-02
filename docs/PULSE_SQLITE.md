@@ -51,6 +51,10 @@ The active connection setting remains available for later restoration.
 | `updated_at` | Ordering and save timestamp |
 
 The document contains authoring intent, including choices, labels, and locks.
+Its canonical `followMode` is `self`, `group`, or `none`; new documents default to `self`.
+Legacy `groupFollow` booleans normalize on read: true means `group`, and false means `none`.
+Normalization preserves the saved audience and locks without silently changing an existing group selection.
+The draft does not store a self-follow user ID; publication review binds the currently authenticated publisher.
 Current metadata is loaded separately when connected and rechecked before publication.
 Saving increments the revision in the same SQL statement that checks the expected revision.
 The row holds the latest working document.
@@ -68,10 +72,13 @@ Selecting a datasource restores its configuration through the backend.
 | `digest_audience` | Chosen audience captured from the approved publication for group action labels; null for older receipts |
 | `site_content_url` | Original Tableau site content URL for publication links; null when unknown |
 | `created_at`, `finished_at` | Admission and completion times; missing completion can indicate interruption |
-| `follow_receipt_json` | Versioned group, membership, and per-item subscription outcomes |
+| `follow_receipt_json` | Follow mode, captured self recipient, and versioned group, membership, and per-item subscription outcomes |
 
 The follow receipt distinguishes created, reused, failed, unknown, skipped, and unattempted effects.
 It contains the identifiers and diagnostics needed to explain the optional follow workflow.
+Legacy receipts infer group mode when following was requested and no mode was stored; otherwise they infer no follow.
+Self-mode receipts preserve the acting recipient independently of later account changes.
+Self following does not attempt group creation or membership changes.
 Publication links and group action labels use the stored publication context independently of the current connection or edited workspace.
 
 ### `pulse_publish_items`

@@ -82,13 +82,13 @@ after(() => {
 function app(deps: Parameters<typeof registerPulseRoutes>[1] = {}) {
   return buildApp({
     registerPulseRoutes: (server) =>
-      registerPulseRoutes(server, { catalog: async () => catalog, ...deps }),
+      registerPulseRoutes(server, { catalog: async () => catalog, ...deps, publish: { groupCreationAccess: () => ({ state: 'allowed', reasonCode: 'fixture', message: 'Fixture group access.' }), ...deps.publish } }),
   });
 }
 async function draft(server: ReturnType<typeof app>, follow = false) {
   const document = emptyPulseDocument();
   document.metrics.Sales = defaultPulseMetric(catalog, "Sales")!;
-  document.groupFollow = follow;
+  document.followMode = follow ? 'group' : 'none';
   document.slicers.Region = {
     active: true,
     fieldId: "Region",
@@ -335,7 +335,7 @@ test("new publication commands recreate deleted definitions and resolve missing 
     assert.equal(names.length, 2);
     assert.equal(names[0], "pmStudio - Orders -   Sales / Leadership!!!  ");
     assert.equal(names[0], names[1]);
-    assert.equal(emptyPulseDocument().groupFollow, true);
+    assert.equal(emptyPulseDocument().followMode, 'self');
   } finally {
     await server.close();
   }

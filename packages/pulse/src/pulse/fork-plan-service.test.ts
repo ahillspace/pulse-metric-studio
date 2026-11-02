@@ -363,7 +363,7 @@ test('preserves creation disposition when reconciliation rejects a returned metr
 test('classifies a complete provider failure as 502', async () => {
   const summary = await new PulseForkPlanService(dependencies({
     getOrCreate: async () => {
-      throw new TableauError('Provider rejected the request.', 400, 'invalid specification');
+      throw new TableauError('Provider rejected the request.', 400, JSON.stringify({ error: 'invalid specification' }));
     },
   })).forkMetrics(session, {
     version: 1,
