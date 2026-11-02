@@ -4,7 +4,8 @@ import React, { type ReactElement, type ReactNode } from "react";
 import { PublicationResult } from "./PublicationResult";
 import { createPublishedPreviewCache, PublishedMetrics } from "./PublishedMetrics";
 import { useConnection } from "../connections/controller";
-import { receipt, session } from "../testing/fixtures";
+import { useRegistry } from "../registry/controller";
+import { inventory, receipt, session } from "../testing/fixtures";
 
 function find(node: ReactNode, predicate: (element: ReactElement<any>) => boolean): ReactElement<any> | undefined {
   if (!React.isValidElement(node)) return;
@@ -16,11 +17,13 @@ function find(node: ReactNode, predicate: (element: ReactElement<any>) => boolea
   }
 }
 
-test("both real publication confirmations retain preview requests when canceled", async (t) => {
+test("publication previews survive inventory refresh and canceled confirmations while owned mutations invalidate", async (t) => {
   const originalConnection = useConnection.getState();
+  const originalRegistry = useRegistry.getState();
   const originalFetch = globalThis.fetch;
-  t.after(() => { useConnection.setState(originalConnection, true); globalThis.fetch = originalFetch; });
+  t.after(() => { useConnection.setState(originalConnection, true); useRegistry.setState(originalRegistry, true); globalThis.fetch = originalFetch; });
   useConnection.setState({ session });
+  useRegistry.setState({ inventory: inventory("before-publication-refresh") });
   const published = receipt();
   published.follow.group = { status: "created", id: "group", name: "Audience" };
   published.items = Array.from({ length: 3 }, (_, index) => ({ ...published.items[0], itemIndex: index, metricId: `metric-${index}` }));
@@ -60,6 +63,10 @@ test("both real publication confirmations retain preview requests when canceled"
   let tree = render();
   await loadAutomaticCards(tree);
   assert.equal(requests, 3);
+  useRegistry.setState({ inventory: inventory("after-publication-refresh") });
+  tree = render();
+  await loadAutomaticCards(tree);
+  assert.equal(requests, 3, "the mandatory post-publication inventory refresh does not regenerate unchanged cards");
   const undo = find(tree, (element) => element.type === "button" && React.Children.toArray(element.props.children).some((child: any) => child?.props?.idle === "Undo Publication"))!;
   undo.props.onClick();
   const confirmation = render();
@@ -73,9 +80,16 @@ test("both real publication confirmations retain preview requests when canceled"
   tree = render();
   await loadAutomaticCards(tree);
   assert.equal(requests, 3, "canceling either confirmation generates no duplicate previews");
+  const cards = find(tree, (element) => element.type === PublishedMetrics)!;
+  const first = cards.props.items[0];
+  await cards.props.previews.load(cards.props.live.context, first.metricId, first.definitionId, true);
+  assert.equal(requests, 4, "explicit refresh regenerates only the selected preview");
   useConnection.setState({ session: { ...session, sessionGeneration: 2 } });
   await loadAutomaticCards(render());
-  assert.equal(requests, 6, "a new authenticated session regenerates previews");
+  assert.equal(requests, 7, "a new authenticated session regenerates previews");
+  published.items[0] = { ...published.items[0], metricId: "replacement-metric" };
+  await loadAutomaticCards(render());
+  assert.equal(requests, 10, "a receipt resource mutation invalidates its preview scope");
 });
 
 test("publication preview cache shares pending reads, refreshes explicitly and rejects mismatched ownership", async () => {

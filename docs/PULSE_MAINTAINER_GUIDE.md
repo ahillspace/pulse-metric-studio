@@ -285,8 +285,9 @@ Metric Manager previews use Tableau's springboard insight and metric card image 
 The backend verifies the exact metric, definition, and datasource before rendering.
 The frontend receives a bounded PNG image; Tableau credentials remain in the backend.
 PNG decoding and CRC validation use `pngjs`; resource guards reject oversized dimensions, duplicate headers, and unsupported interlaced images before decoding.
-Preview images remain in memory and are discarded when the context or inventory changes.
-Publication confirmations reuse bounded owner-specific preview state when canceled; explicit refresh and relevant mutations invalidate it.
+Metric Manager preview images remain in memory and are discarded when the context or inventory changes.
+Publication confirmations reuse bounded owner/receipt/item-state previews when canceled; explicit refresh and relevant receipt mutations invalidate them.
+An unrelated Manager inventory replacement does not regenerate publication previews that already match their receipt and authenticated owner.
 Visibility reconciliation retains successful ownership evidence and polls only unresolved visibility evidence within the operation.
 Sources that converge to the same definition and destination specification share one creation; aliases do not gain duplicate creation or undo ownership.
 The card uses the unique successful BAN summary sparkline, one successful period-over-period insight, and the highest-scored successful supporting insight.

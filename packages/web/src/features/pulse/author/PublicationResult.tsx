@@ -7,7 +7,6 @@ import { useActivity } from "../activity/controller";
 import { BusyLabel, Modal } from "../components/ui";
 import { createPublishedPreviewCache, PublishedMetrics } from "./PublishedMetrics";
 import { sessionOwnerKey } from "../shell/session-events";
-import { useRegistry } from "../registry/controller";
 import { ConfirmUndo } from "../activity/ConfirmUndo";
 
 export function PublicationResult({ receipt, onClose, onActivity }: {
@@ -17,7 +16,6 @@ export function PublicationResult({ receipt, onClose, onActivity }: {
 }) {
   const session = useConnection((state) => state.session);
   const activity = useActivity();
-  const inventorySnapshot = useRegistry((state) => state.inventory?.snapshotId);
   const [confirmGroup, setConfirmGroup] = useState(false);
   const [confirmUndo, setConfirmUndo] = useState(false);
   const [linkError, setLinkError] = useState<string | null>(null);
@@ -35,7 +33,7 @@ export function PublicationResult({ receipt, onClose, onActivity }: {
   const undone = receipt.items.filter((item) => item.undoStatus === "deleted").length;
   const published = receipt.items.filter((item) => item.creationStatus === "created" && item.undoStatus !== "deleted");
   const live = connected && receipt.context && contentUrl !== undefined && session ? { context: receipt.context, siteContentUrl: contentUrl, owner: session } : null;
-  const previewScope = JSON.stringify([receipt.id, receipt.context, sessionOwnerKey(session), inventorySnapshot,
+  const previewScope = JSON.stringify([receipt.id, receipt.context, sessionOwnerKey(session),
     receipt.items.map((item) => [item.metricId, item.definitionId, item.creationStatus, item.undoStatus, item.resolutionStatus])]);
   previews.setScope(previewScope);
   const settled = (status: string) => status === "created" || status === "reused";
