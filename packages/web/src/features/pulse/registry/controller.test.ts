@@ -93,6 +93,53 @@ test("refresh retains known follows until replacement data arrives", async () =>
   await refresh;
 });
 
+test("explicit refresh replaces inventory while earlier follower enrichment is pending", async () => {
+  const oldFollowers = deferred<Awaited<ReturnType<RegistryApi["followState"]>>>();
+  const enriching = deferred<void>();
+  let reads = 0;
+  const freshFollowers: Awaited<ReturnType<RegistryApi["followState"]>> = {
+    ...unavailableFollowState(["new"], "fresh"),
+    selectedGroupId: null, groupContextUnavailable: false,
+    groupFollowerIdsByMetricId: {}, userFollowerIdsByMetricId: {}, availabilityByMetricId: {},
+    followerCountsByMetricId: { new: 7 },
+  };
+  const store = fixture({
+    inventory: async () => inventory(++reads === 1 ? "old" : "new"),
+    followState: async (ids) => {
+      if (ids.includes("old")) { enriching.resolve(); return oldFollowers.promise; }
+      return freshFollowers;
+    },
+  });
+  const context = draft().context;
+  store.getState().setContext(context);
+  const initial = store.getState().ensureLoaded();
+  await enriching.promise;
+  assert.equal(store.getState().loading, false);
+  assert.equal(store.getState().followLoading, true);
+  try {
+    const refreshing = store.getState().invalidate(context);
+    const navigation = store.getState().ensureLoaded();
+    assert.equal(reads, 2, "explicit refresh starts a new inventory read while navigation joins it");
+    await Promise.all([refreshing, navigation]);
+    assert.equal(store.getState().inventory?.snapshotId, "snapshot-new");
+    assert.equal(store.getState().followState?.followerCountsByMetricId.new, 7);
+    const replacement = structuredClone(store.getState().followState);
+    oldFollowers.resolve({
+      ...unavailableFollowState(["old"], "stale"),
+      selectedGroupId: null, groupContextUnavailable: false,
+      groupFollowerIdsByMetricId: {}, userFollowerIdsByMetricId: {}, availabilityByMetricId: {},
+      followerCountsByMetricId: { old: 99 },
+    });
+    await initial;
+    assert.deepEqual(store.getState().followState, replacement, "late old followers cannot replace refreshed state");
+    await store.getState().ensureLoaded();
+    assert.equal(reads, 2, "the stale completion cannot displace the fresh inventory cache");
+  } finally {
+    oldFollowers.resolve(freshFollowers);
+    await initial;
+  }
+});
+
 test("deletion review requires displayed inventory without fetching a replacement", async () => {
   let reads = 0;
   let previews = 0;

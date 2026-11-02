@@ -226,6 +226,8 @@ Dimension discovery, member counts, and value queries send validated POST bodies
 Source metric and definition reads use bounded concurrency, and repeated definition reads share one request within the operation.
 Date and dimensional variants use the canonical variant endpoint.
 Inventory acquisition retains an immutable backend snapshot and returns its opaque identifier with the displayed inventory.
+Initial loads and navigation share the current inventory and follower request.
+The Manager's **Refresh metrics** button starts replacement inventory immediately, even while earlier follower data remains pending, and discards late results from the earlier request.
 The backend derives connection ownership from the active Tableau session and binds snapshots to that session generation, principal, connection, and datasource.
 Snapshots remain in memory without a time limit; each session retains its latest 32 snapshots.
 Deletion preview uses the displayed snapshot identifier and makes no Tableau requests.

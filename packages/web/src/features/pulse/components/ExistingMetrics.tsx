@@ -290,7 +290,7 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
           aria-label="Refresh metrics"
           title="Refresh metrics"
           disabled={registry.loading}
-          onClick={() => void registry.load()}
+          onClick={() => void registry.invalidate()}
         >
           <svg viewBox="0 0 20 20" aria-hidden="true">
             <path d="M16 7a6 6 0 1 0 .2 5M16 3v4h-4" />
