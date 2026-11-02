@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { activeEditor, contextMatches, useAuthor } from "../author/controller";
 import { useConnection } from "../connections/controller";
-import { useRegistry } from "../registry/controller";
+import { registryScopeKey, useRegistry } from "../registry/controller";
 import { metricIsFollowed } from "../follow-state";
 import {
   reconcileMetricSelection,
@@ -31,6 +31,7 @@ import { FollowTargetModal } from "./FollowTargetModal";
 import { BusyLabel, Modal } from "./ui";
 import { createPreviewController } from "../registry/preview-controller";
 import { MetricPreview } from "../registry/MetricPreview";
+import { sessionOwnerKey } from "../shell/session-events";
 
 export {
   countDistinctFollowers,
@@ -57,9 +58,8 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
   const [variantsOpen, setVariantsOpen] = useState(false);
   const context = entry?.record.context ?? null;
   const connected = Boolean(context && contextMatches(context, session));
-  const contextKey = JSON.stringify(context);
+  const contextKey = JSON.stringify([context, sessionOwnerKey(session)]);
   useEffect(() => {
-    useRegistry.getState().setContext(context, entry?.record.datasourceName);
     setPlan({ selectedMetricIds: [] });
     setExpanded(new Set());
     setFollowOpen(false);
@@ -69,8 +69,9 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
     setVariantsOpen(false);
   }, [contextKey, connected]);
   useEffect(() => {
-    if (visible && context && connected)
-      void useRegistry.getState().ensureLoaded();
+    const state = useRegistry.getState();
+    if (visible && context && connected && registryScopeKey(state.context, state.owner) === registryScopeKey(context, session))
+      void state.ensureLoaded();
   }, [visible, contextKey, connected]);
   useEffect(() => {
     if (registry.deleteLoading || registry.deletePlan || registry.busy === "delete")
@@ -163,6 +164,14 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
           .includes(query.trim().toLowerCase()),
     );
   const displayedDefinitions = visibleDefinitions;
+  const detailIdsKey = JSON.stringify((onlyFollowed ? allMetrics : allMetrics.filter((metric) => expanded.has(metric.definitionId)))
+    .map((metric) => metric.metricId).sort());
+  useEffect(() => {
+    const state = useRegistry.getState();
+    if (visible && connected && !registry.loading && !registry.followLoading &&
+      registryScopeKey(state.context, state.owner) === registryScopeKey(context, session))
+      void useRegistry.getState().ensureFollowState(JSON.parse(detailIdsKey) as string[]);
+  }, [visible, contextKey, connected, detailIdsKey, registry.loading, registry.followLoading, existing]);
   const displayedIds = displayedDefinitions.flatMap((definition) =>
     definition.metrics.map((metric) => metric.metricId),
   );
@@ -380,6 +389,10 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
             not shown as confirmed zero.
           </p>
         ) : null}
+        {onlyFollowed && allMetrics.some((metric) =>
+          registry.followState?.availabilityByMetricId?.[metric.metricId]?.relationshipStatus === "not_requested") && (
+          <p role="status">Loading follow details. Metrics with unknown follow state remain visible.</p>
+        )}
         {registry.loading && !existing && (
           <p role="status">Loading Tableau definitions...</p>
         )}
@@ -396,7 +409,7 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
           <VariantDialog
             metrics={allMetrics}
             selectedMetricIds={plan.selectedMetricIds}
-            busy={Boolean(registry.busy)}
+            busy={Boolean(registry.busy) || !registry.mutationAvailable}
             onClose={() => setVariantsOpen(false)}
             onCreate={registry.fork}
           />

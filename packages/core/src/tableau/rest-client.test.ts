@@ -94,6 +94,57 @@ test('status and activation discard oversized display-name responses without los
 });
 function reject(res: ServerResponse) { res.statusCode = 401; res.end('{}'); }
 
+test('status preserves a current session on temporary provider failures', async () => {
+  for (const failure of [429, 503, 'timeout', 'network', 401] as const) {
+    const profile = sessions.saveConnection({ label: 'Status', serverUrl: 'https://status.example.test', siteContentUrl: '', patName: 'test', storageKind: 'encrypted', patSecret: 'test-pat' });
+    const owner = { serverUrl: profile.serverUrl, siteContentUrl: '', siteId: 'site', userId: 'user', token: 'test-token', apiVersion: '3.27' };
+    sessions.setSession(owner, { connectionId: profile.id, patSecret: 'test-pat' });
+    const app = Fastify();
+    await app.register(sensible);
+    registerTableauRoutes(app, { fetchImpl: async () => {
+      if (failure === 'timeout') throw new DOMException('Timed out', 'TimeoutError');
+      if (failure === 'network') throw new TypeError('Unavailable');
+      return new Response('{}', { status: failure });
+    } });
+    try {
+      const response = (await app.inject({ method: 'GET', url: '/api/tableau/status' })).json();
+      assert.equal(response.connected, failure !== 401);
+      assert.equal(sessions.getSession(), failure === 401 ? null : owner);
+      if (failure !== 401) {
+        assert.equal(response.reachable, false);
+        assert.match(response.availabilityError, /temporarily unavailable/);
+      }
+    } finally { sessions.clearSession(); await app.close(); }
+  }
+});
+
+test('a late status response never rejects or clears the replacement session', async () => {
+  for (const status of [200, 401, 503]) {
+    const profile = sessions.saveConnection({ label: 'Status switch', serverUrl: 'https://status-switch.example.test', siteContentUrl: '', patName: 'test', storageKind: 'encrypted', patSecret: 'test-pat' });
+    const first = { serverUrl: profile.serverUrl, siteContentUrl: '', siteId: 'site', userId: 'first', token: 'first-token', apiVersion: '3.27' };
+    sessions.setSession(first, { connectionId: profile.id, patSecret: 'test-pat' });
+    let finish!: (response: Response) => void;
+    let started!: () => void;
+    const dispatched = new Promise<void>((resolve) => { started = resolve; });
+    const app = Fastify();
+    await app.register(sensible);
+    registerTableauRoutes(app, { fetchImpl: async () => { started(); return new Promise<Response>((resolve) => { finish = resolve; }); } });
+    try {
+      const request = app.inject({ method: 'GET', url: '/api/tableau/status' });
+      void request.then(() => {});
+      await dispatched;
+      const replacement = { ...first, userId: 'replacement', token: 'replacement-token' };
+      sessions.setSession(replacement, { connectionId: profile.id, patSecret: 'test-pat' });
+      finish(Response.json({}, { status }));
+      const result = (await request).json();
+      assert.equal(sessions.getSession(), replacement);
+      assert.equal(result.connected, true);
+      assert.equal(result.session.userId, 'replacement');
+      assert.equal(result.reachable, false, 'the old status request does not establish reachability for a new owner');
+    } finally { sessions.clearSession(); await app.close(); }
+  }
+});
+
 for (const action of ['switch', 'disconnect'] as const) {
   test(`late A 401 cannot refresh after ${action}`, async () => {
     const f = await fixture();

@@ -81,7 +81,11 @@ Build installers on the target operating system:
 npm run tauri:build
 ```
 
-This command builds all workspaces, then [build-native.mjs](scripts/build-native.mjs) stages a separate source copy and links installed dependencies.
+This command runs [build-native.mjs](scripts/build-native.mjs), which stages a separate source copy and prepares installed dependencies.
+The stage discards copied workspace outputs and rebuilds them from staged sources.
+Workspace imports resolve to staged packages; external dependencies can share the installed dependency tree.
+Keep installed external dependencies unchanged during packaging.
+Changes to compiled workspace files in the original checkout after staging cannot change the stage's backend bundle.
 Tauri invokes [copy-resources.mjs](scripts/copy-resources.mjs) in that stage.
 Resource composition bundles the backend and copies the frontend, installer helpers, Node executable, and native SQLite module.
 It verifies a SQLite round trip with the packaged Node executable.
@@ -90,6 +94,9 @@ Installed users do not need a separate Node installation.
 
 The packager supports Windows and macOS and writes installers and `build-evidence.json` under ignored `native-artifacts/`.
 Evidence includes platform, architecture, Node version, desktop identity, and artifact hashes.
+Private build evidence also records the source commit, dirty state, and normalized source-content identity.
+The packager verifies that source identity remains unchanged while copying the build stage.
+Public `release-evidence.json` contains only source, version, runtime, platform, and relative artifact identity fields; local diagnostic paths remain private.
 Temporary build stages remain available for diagnostics.
 The packager exclusively locks its cached Cargo target while a build runs and clears only that target's prior bundle outputs.
 It assembles artifacts and evidence in a fresh directory, then replaces the previous app-owned output after success.
@@ -105,7 +112,6 @@ Windows bundles configure the WebView2 download bootstrapper.
 For a separate validation identity and output directory, run:
 
 ```sh
-npm run build
 node scripts/build-native.mjs --validation
 ```
 
@@ -139,6 +145,11 @@ The public release repository is `ahillspace/pulse-metric-studio`.
 
    Staging reads the root package version, copies matching installers, rewrites helper defaults, and writes `checksums.txt`.
    It also discovers matching disk images and Windows setup installers under `native-artifacts/`.
+   External installers need their matching sanitized `release-evidence.json` beside the file or in the parent build directory.
+   Preserve this sidecar when transferring installers between build machines.
+   Staging verifies source identity and artifact hashes, rejects conflicting sources or duplicate filenames, and promotes all output together.
+   Historical installers without matching evidence require a new build.
+   Dirty builds remain supported, but matching commit names and dirty flags do not establish matching source contents.
    Check that every intended platform and architecture is present.
    Matching filenames do not establish shared source revision or a complete platform set.
 6. Review staged files, then create and publish the release:
@@ -177,7 +188,8 @@ Both helpers clean their temporary download directories.
 Helper uninstall removes the app and channel record while retaining app data and native credentials.
 Preserve the data directory and credential entries during ordinary updates and uninstalls.
 
-The current helpers force-stop a remaining app process after their shutdown grace period.
-Direct installation or uninstall can therefore override a canceled close or an unsuccessful draft save.
-Close the app and allow its automatic persistence to finish before invoking a helper directly until the [installer shutdown finding](docs/ARCHITECTURE_AUDIT.md#p1---direct-installer-helpers-override-canceled-or-blocked-shutdown) is resolved.
+The helpers request normal close and wait for the app's automatic persistence and shutdown handshake.
+If the app remains open after the bounded wait, installation or removal stops before changing the installed app.
+The helpers do not force-stop the app after a delayed write, persistence failure, or canceled close.
+Let the automatic close finish before retrying; no manual Save action is required.
 The normal in-app update completes the shutdown handshake before starting its helper.

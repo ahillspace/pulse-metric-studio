@@ -143,6 +143,8 @@ export function FollowerBadges({
     definition.metrics.map((metric) => metric.metricId),
     followState,
   );
+  const notRequested = definition.metrics.some((metric) =>
+    followState?.availabilityByMetricId?.[metric.metricId]?.followerIdsStatus === "not_requested");
   return (
     <button
       className="metric-id-btn"
@@ -155,7 +157,7 @@ export function FollowerBadges({
         (metric) => followState?.availabilityByMetricId?.[metric.metricId],
       )
         ? "Loading followers..."
-        : `${summary.user} people / ${summary.groups} groups`}
+        : notRequested ? "Follower details not loaded" : `${summary.user} people / ${summary.groups} groups`}
     </button>
   );
 }

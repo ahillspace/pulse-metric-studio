@@ -66,6 +66,56 @@ test('saved profiles remain intact regardless of availability or empty environme
   assert.deepEqual(await registry.listProfiles(), profiles.map(toPublicProfile));
 });
 
+test('passive status checks no saved provider helpers, credentials, or catalogs, including inactive profiles', async () => {
+  let probes = 0;
+  const profiles = [{ ...storedProfile('local', 'codex-cli', 'explicit-model'), command: 'codex' }, storedProfile('inactive', 'opencode', 'catalog/model')];
+  const registry = new ProviderRegistry({
+    store: memoryProfiles(profiles), stateStore: memoryState('local'), environment: {},
+    providerFactory: (profile) => ({
+      ...provider(profile.id),
+      getHealth: async () => { probes++; throw new Error('Live health must not run for status'); },
+      listModels: async () => { probes++; throw new Error('Live catalogs must not run for status'); },
+    }),
+  });
+  const status = await registry.status();
+  assert.equal(probes, 0);
+  assert.equal(status.providers.local.installed, null);
+  assert.equal(status.providers.local.configured, true);
+  assert.equal(status.providers.local.healthy, null);
+  assert.equal(status.providers.local.reasonCode, 'not_tested');
+  assert.equal(status.providers.inactive.healthy, null);
+  assert.equal(status.readiness.state, 'yellow');
+  await assert.rejects(() => registry.testProfile('local'), /Live health must not run/);
+  assert.equal(probes, 1, 'explicit testing still probes the chosen provider');
+  await registry.close();
+});
+
+test('profile replacement, deletion, and registry close retire cached provider clients', async () => {
+  const store = memoryProfiles([storedProfile('gateway', 'openai-chat', 'first-model')]);
+  const clients: Array<{ model: string; disposed: number }> = [];
+  const registry = new ProviderRegistry({ store, stateStore: memoryState('gateway'), environment: {}, providerFactory: (profile) => {
+    const client = { model: profile.model, disposed: 0 };
+    clients.push(client);
+    return { ...provider(profile.id), dispose: () => { client.disposed++; } };
+  } });
+  await registry.pick();
+  await registry.pick();
+  assert.equal(clients.length, 1);
+  await registry.saveProfile({ id: 'gateway', label: 'Gateway', protocol: 'openai-chat', baseUrl: 'https://gateway.example.test/v1', model: 'second-model', authMode: 'none' });
+  assert.equal(clients[0].disposed, 1);
+  await registry.pick();
+  const second = clients.find((client) => client.model === 'second-model' && !client.disposed)!;
+  assert.ok(second);
+  await registry.deleteProfile('gateway');
+  assert.equal(second.disposed, 1);
+  await registry.saveProfile({ id: 'gateway', label: 'Gateway', protocol: 'openai-chat', baseUrl: 'https://gateway.example.test/v1', model: 'third-model', authMode: 'none' });
+  await registry.pick('gateway');
+  const third = clients.find((client) => client.model === 'third-model' && !client.disposed)!;
+  assert.ok(third);
+  await registry.close();
+  assert.equal(third.disposed, 1);
+});
+
 test('explicit environment profiles remain available and saved profiles take precedence', async () => {
   const saved = storedProfile('opencode', 'opencode', 'saved/model');
   const registry = new ProviderRegistry({ store: memoryProfiles([saved]), stateStore: memoryState('opencode'), environment: { OPENCODE_MODEL: 'environment/model', OPENAI_COMPAT_MODEL: 'api-model', OPENAI_COMPAT_BASE_URL: 'https://api.example.test/v1' } });
@@ -519,6 +569,8 @@ test('unverified local account success stays history without claiming durable gr
   const restarted = new ProviderRegistry({ store, stateStore: state, environment: {}, providerFactory: factory });
   assert.equal((await restarted.status()).readiness.state, 'yellow');
   signedIn = false;
+  assert.equal((await registry.status()).readiness.state, 'yellow', 'passive status cannot detect an external sign-out');
+  await assert.rejects(() => registry.pick(), /Sign in again/);
   assert.equal((await registry.status()).readiness.state, 'red');
   signedIn = true;
   assert.equal((await registry.status()).readiness.state, 'red', 'restored sign-in cannot revive a previous successful readiness record');

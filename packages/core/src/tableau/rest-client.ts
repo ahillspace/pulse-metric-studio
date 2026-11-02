@@ -121,12 +121,13 @@ export async function tableauFetch(
 ): Promise<Response> {
   const requestToken = session.token;
   const context = getSessionContext(session);
-  let resp = await rawFetch(session, path, init, requestToken, context);
+  const deadline = Date.now() + (init.timeoutMs ?? 30_000);
+  let resp = await rawFetch(session, path, init, requestToken, context, deadline);
 
   // Refresh only the owning active session, sharing the refresh across callers.
   if (resp.status === 401 && requestToken) {
     const refreshed = await reauthenticate(session, requestToken, context);
-    if (refreshed) resp = await rawFetch(session, path, init, session.token, context);
+    if (refreshed) resp = await rawFetch(session, path, init, session.token, context, deadline);
   }
 
   // Version self-healing: pods disagree about supported REST versions (some
@@ -134,15 +135,19 @@ export async function tableauFetch(
   // "Unknown resource" (404003) for a versioned path, retry with the next
   // known-good candidate and keep it for the rest of the session.
   if (resp.status === 404 && /^\/api\/\d+\.\d+\//.test(path)) {
-    const text = await readBoundedBody(resp, init.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES, init.timeoutMs ?? 30_000);
-    resp = new Response(text, { status: resp.status, statusText: resp.statusText, headers: resp.headers });
-    if (text.includes('404003') || /Unknown resource/i.test(text)) {
-      const next = nextVersionCandidate(session.apiVersion);
-      if (next) {
-        session.apiVersion = next;
-        const newPath = path.replace(/^\/api\/[^/]+\//, `/api/${next}/`);
-        resp = await rawFetch(session, newPath, init, session.token, context);
+    const originalVersion = path.match(/^\/api\/([^/]+)\//)![1]!;
+    const candidates = KNOWN_GOOD_VERSIONS.filter((version) => version !== originalVersion);
+    for (const candidate of candidates) {
+      const text = await readBoundedBody(resp, init.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES, init.timeoutMs ?? 30_000);
+      resp = new Response(text, { status: resp.status, statusText: resp.statusText, headers: resp.headers });
+      if (!text.includes('404003') && !/Unknown resource/i.test(text)) break;
+      const candidatePath = path.replace(/^\/api\/[^/]+\//, `/api/${candidate}/`);
+      resp = await rawFetch(session, candidatePath, init, session.token, context, deadline);
+      if (resp.ok) {
+        if (!context || (getSessionContext(session) === context && isSessionCurrent(session))) session.apiVersion = candidate;
+        break;
       }
+      if (resp.status !== 404) break;
     }
   }
   return resp;
@@ -184,24 +189,18 @@ async function reauthenticate(session: TableauSession, rejectedToken: string, co
 
 const KNOWN_GOOD_VERSIONS = ['3.27', '3.26', '3.25', '3.24', '3.23'];
 
-function nextVersionCandidate(current: string): string | null {
-  const remaining = KNOWN_GOOD_VERSIONS.filter((v) => v !== current);
-  return remaining.length > 0 ? remaining[0] : null;
-}
-
 /** Most requests one Tableau identity keeps in flight at once. */
 export const MAX_CONCURRENT_TABLEAU_REQUESTS = 8;
 const MAX_THROTTLE_RETRIES = 4;
 const DEFAULT_RETRY_AFTER_MS = 2_000;
-const MAX_RETRY_AFTER_MS = 30_000;
 
-/** Converts a Retry-After header (seconds or HTTP date) into a bounded delay. */
+/** Preserve the provider minimum; callers stop locally if their deadline is earlier. */
 export function retryAfterMs(header: string | null, now = Date.now()): number {
   const value = header?.trim() ?? '';
   let delay = DEFAULT_RETRY_AFTER_MS;
   if (/^\d+$/.test(value)) delay = Number(value) * 1000;
   else if (value && !Number.isNaN(Date.parse(value))) delay = Math.max(0, Date.parse(value) - now);
-  return Math.min(delay, MAX_RETRY_AFTER_MS);
+  return Math.min(delay, Number.MAX_SAFE_INTEGER);
 }
 
 /**
@@ -215,13 +214,15 @@ class RequestGate {
   private readonly waiting: Array<() => void> = [];
   private resumeAt = 0;
 
-  async run<T>(task: () => Promise<T>): Promise<T> {
+  async run<T>(task: () => Promise<T>, deadline: number): Promise<T> {
     while (this.active >= MAX_CONCURRENT_TABLEAU_REQUESTS) await new Promise<void>((resolve) => this.waiting.push(resolve));
     this.active++;
     try {
       for (let wait = this.resumeAt - Date.now(); wait > 0; wait = this.resumeAt - Date.now()) {
+        if (this.resumeAt >= deadline) throw new TableauError('Tableau is temporarily unavailable until its rate limit permits another request.', 429);
         await new Promise((resolve) => setTimeout(resolve, wait));
       }
+      if (Date.now() >= deadline) throw new TableauError('Tableau request timed out while waiting for capacity.', 0, '', 'network');
       return await task();
     } finally {
       this.active--;
@@ -250,13 +251,16 @@ async function rawFetch(
   init: RequestInit & { timeoutMs?: number } = {},
   token = session.token,
   context = getSessionContext(session),
+  deadline = Date.now() + (init.timeoutMs ?? 30_000),
 ): Promise<Response> {
   const gate = requestGate(session);
   for (let attempt = 0; ; attempt++) {
-    const resp = await gate.run(() => sendOnce(session, path, init, token, context));
-    if (resp.status !== 429 || attempt === MAX_THROTTLE_RETRIES) return resp;
+    const resp = await gate.run(() => sendOnce(session, path, { ...init, timeoutMs: Math.max(1, deadline - Date.now()) }, token, context), deadline);
+    if (resp.status !== 429) return resp;
+    const delay = retryAfterMs(resp.headers.get('retry-after'));
+    gate.pause(delay);
+    if (attempt === MAX_THROTTLE_RETRIES || Date.now() + delay >= deadline) return resp;
     void resp.body?.cancel().catch(() => {});
-    gate.pause(retryAfterMs(resp.headers.get('retry-after')));
   }
 }
 

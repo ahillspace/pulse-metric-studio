@@ -142,13 +142,24 @@ Browser development offers an explicitly selected encrypted local fallback.
 [`registerTableauRoutes`](../packages/core/src/tableau/routes.ts) resolves the chosen credential and verifies sign-in before committing connection changes.
 Credential mutations have operation identities so the frontend can reconcile a lost response before compensating a newly stored secret.
 Activation and disconnection use connection identity and session generation to protect a newer activation from an older request.
+Requests capture their authenticated owner before dispatch; late authentication errors and terminated receipts cannot expire a replacement session.
+Authentication and reachability are separate: temporary network, throttling, or server failures retain the session and report unavailability.
+First-party registry and dimension requests carry their captured expected owner for backend admission before provider work.
+A changed principal, activation generation, connection, server, or site returns a context error instead of running the queued request as another owner.
+Requests without that optional expectation retain the existing compatibility behavior.
 See [`tableau-connections-api.ts`](../packages/web/src/tableau-connections-api.ts), [`routes.ts`](../packages/core/src/tableau/routes.ts), and [`session.ts`](../packages/core/src/tableau/session.ts).
 
 Field discovery prefers VDS metadata and uses the Metadata API fallback where supported by the response.
 Raw provider field IDs remain the catalog identity used by authoring and serialization.
 Caches are partitioned by connection context; a failed or partial provider read cannot establish that Tableau contains no matching content.
+Catalog cache hits preserve the original VDS or Metadata API source; internal timestamps determine freshness separately.
+Discovery reuses a known datasource name or an exact datasource lookup instead of listing the site for one name.
+Dimension fields, counts, and value searches share bounded context for the authenticated owner and selected sources.
+Variant execution still refreshes and validates its captured source, catalog, and value domain.
 [`tableauFetch`](../packages/core/src/tableau/rest-client.ts) owns registered-session checks, concurrency admission, authentication refresh, version adaptation, and bounded throttling retries.
 Read and mutation retries have different safety rules; an ambiguous write is not a confirmed rejection.
+Version negotiation makes forward progress and changes the session version only after a successful response.
+A provider's `Retry-After` minimum is respected; a deadline that cannot accommodate it returns an unavailable result without an early retry.
 See [`getFieldCatalog`](../packages/core/src/tableau/vds-fields.ts) and [`metadata-fallback.ts`](../packages/core/src/tableau/metadata-fallback.ts).
 The [audit findings](ARCHITECTURE_AUDIT.md#findings-and-recommendations) identify response paths that bypass the common body-size limit and pagination limits that need further qualification.
 
@@ -212,10 +223,14 @@ The history Refresh control reloads publication summaries; Activity does not exp
 Window close, tray Quit, and operating-system quit requests use the same desktop shutdown flow.
 The editor stops accepting changes, waits for current assistant and catalog updates, and saves every open draft before the native host stops the backend.
 The user can keep the app open while those changes finish.
-After saving finishes, the editor stays disabled until the native host exits.
-A failed save keeps the window and edits available.
-Closing without saving requires a separate confirmation that identifies the affected drafts.
-Browser development warns before navigating away with unsaved draft changes.
+After automatic persistence finishes, the editor stays disabled until the native host exits.
+A failed automatic write keeps the window and edits available.
+Discarding those pending changes requires a separate confirmation that identifies the affected drafts.
+Browser development warns before navigating away with pending automatic writes.
+The shell also closes registry mutation admission during close preparation or backend unavailability.
+Variant dialogs use the workspace dialog host, and controller actions enforce admission independently of disabled controls.
+Already-admitted operations retain their outcomes; canceling close restores normal admission.
+Direct installers stop before replacement or removal when the normal close protocol does not finish within their wait.
 
 The relevant owners are [`desktop-lifecycle.ts`](../packages/web/src/desktop-lifecycle.ts), the [author controller](../packages/web/src/features/pulse/author/controller.ts), the [Activity controller](../packages/web/src/features/pulse/activity/controller.ts), and the [publication service](../packages/pulse/src/application/publish.ts).
 
@@ -226,8 +241,17 @@ Dimension discovery, member counts, and value queries send validated POST bodies
 Source metric and definition reads use bounded concurrency, and repeated definition reads share one request within the operation.
 Date and dimensional variants use the canonical variant endpoint.
 Inventory acquisition retains an immutable backend snapshot and returns its opaque identifier with the displayed inventory.
+Metric pagination retains useful records and marks incomplete, failed, repeated, or bounded pagination explicitly partial before snapshot creation.
+Complete list records supply validated ownership and specifications without redundant exact metric reads; incomplete records use the exact-read fallback.
 Initial loads and navigation share the current inventory and follower request.
 The Manager's **Refresh metrics** button starts replacement inventory immediately, even while earlier follower data remains pending, and discards late results from the earlier request.
+Bounded caches and pending reads include connection, principal, session generation, and datasource ownership.
+Returning to a datasource in the same session joins its pending read; another session cannot reuse its snapshots or follower state.
+Relationship reads share pending work per owned metric, including overlapping expanded selections.
+Manual inventory refresh supersedes earlier relationship evidence; subscription reconciliation requests evidence dispatched after the relevant mutation.
+Late results cannot replace newer relationship evidence in the display, retained inventory, or pending inventory enrichment.
+Inventory completion settles its loading flags independently of relationship merges while preserving their latest evidence.
+Automatic local persistence depends on stable context values and does not trigger a remote inventory refresh.
 The backend derives connection ownership from the active Tableau session and binds snapshots to that session generation, principal, connection, and datasource.
 Snapshots remain in memory without a time limit; each session retains its latest 32 snapshots.
 Deletion preview uses the displayed snapshot identifier and makes no Tableau requests.
@@ -248,6 +272,19 @@ Source changes remain local to that dialog until submission.
 Follow / Unfollow's Add existing reads a fresh identity snapshot for the exact selected metrics through the existing batched follow-state endpoint.
 It merges direct user and group subscribers into the selected targets without expanding group membership, and reports incomplete identity reads.
 The directory supplies display names, not subscription evidence.
+Initial summaries request follower counts without subscriber identities or user-membership discovery.
+Visible rows and explicit actions request identity detail; not-requested information remains distinct from zero, unavailable, or complete information.
+Follow mutations retain inventory and reconcile only affected metric IDs, including partial and unknown outcomes.
+Directory reads share bounded session-owned cache entries with an explicit refresh path.
+Group creation and removal invalidate the affected owner's target directory; ordinary subscription changes retain it.
+Backend membership reads share session/user-owned evidence until expiry or a relevant membership or group mutation.
+Potentially effective writes invalidate that evidence even when their outcome is uncertain; earlier pending reads cannot restore it.
+Subscription writes group recipients by metric and match response identities to each requested recipient.
+The 200-recipient chunk is an app request-size bound, not a published Tableau maximum.
+Missing receipt identities remain unknown, and ambiguous writes are not replayed.
+Authentication loss during post-submission confirmation leaves submitted outcomes unknown and stops unsent work.
+A direct authentication rejection of the mutation retains its definitive failure outcome.
+See the [Pulse API reference](https://help.tableau.com/current/api/rest_api/en-us/REST/rest_api_ref_pulse.htm) for the supported subscription endpoint.
 Deletion review uses names and metric identities from the immutable inventory snapshot without changing reviewed IDs or fingerprints.
 Follower counts come from the Manager's cached follow state; unavailable counts remain unknown.
 Deletion review does not fetch follower identities or refresh counts.
@@ -257,7 +294,11 @@ Metric Manager previews use Tableau's springboard insight and metric card image 
 The backend verifies the exact metric, definition, and datasource before rendering.
 The frontend receives a bounded PNG image; Tableau credentials remain in the backend.
 PNG decoding and CRC validation use `pngjs`; resource guards reject oversized dimensions, duplicate headers, and unsupported interlaced images before decoding.
-Preview images remain in memory and are discarded when the context or inventory changes.
+Metric Manager preview images remain in memory and are discarded when the context or inventory changes.
+Publication confirmations reuse bounded owner/receipt/item-state previews when canceled; explicit refresh and relevant receipt mutations invalidate them.
+An unrelated Manager inventory replacement does not regenerate publication previews that already match their receipt and authenticated owner.
+Visibility reconciliation retains successful ownership evidence and polls only unresolved visibility evidence within the operation.
+Sources that converge to the same definition and destination specification share one creation; aliases do not gain duplicate creation or undo ownership.
 The card uses the unique successful BAN summary sparkline, one successful period-over-period insight, and the highest-scored successful supporting insight.
 Tableau supplies the chart, facts, and markup.
 Springboard requests specify bundle version `1`; card image requests use Tableau's default locale.
@@ -306,6 +347,8 @@ Their concrete adapters own CLI discovery, launch validation, headless execution
 HTTP adapters continue to own API-key and gateway requests.
 Pulse authoring receives assistant text through `LlmProvider.complete()` and applies the existing parsing, schema, semantic, and proposal checks.
 The app applies those checks to proposed operations before accepting draft changes or publishing through its interface.
+Dropped-operation warnings reach proposal review and candidate chat, with at most 20 warnings of 500 characters each.
+Mixed-validity replies retain valid changes and use validated narration instead of claiming that rejected operations were accepted.
 Local CLI providers inherit native configuration, instructions, tools, skills, hooks, plugins, and MCP servers unless the user's launch options change them.
 Tool actions can read documents, inspect Tableau, and modify external resources directly.
 App proposal review, publication receipts, and undo apply only to operations performed through the app's workflows.
@@ -320,7 +363,9 @@ Deleting the active profile leaves AI unselected.
 The installed CLI owns authentication, refresh, and account switching.
 Pulse does not read, copy, or decrypt subscription tokens or credential files.
 Multiple profiles for the same CLI share native configuration unless their launch options select different settings.
-Passive setup checks inspect launch configuration and supported CLI capabilities without generating text or proving account access.
+Passive status reads use saved configuration and fingerprint-bound readiness without invoking launchers, model catalogs, or credential helpers.
+An unchecked CLI installation reports `installed: null`; saved configuration does not establish authentication readiness.
+Explicit setup checks inspect launch configuration and supported CLI capabilities without generating text or proving account access.
 These checks still execute the configured launcher with help or model-catalog arguments.
 An executable wrapper can act before handling those arguments.
 Local launchers trust the local app window to configure and execute commands, without the separate native exact-command approval used for HTTP credential commands.
@@ -365,6 +410,9 @@ Forced cleanup bounds shutdown and closes pipes; it does not establish that such
 Qualify this behavior with the supported official CLI builds before release.
 
 The Bedrock SDK owns its AWS credential-provider chain separately from these CLI adapters.
+Stable effective profiles reuse the provider and SDK client for completions; the SDK remains responsible for credential expiration and refresh.
+Normal completion does not perform redundant credential-resolution preflights.
+Changed or deleted profiles retire their clients after admitted requests finish.
 Its `credential_process` implementation does not expose cancellation or a process deadline in the installed SDK.
 Cancelling an AWS request does not establish that an already running SDK credential helper stops.
 This existing dependency limit also prevents a blanket guarantee that backend shutdown cancels every credential-provider operation.
@@ -398,6 +446,11 @@ The [audit recommendation](ARCHITECTURE_AUDIT.md#findings-and-recommendations) s
 
 ## Diagnose failures
 
+Desktop and backend log files each retain one 1 MiB active file and two 1 MiB archives.
+Fixed-size pipe readers bound continuous backend output; startup also bounds oversized files from older versions.
+This limits the two managed log sets to 6 MiB combined without retaining entire output lines in memory.
+Logging failures do not stop pipe consumption, and shutdown bounds the wait for reader threads.
+
 For OpenCode, reproduce the same model with an ordinary CLI invocation before diagnosing account access.
 Reproduce the configured executable and prefix options before diagnosing native configuration, provider access, or tool permissions.
 The app adds no execution-policy flags; user-supplied launch options and native configuration determine tool availability.
@@ -426,6 +479,11 @@ npm run tauri:build
 
 This builds the app and stages native packaging in a temporary directory, so files used by an already running app are not replaced.
 Artifacts are copied to `native-artifacts/` by default.
+Build evidence captures the Git revision, dirty state, and normalized source-content identity before copying, then verifies that identity after copying.
+The native stage rebuilds workspace outputs from its captured sources and resolves workspace imports inside that stage.
+Shared external dependencies do not link workspace imports back to compiled outputs in the original checkout.
+Sanitized public release evidence carries relative artifact hashes without local paths or arbitrary private diagnostics.
+Release staging requires matching source evidence and rejects conflicts before promoting a complete output directory.
 The native host serves bundled assets and forwards permitted API requests through a restricted native command.
 Per-launch secrets are delivered to the child through stdin and remain outside the renderer.
 Readiness verifies possession of the secret before normal authenticated requests begin.

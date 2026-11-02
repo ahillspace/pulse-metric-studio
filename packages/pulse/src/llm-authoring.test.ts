@@ -35,6 +35,30 @@ test('Pulse does not send infrastructure failures through the JSON repair loop',
   assert.equal(calls, 1);
 });
 
+test('mixed valid and invalid operations expose bounded warnings and qualify model narration without repair', async () => {
+  const { provider, calls } = trackingProvider([JSON.stringify({
+    assistantMessage: 'Added both metrics.',
+    ops: [{ op: 'ADD_SLICER', fieldId: 'Region' }, { op: 'ADD_METRIC', fieldId: 'Invalid', aggregation: 'INVALID' }],
+  })]);
+  const result = await authorOps(provider, { catalog: calcCatalog(), chat: [], userMessage: 'Build metrics' });
+  assert.deepEqual(result.ops, [{ op: 'ADD_SLICER', fieldId: 'Region' }]);
+  assert.equal(result.warnings.length, 1);
+  assert.match(result.warnings[0], /Dropped ADD_METRIC/);
+  assert.match(result.assistantMessage, /invalid suggestions were omitted/i);
+  assert.doesNotMatch(result.assistantMessage, /Added both/);
+  assert.equal(calls(), 1);
+});
+
+test('operation validation warning count and text are bounded', async () => {
+  const { provider } = trackingProvider([JSON.stringify({
+    assistantMessage: 'Suggested changes.',
+    ops: [{ op: 'ADD_SLICER', fieldId: 'Region' }, ...Array.from({ length: 50 }, () => ({ op: 'INVALID', fieldId: 'x'.repeat(2000) }))],
+  })]);
+  const result = await authorOps(provider, { catalog: calcCatalog(), chat: [], userMessage: 'Build metrics' });
+  assert.ok(result.warnings.length <= 20);
+  assert.ok(result.warnings.every((warning) => warning.length <= 500));
+});
+
 function trackingProvider(
   responses: string[],
   truncated = false,

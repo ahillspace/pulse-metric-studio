@@ -1,7 +1,7 @@
 import type { LlmMessage,LlmProvider } from '@pulse-metric-studio/core';
 import { extractJsonBlock,LLM_REQUEST_TIMEOUT_MS,LlmProviderError,timeoutDescription } from '@pulse-metric-studio/core';
 import type { CatalogField,DatasourceCatalog } from '@pulse-metric-studio/shared';
-import { OpsSchema } from '@pulse-metric-studio/shared';
+import { OpsSchema, PULSE_PROPOSAL_WARNING_LIMITS } from '@pulse-metric-studio/shared';
 /**
  * Pulse metric authoring: prompt construction + structured ops validation +
  * one-shot JSON repair loop. Proposed app operations remain schema-validated;
@@ -248,12 +248,15 @@ async function authorWithinDeadline(provider: LlmProvider, input: AuthorInput, d
     const parsed = attempt.parsed;
     provider.tracking?.commitSuccess();
     return {
-        assistantMessage: typeof parsed.assistantMessage === 'string' ? parsed.assistantMessage : '',
+        assistantMessage: attempt.warnings.length
+            ? `${parsed.ops.length} valid suggested change${parsed.ops.length === 1 ? ' is' : 's are'} included. Invalid suggestions were omitted; review the warnings before applying changes.`
+            : typeof parsed.assistantMessage === 'string' ? parsed.assistantMessage : '',
         ops: (parsed.ops ?? []),
         digestAudience: typeof parsed.digestAudience === 'string' ? parsed.digestAudience : undefined,
         provider: attempt.provider,
         model: attempt.model,
-        warnings: [...warnings, ...attempt.warnings],
+        warnings: [...warnings, ...attempt.warnings].slice(0, PULSE_PROPOSAL_WARNING_LIMITS.count)
+            .map((warning) => warning.slice(0, PULSE_PROPOSAL_WARNING_LIMITS.length)),
     };
 }
 type Attempt =
@@ -288,7 +291,9 @@ async function tryParse(provider: LlmProvider, messages: LlmMessage[], timeoutMs
                     .map((i) => `${i.path.join('.')}: ${i.message}`)
                     .join('; ')
                     .slice(0, 200);
-                issues.push(`Dropped ${String((o as any)?.op ?? '?')} for "${String((o as any)?.fieldId ?? '?')}": ${summary}`);
+                if (issues.length < PULSE_PROPOSAL_WARNING_LIMITS.count) {
+                    issues.push(`Dropped ${String((o as any)?.op ?? '?')} for "${String((o as any)?.fieldId ?? '?')}": ${summary}`.slice(0, PULSE_PROPOSAL_WARNING_LIMITS.length));
+                }
                 return [];
             }
             return [check.data];

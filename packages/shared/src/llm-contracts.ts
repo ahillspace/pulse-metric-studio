@@ -190,7 +190,8 @@ export interface LlmProfilePublic {
 }
 
 export interface LlmProviderStatus extends LlmProfilePublic {
-  installed: boolean;
+  /** Null when passive status has not checked a local executable. */
+  installed: boolean | null;
   configured: boolean;
   available: boolean;
   healthy: boolean | null;

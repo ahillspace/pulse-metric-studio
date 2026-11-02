@@ -25,6 +25,37 @@ function publicProfile(id: string) {
   };
 }
 
+test('legacy author route rejects malformed input before selecting or invoking a provider', async () => {
+  let picks = 0;
+  let authored = 0;
+  const service = { pick: async () => { picks++; return {} as any; } } as LlmProviderService;
+  const app = Fastify();
+  await app.register(sensible);
+  registerLlmRoutes(app, { service, authorOps: async (_provider, input) => { authored++; return input; } });
+  const valid = { catalog: { datasourceLuid: 'fixture' }, userMessage: 'Build metrics', chat: [] };
+  try {
+    for (const payload of [
+      [], 'invalid', { ...valid, userMessage: 42 }, { ...valid, userMessage: ['text'] },
+      { ...valid, catalog: { datasourceLuid: 42 } }, { ...valid, catalog: [] },
+      { ...valid, chat: {} }, { ...valid, chat: [{ role: 'user', content: 42 }] },
+      { ...valid, chat: [{ role: ['user'], content: 'fixture' }] },
+      { ...valid, chat: [{ role: { toString: 0 }, content: 'fixture' }] },
+      { ...valid, chat: [['user', 'fixture']] },
+    ]) {
+      const response = await app.inject({ method: 'POST', url: '/api/llm/author', headers: { 'content-type': 'application/json' }, payload: JSON.stringify(payload) });
+      assert.equal(response.statusCode, 400, response.body);
+    }
+    assert.equal(picks, 0);
+    assert.equal(authored, 0);
+    const accepted = await app.inject({ method: 'POST', url: '/api/llm/author', payload: { ...valid, chat: [
+      { role: 'system', content: 'System fixture' }, { role: 'user', content: 'User fixture' }, { role: 'assistant', content: 'Assistant fixture' },
+    ] } });
+    assert.equal(accepted.statusCode, 200, accepted.body);
+    assert.equal(picks, 1);
+    assert.equal(authored, 1);
+  } finally { await app.close(); }
+});
+
 test('local account profiles accept explicit models and reject cloud credentials', () => {
   for (const [protocol, command] of [['codex-cli', 'codex'], ['claude-code', 'claude']]) {
     const profile = { id: 'local', label: 'Local account', protocol, command, model: 'explicit-model', authMode: 'local-account' };

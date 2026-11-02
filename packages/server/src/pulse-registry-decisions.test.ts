@@ -71,7 +71,7 @@ test("real follow API retains confirmed pairs when authentication stops the next
     if (init?.method === "POST") {
       creates++;
       return creates === 1
-        ? Response.json({})
+        ? Response.json({ subscriptions: [{ id: 'subscription-a-user', metric_id: 'a', follower: { user_id: 'user' } }] })
         : Response.json({ error: { code: "401001" } }, { status: 401 });
     }
     return Response.json({ subscriptions: [] });

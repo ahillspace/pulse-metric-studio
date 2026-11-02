@@ -101,3 +101,30 @@ test("expired authentication clears remote choices and shows a reconnect message
   assert.deepEqual(store.getState().datasources, []);
   assert.match(store.getState().error ?? "", /Reconnect/);
 });
+
+test("an authentication rejection expires only its captured session owner", async () => {
+  const store = createConnectionController({
+    status: async () => ({ connected: true, session }),
+    disconnect: async () => ({ ok: true }),
+    datasources: async () => ({ datasources: [] }),
+  });
+  await store.getState().connected(session, session.connectionId);
+  const old = { ...store.getState().session! };
+  await store.getState().connected({ ...session, sessionGeneration: 2 }, session.connectionId);
+  store.getState().expireSession(old);
+  assert.equal(store.getState().session?.sessionGeneration, 2);
+  store.getState().expireSession({ ...session, sessionGeneration: 2 });
+  assert.equal(store.getState().session, null);
+});
+
+test("temporary status unavailability retains authentication and communicates retry", async () => {
+  const store = createConnectionController({
+    status: async () => ({ connected: true, session, reachable: false, availabilityError: "Tableau is temporarily unavailable." }),
+    disconnect: async () => ({ ok: true }),
+    datasources: async () => { throw new Error("must not load during temporary unavailability"); },
+  });
+  await store.getState().init();
+  assert.equal(store.getState().session?.userId, session.userId);
+  assert.equal(store.getState().reachable, false);
+  assert.match(store.getState().error ?? "", /temporarily unavailable/);
+});

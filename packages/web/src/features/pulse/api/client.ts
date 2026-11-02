@@ -16,7 +16,7 @@ import {
   type ExecutePulseDeleteRequest,
   type PulseWorkspaceDocumentV1,
 } from "@pulse-metric-studio/shared";
-import { notifySessionExpired } from "../shell/session-events";
+import { captureSessionOwner, notifySessionExpired } from "../shell/session-events";
 import { desktopFetch } from "../../../desktop-transport";
 
 export class PulseApiError extends Error {
@@ -36,6 +36,7 @@ export async function pulseRequest(
   method = "GET",
   body?: unknown,
 ): Promise<unknown> {
+  const owner = captureSessionOwner();
   const response = await desktopFetch(url, {
     method,
     ...(body === undefined
@@ -47,7 +48,7 @@ export async function pulseRequest(
   });
   const data: unknown = await response.json().catch(() => null);
   if (!response.ok) {
-    if (response.status === 401) notifySessionExpired();
+    if (response.status === 401) notifySessionExpired(owner);
     const record =
       data && typeof data === "object" ? (data as Record<string, unknown>) : {};
     const error =

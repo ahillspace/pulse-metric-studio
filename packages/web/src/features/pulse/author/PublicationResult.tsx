@@ -5,7 +5,8 @@ import { contextMatches } from "./controller";
 import { useConnection } from "../connections/controller";
 import { useActivity } from "../activity/controller";
 import { BusyLabel, Modal } from "../components/ui";
-import { PublishedMetrics } from "./PublishedMetrics";
+import { createPublishedPreviewCache, PublishedMetrics } from "./PublishedMetrics";
+import { sessionOwnerKey } from "../shell/session-events";
 import { ConfirmUndo } from "../activity/ConfirmUndo";
 
 export function PublicationResult({ receipt, onClose, onActivity }: {
@@ -18,6 +19,7 @@ export function PublicationResult({ receipt, onClose, onActivity }: {
   const [confirmGroup, setConfirmGroup] = useState(false);
   const [confirmUndo, setConfirmUndo] = useState(false);
   const [linkError, setLinkError] = useState<string | null>(null);
+  const [previews] = useState(() => createPublishedPreviewCache());
   const connected = Boolean(receipt.context && contextMatches(receipt.context, session));
   const busy = activity.undoBusy || activity.groupBusy || receipt.publishing;
   const group = receipt.follow.group;
@@ -30,7 +32,10 @@ export function PublicationResult({ receipt, onClose, onActivity }: {
   const followProblems = [group, receipt.follow.membership, ...receipt.follow.subscriptions].filter((item) => ['failed', 'unknown', 'not_attempted'].includes(item.status));
   const undone = receipt.items.filter((item) => item.undoStatus === "deleted").length;
   const published = receipt.items.filter((item) => item.creationStatus === "created" && item.undoStatus !== "deleted");
-  const live = connected && receipt.context && contentUrl !== undefined ? { context: receipt.context, siteContentUrl: contentUrl } : null;
+  const live = connected && receipt.context && contentUrl !== undefined && session ? { context: receipt.context, siteContentUrl: contentUrl, owner: session } : null;
+  const previewScope = JSON.stringify([receipt.id, receipt.context, sessionOwnerKey(session),
+    receipt.items.map((item) => [item.metricId, item.definitionId, item.creationStatus, item.undoStatus, item.resolutionStatus])]);
+  previews.setScope(previewScope);
   const settled = (status: string) => status === "created" || status === "reused";
   const digestFollowed = receipt.follow.requested && settled(group.status) && settled(receipt.follow.membership.status);
   const outcomeCounts = [
@@ -81,6 +86,6 @@ export function PublicationResult({ receipt, onClose, onActivity }: {
       {group.deletion.status === "unknown" && " Check Tableau before retrying."}
     </p>}
     {errors.filter(Boolean).map((error, index) => <p className="warning-banner" role="alert" key={index}>{error}</p>)}
-    <PublishedMetrics items={published} live={live} onLinkError={setLinkError} />
+    <PublishedMetrics items={published} live={live} onLinkError={setLinkError} previews={previews} previewScope={previewScope} />
   </Modal>;
 }

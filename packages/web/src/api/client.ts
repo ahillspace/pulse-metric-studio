@@ -73,6 +73,8 @@ export const api = {
   status: () =>
     req<{
       connected: boolean;
+      reachable?: boolean;
+      availabilityError?: string;
       restored?: boolean;
       hasStoredProfile?: boolean;
       session?: TableauSessionInfo;

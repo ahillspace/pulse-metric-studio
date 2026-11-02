@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { api, type TableauSessionInfo } from "../../../api/client";
 import { errorMessage, useNotices } from "../shell/notifications";
+import { sessionOwnerKey, setSessionOwner, type SessionOwner } from "../shell/session-events";
 
 export interface DatasourceChoice {
   luid: string;
@@ -10,6 +11,7 @@ export interface DatasourceChoice {
 interface ConnectionState {
   session: TableauSessionInfo | null;
   checked: boolean;
+  reachable: boolean;
   connecting: boolean;
   error: string | null;
   datasources: DatasourceChoice[];
@@ -21,7 +23,7 @@ interface ConnectionState {
   ) => Promise<void>;
   disconnect: () => Promise<void>;
   loadDatasources: () => Promise<void>;
-  expireSession: () => void;
+  expireSession: (owner?: SessionOwner | null) => void;
   startAction: () => boolean;
   finishAction: () => void;
 }
@@ -34,6 +36,7 @@ export function createConnectionController(
   return create<ConnectionState>((set, get) => ({
     session: null,
     checked: false,
+    reachable: true,
     connecting: false,
     error: null,
     datasources: [],
@@ -46,12 +49,13 @@ export function createConnectionController(
         set({
           checked: true,
           session: status.connected ? (status.session ?? null) : null,
-          error: null,
+          reachable: status.reachable !== false,
+          error: status.availabilityError ?? null,
         });
-        if (get().session) await get().loadDatasources();
+        if (get().session && get().reachable) await get().loadDatasources();
       } catch (error) {
         if (request === generation)
-          set({ checked: true, session: null, error: errorMessage(error) });
+          set({ checked: true, reachable: false, error: errorMessage(error) });
       }
     },
     async connected(session, connectionId) {
@@ -61,6 +65,7 @@ export function createConnectionController(
         session: { ...session, connectionId },
         checked: true,
         error: null,
+        reachable: true,
         datasources: [],
       });
       useNotices.getState().show("success", "Connected to Tableau");
@@ -112,7 +117,8 @@ export function createConnectionController(
         if (request === sourceRequest) set({ loadingDatasources: false });
       }
     },
-    expireSession() {
+    expireSession(owner = get().session) {
+      if (!owner || sessionOwnerKey(owner) !== sessionOwnerKey(get().session)) return;
       generation += 1;
       sourceRequest += 1;
       set({
@@ -132,3 +138,4 @@ export function createConnectionController(
   }));
 }
 export const useConnection = createConnectionController();
+useConnection.subscribe((state) => setSessionOwner(state.session));

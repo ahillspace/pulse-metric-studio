@@ -38,6 +38,11 @@ test("native stage preserves workspace-local resolution ahead of root dependenci
     path.join(source, "package.json"),
     JSON.stringify({ workspaces: ["packages/web", "packages/shared"] }),
   );
+  for (const name of ['web', 'shared']) {
+    const manifest = JSON.stringify({ name: `@fixture/${name}` });
+    write(path.join(source, `packages/${name}/package.json`), manifest);
+    write(path.join(stage, `packages/${name}/package.json`), manifest);
+  }
   write(
     path.join(source, "node_modules/example/index.js"),
     "module.exports = 'root';",
@@ -55,7 +60,7 @@ test("native stage preserves workspace-local resolution ahead of root dependenci
     fs.existsSync(path.join(stage, "packages/shared/node_modules")),
     false,
   );
-  assert.equal(
+  assert.notEqual(
     fs.realpathSync(path.join(stage, "packages/web/node_modules")),
     fs.realpathSync(path.join(source, "packages/web/node_modules")),
   );
@@ -63,16 +68,16 @@ test("native stage preserves workspace-local resolution ahead of root dependenci
 
 test("staged frontend bundles the installed OpenURL plugin from the web workspace", (t) => {
   const stage = temporary(t);
+  for (const workspace of ['.', ...JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).workspaces]) {
+    write(path.join(stage, workspace, 'package.json'), fs.readFileSync(path.join(root, workspace, 'package.json')));
+  }
   linkNativeStageDependencies(root, stage);
   const stagedWeb = path.join(stage, "packages/web");
   fs.mkdirSync(stagedWeb, { recursive: true });
   const requireFromStage = createRequire(path.join(stagedWeb, "entry.cjs"));
-  assert.equal(
-    requireFromStage.resolve("@tauri-apps/plugin-opener"),
-    createRequire(path.join(root, "packages/web/package.json")).resolve(
-      "@tauri-apps/plugin-opener",
-    ),
-  );
+  const resolved = requireFromStage.resolve("@tauri-apps/plugin-opener");
+  assert.ok(resolved.startsWith(stage));
+  assert.deepEqual(fs.readFileSync(resolved), fs.readFileSync(createRequire(path.join(root, "packages/web/package.json")).resolve("@tauri-apps/plugin-opener")));
   const result = buildSync({
     stdin: {
       contents: 'export { openUrl } from "@tauri-apps/plugin-opener";',

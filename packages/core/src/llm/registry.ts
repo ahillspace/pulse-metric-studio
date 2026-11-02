@@ -20,6 +20,7 @@ import {
   DbLlmRegistryStateStore,
   DbLlmProfileStore,
   type LlmProfileStore,
+  type LlmProfileWriter,
   type LlmReadinessResult,
   type LlmSecretSource,
   type LlmRegistryStateStore,
@@ -59,6 +60,8 @@ export class ProviderRegistry {
   private readonly modelCatalogCache = new Map<string, { fingerprint: string; loadedAt: number; models: LlmModelOption[] }>();
   private readonly shutdown = new AbortController();
   private readonly pending = new Set<Promise<unknown>>();
+  private readonly profileWrites = new Map<string, Promise<unknown>>();
+  private readonly providerCache = new Map<string, { fingerprint: string; provider: LlmProvider }>();
 
   constructor(options: ProviderRegistryOptions = {}) {
     this.environment = options.environment ?? process.env;
@@ -78,7 +81,7 @@ export class ProviderRegistry {
 
     for (const [id, provider] of providers) {
       const profile = profileById.get(id);
-      const baseHealth = await this.checkedProviderHealth(provider, profile);
+      const baseHealth = profile ? configuredProfileHealth(profile) : await this.checkedProviderHealth(provider);
       const fingerprint = this.profileFingerprint(id, profile);
       if (baseHealth.healthy === false && this.matchingReadiness(id, fingerprint)?.lastResult.outcome === 'success') {
         this.recordResult(id, fingerprint, 'failure', baseHealth.reasonCode, baseHealth.reason);
@@ -90,7 +93,7 @@ export class ProviderRegistry {
       status[id] = {
         ...publicProfile,
         ...health,
-        available: baseHealth.installed && baseHealth.configured,
+        available: baseHealth.installed !== false && baseHealth.configured,
       };
     }
 
@@ -114,7 +117,7 @@ export class ProviderRegistry {
   async listModels(profileId: string): Promise<LlmModelCatalogResponse> {
     const profile = this.profiles().find((entry) => entry.id === profileId);
     if (!profile) throw new LlmModelCatalogError(`LLM provider profile "${profileId}" does not exist.`);
-    return this.currentModels(profile, this.providerFactory(profile), true);
+    return this.currentModels(profile, this.providerFor(profile), true);
   }
 
   async listSetupModels(protocol: LlmProtocol = 'opencode', command?: string): Promise<LlmModelCatalogResponse> {
@@ -128,26 +131,43 @@ export class ProviderRegistry {
   }
 
   async saveProfile(input: LlmProfileWrite): Promise<LlmProfilePublic> {
-    const before = this.profiles().find((profile) => profile.id === input.id);
-    const beforeFingerprint = before ? this.profileFingerprint(input.id, before) : null;
-    // Resolve preservation against the effective profile, which can come from
-    // the environment rather than the saved store. Clear flags win here.
-    const prospective = resolveLlmProfile(input, before);
-    await this.assertCurrentModel(prospective, this.providerFactory(prospective), true);
-    const saved = toPublicProfile(await this.store.save(prospective));
-    const after = this.profiles().find((profile) => profile.id === input.id);
-    if (!after || beforeFingerprint !== this.profileFingerprint(input.id, after)) {
-      this.stateStore.deleteReadiness(input.id);
-    }
-    return saved;
+    return this.mutateProfile(input.id, async (writer) => {
+      const before = this.profiles().find((profile) => profile.id === input.id);
+      const beforeFingerprint = before ? this.profileFingerprint(input.id, before) : null;
+      // Resolve preservation against the effective profile, which can come from
+      // the environment rather than the saved store. Clear flags win here.
+      const prospective = resolveLlmProfile(input, before);
+      const validationProvider = this.providerFactory(prospective);
+      try { await this.assertCurrentModel(prospective, validationProvider, true); }
+      finally { validationProvider.dispose?.(); }
+      const saved = toPublicProfile(await writer.save(prospective));
+      const after = this.profiles().find((profile) => profile.id === input.id);
+      if (!after || beforeFingerprint !== this.profileFingerprint(input.id, after)) {
+        this.stateStore.deleteReadiness(input.id);
+        this.invalidateProvider(input.id);
+      }
+      return saved;
+    });
   }
 
   async deleteProfile(id: string): Promise<void> {
-    const active = this.activePreference(await this.providers());
-    await this.store.delete(id);
-    this.stateStore.deleteReadiness(id);
-    this.modelCatalogCache.delete(id);
-    if (active === id) this.stateStore.setActive('');
+    return this.mutateProfile(id, async (writer) => {
+      const active = this.activePreference(await this.providers());
+      await writer.delete(id);
+      this.stateStore.deleteReadiness(id);
+      this.modelCatalogCache.delete(id);
+      this.invalidateProvider(id);
+      if (active === id) this.stateStore.setActive('');
+    });
+  }
+
+  private async mutateProfile<T>(id: string, work: (writer: LlmProfileWriter) => Promise<T>): Promise<T> {
+    const pending = this.store.withProfileMutation
+      ? this.store.withProfileMutation(id, work)
+      : (this.profileWrites.get(id) ?? Promise.resolve()).catch(() => {}).then(() => work(this.store));
+    this.profileWrites.set(id, pending);
+    try { return await pending; }
+    finally { if (this.profileWrites.get(id) === pending) this.profileWrites.delete(id); }
   }
 
   async setActive(id: string): Promise<string> {
@@ -159,7 +179,10 @@ export class ProviderRegistry {
     }
     const profile = this.staticProviders ? undefined : this.profiles().find((entry) => entry.id === id);
     const health = await this.checkedProviderHealth(provider, profile, true);
-    if (!health.installed || !health.configured || health.healthy === false) throw healthError(id, health);
+    if (health.installed === false || !health.configured || health.healthy === false) {
+      this.recordResult(id, this.profileFingerprint(id, profile), 'failure', health.reasonCode, health.reason);
+      throw healthError(id, health);
+    }
     const previous = this.activePreference(providers);
     if (previous !== id) this.stateStore.deleteReadiness(id);
     this.stateStore.setActive(id);
@@ -222,14 +245,36 @@ export class ProviderRegistry {
     }
     const profile = this.staticProviders ? undefined : this.profiles().find((entry) => entry.id === requested);
     const health = await this.checkedProviderHealth(provider, profile, true);
-    if (!health.installed || !health.configured || health.healthy === false) throw healthError(requested, health);
     const fingerprint = this.profileFingerprint(requested, profile);
+    if (health.installed === false || !health.configured || health.healthy === false) {
+      this.recordResult(requested, fingerprint, 'failure', health.reasonCode, health.reason);
+      throw healthError(requested, health);
+    }
     return this.trackCompletions(provider, requested, fingerprint);
   }
 
   private async providers(): Promise<Map<string, LlmProvider>> {
     if (this.staticProviders) return new Map(this.staticProviders.map((provider) => [provider.id, provider]));
-    return new Map(this.profiles().map((profile) => [profile.id, this.providerFactory(profile)]));
+    const profiles = this.profiles();
+    const ids = new Set(profiles.map((profile) => profile.id));
+    for (const id of this.providerCache.keys()) if (!ids.has(id)) this.invalidateProvider(id);
+    return new Map(profiles.map((profile) => [profile.id, this.providerFor(profile)]));
+  }
+
+  private providerFor(profile: StoredLlmProfile): LlmProvider {
+    const fingerprint = this.profileFingerprint(profile.id, profile);
+    const cached = this.providerCache.get(profile.id);
+    if (cached?.fingerprint === fingerprint) return cached.provider;
+    this.invalidateProvider(profile.id);
+    const provider = this.providerFactory(profile);
+    this.providerCache.set(profile.id, { fingerprint, provider });
+    return provider;
+  }
+
+  private invalidateProvider(id: string): void {
+    const previous = this.providerCache.get(id);
+    this.providerCache.delete(id);
+    previous?.provider.dispose?.();
   }
 
   private profiles(): StoredLlmProfile[] {
@@ -417,7 +462,8 @@ export class ProviderRegistry {
 
   async close(): Promise<void> {
     this.shutdown.abort();
-    await Promise.allSettled([...this.pending]);
+    await Promise.allSettled([...this.pending, ...this.profileWrites.values()]);
+    for (const id of this.providerCache.keys()) this.invalidateProvider(id);
   }
 
 }
@@ -487,8 +533,27 @@ async function providerHealth(provider: LlmProvider, signal?: AbortSignal): Prom
   };
 }
 
+/** Configuration alone is inspectable without executing a provider or credential helper. */
+function configuredProfileHealth(profile: StoredLlmProfile): LlmProviderHealth {
+  const cli = ['opencode', 'codex-cli', 'claude-code'].includes(profile.protocol);
+  const bedrock = profile.protocol === 'bedrock-converse';
+  const needsSecret = profile.authMode === 'bearer' || profile.authMode === 'x-api-key';
+  const configured = Boolean(profile.model && (cli ? profile.command : bedrock ? profile.region : profile.baseUrl)
+    && (!needsSecret || profile.secret || profile.credentialCommand));
+  return {
+    installed: cli ? null : true,
+    configured,
+    healthy: configured ? null : false,
+    reasonCode: configured ? 'not_tested' : 'not_configured',
+    reason: configured
+      ? 'Configured. Installation, credentials, and model access have not been checked by this status request. Run a connection test to verify access.'
+      : 'Provider endpoint or launch command, model, or authentication configuration is missing.',
+    resolvedModel: profile.model || null,
+  };
+}
+
 function healthWithReadiness(health: LlmProviderHealth, readiness: StoredLlmReadiness | null): LlmProviderHealth {
-  if (!readiness || !health.installed || !health.configured || health.healthy === false) return health;
+  if (!readiness || health.installed === false || !health.configured || health.healthy === false) return health;
   if (readiness.lastResult.outcome === 'success') {
     return { ...health, healthy: true, reasonCode: 'ready', reason: null };
   }

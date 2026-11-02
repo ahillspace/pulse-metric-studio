@@ -5,7 +5,7 @@ import {
   CredentialBrokerError,
   type CredentialBrokerClient,
 } from './credential-broker.js';
-import { apiPath, DEFAULT_MAX_RESPONSE_BYTES, readBoundedBody, TableauError, type TableauSession } from './rest-client.js';
+import { apiPath, classifyStatus, DEFAULT_MAX_RESPONSE_BYTES, readBoundedBody, TableauError, type TableauSession } from './rest-client.js';
 import { invalidateFieldsCache, listDatasources } from './vds-fields.js';
 import { discoverRestApiVersion, patSignin } from './signin.js';
 import {
@@ -34,6 +34,13 @@ export interface TableauRouteDependencies {
   discoverRestApiVersion?: typeof discoverRestApiVersion;
   patSignin?: typeof patSignin;
   fetchImpl?: typeof fetch;
+}
+
+function currentStatusAfterSwitch() {
+  const current = getSession();
+  return current
+    ? { connected: true, reachable: false, session: publicSession(current), availabilityError: 'The Tableau connection changed during the status check. Retry connection status.' }
+    : { connected: false, hasStoredProfile: getStoredConnection() != null };
 }
 
 type CredentialInput = {
@@ -174,13 +181,21 @@ export function registerTableauRoutes(
           signal: AbortSignal.timeout(10_000),
         },
       );
-      if (!response.ok) throw new Error(String(response.status));
+      if (!response.ok) {
+        const body = await readBoundedBody(response, DEFAULT_MAX_RESPONSE_BYTES, 10_000).catch(() => '');
+        throw new TableauError('Tableau status check failed.', response.status, '', classifyStatus(response.status, body));
+      }
       captureCurrentUserName(session, await readBoundedBody(response, DEFAULT_MAX_RESPONSE_BYTES, 10_000).then(text => JSON.parse(text)).catch(() => null));
-      if (!isSessionCurrent(session)) return { connected: false, hasStoredProfile: getStoredConnection() != null };
-      return { connected: true, restored: false, session: publicSession(session) };
-    } catch {
-      if (isSessionCurrent(session)) clearSession();
-      return { connected: false, hasStoredProfile: getStoredConnection() != null };
+      if (!isSessionCurrent(session)) return currentStatusAfterSwitch();
+      return { connected: true, reachable: true, restored: false, session: publicSession(session) };
+    } catch (error) {
+      if (!isSessionCurrent(session)) return currentStatusAfterSwitch();
+      if (error instanceof TableauError && error.kind === 'auth') {
+        clearSession();
+        return { connected: false, hasStoredProfile: getStoredConnection() != null };
+      }
+      return { connected: true, reachable: false, session: publicSession(session),
+        availabilityError: 'Tableau is temporarily unavailable. Retry connection status to check again.' };
     }
   });
 

@@ -13,7 +13,7 @@ import {
   forkRegistryActionItem,
   type RegistryActionResults,
 } from "../registry-actions";
-import { mergeFollowStates, unavailableFollowState } from "../follow-state";
+import { mergeFollowStates, replaceFollowMetrics, selectFollowMetrics, unavailableFollowState } from "../follow-state";
 import type { FollowState } from "./view-types";
 import {
   reconcileFollowTargetResults,
@@ -21,9 +21,13 @@ import {
   targetLabelKey,
 } from "../follow-target-actions";
 import { errorMessage } from "../shell/notifications";
+import { sessionOwnerKey, type SessionOwner } from "../shell/session-events";
 
 interface RegistryState {
   context: PulseDraftContext | null;
+  owner: SessionOwner | null;
+  mutationAvailable: boolean;
+  setMutationAvailable(available: boolean): void;
   datasourceName: string;
   inventory: PulseInventoryResponse | null;
   followState: FollowState | null;
@@ -42,10 +46,12 @@ interface RegistryState {
   setContext: (
     context: PulseDraftContext | null,
     datasourceName?: string,
+    owner?: SessionOwner | null,
   ) => void;
+  activateContext: (context: PulseDraftContext | null, datasourceName?: string, owner?: SessionOwner | null) => Promise<void>;
   load: () => Promise<void>;
   ensureLoaded: () => Promise<void>;
-  invalidate: (context?: PulseDraftContext | null) => Promise<void>;
+  invalidate: (context?: PulseDraftContext | null, owner?: SessionOwner | null) => Promise<void>;
   fork: (
     request: PulseVariantRequestV1,
     labels: Map<string, string>,
@@ -66,23 +72,52 @@ interface RegistryState {
     metrics: Array<{ id: string; label: string }>,
     targets: FollowTargetChoice[],
   ) => Promise<PulseFollowOperation[]>;
-  loadTargets: RegistryApi["followTargets"];
+  loadTargets: (refresh?: boolean) => ReturnType<RegistryApi["followTargets"]>;
+  invalidateTargets: (owner?: SessionOwner | null) => void;
+  ensureFollowState: (metricIds: string[]) => Promise<void>;
   /** Reads a fresh, selection-scoped identity snapshot without replacing inventory state. */
   refreshFollowState: (metricIds: string[]) => Promise<FollowState | null>;
   loadFollowers: (
     metricIds: string[],
   ) => Promise<{ details: PulseFollowersDetail[] }>;
 }
-function key(context: PulseDraftContext | null): string {
-  return context ? JSON.stringify([context.connectionId, context.serverUrl, context.siteId, context.datasourceLuid]) : "null";
+function key(context: PulseDraftContext | null, owner: SessionOwner | null = null): string {
+  return context ? JSON.stringify([context.connectionId, context.serverUrl, context.siteId, context.datasourceLuid, sessionOwnerKey(owner)]) : "null";
 }
+export { key as registryScopeKey };
 
 export function createRegistryController(
   transport: RegistryApi = registryApi,
   deletion: Pick<PulseApi, "previewDelete" | "delete"> = pulseApi,
 ) {
-  const cache = new Map<string, { inventory: PulseInventoryResponse; followState: FollowState | null; loadedAt: number }>();
-  let pending: { generation: number; promise: Promise<void> } | null = null;
+  type MetricEvidence = { version: number; state: FollowState };
+  type DetailScope = { versions: Map<string, number>; evidence: Map<string, MetricEvidence>; pending: Map<string, Promise<MetricEvidence | null>> };
+  type InventoryIdentity = { detailScope: DetailScope };
+  type InventoryRead = { identity: InventoryIdentity; promise: Promise<CachedInventory>; inventory?: PulseInventoryResponse; details: Map<string, MetricEvidence>; detailScope: DetailScope };
+  type CachedInventory = { inventory: PulseInventoryResponse; followState: FollowState | null; loadedAt: number; operation: InventoryIdentity };
+  const cache = new Map<string, CachedInventory>();
+  const pending = new Map<string, InventoryRead>();
+  const detailScopes = new Map<string, DetailScope>();
+  let activeDetailRequests = 0;
+  const waitingDetailRequests: Array<() => void> = [];
+  const detailRequest = <T,>(read: () => Promise<T>): Promise<T> => new Promise((resolve, reject) => {
+    const start = () => {
+      activeDetailRequests++;
+      void read().then(resolve, reject).finally(() => {
+        activeDetailRequests--;
+        waitingDetailRequests.shift()?.();
+      });
+    };
+    if (activeDetailRequests < 4) start();
+    else waitingDetailRequests.push(start);
+  });
+  const directories = new Map<string, { value: Awaited<ReturnType<RegistryApi["followTargets"]>>; loadedAt: number }>();
+  const directoryPending = new Map<string, ReturnType<RegistryApi["followTargets"]>>();
+  const retain = (cacheKey: string, value: CachedInventory) => {
+    cache.delete(cacheKey);
+    cache.set(cacheKey, value);
+    while (cache.size > 8) cache.delete(cache.keys().next().value!);
+  };
   let generation = 0;
   let inventoryRequest = 0;
   let deleteRequest = 0;
@@ -96,20 +131,112 @@ export function createRegistryController(
     error instanceof PulseApiError &&
     INCOMPLETE_INVENTORY_CODES.includes(error.code ?? "");
   return create<RegistryState>((set, get) => {
-    const capture = () => ({ context: get().context, generation });
+    const activeKey = () => key(get().context, get().owner);
+    const capture = () => ({ context: get().context, owner: get().owner, key: activeKey(), generation });
     const current = (scope: ReturnType<typeof capture>) =>
       scope.generation === generation &&
-      key(scope.context) === key(get().context);
+      scope.key === activeKey();
     const record = (
       scope: ReturnType<typeof capture>,
       results: RegistryActionResults,
     ) =>
       set((state) => ({
-        outcomes: { ...state.outcomes, [key(scope.context)]: results },
+        outcomes: { ...state.outcomes, [scope.key]: results },
         ...(current(scope) ? { results } : {}),
       }));
+    const pruneDetailScopes = () => {
+      for (const [scopeKey, reads] of detailScopes) {
+        if (detailScopes.size <= 8) break;
+        if (scopeKey !== activeKey() && !cache.has(scopeKey) && !pending.has(scopeKey) && !reads.pending.size) detailScopes.delete(scopeKey);
+      }
+    };
+    const detailScopeFor = (scopeKey: string) => {
+      let reads = detailScopes.get(scopeKey);
+      if (!reads) {
+        reads = { versions: new Map(), evidence: new Map(), pending: new Map() };
+        detailScopes.set(scopeKey, reads);
+      }
+      pruneDetailScopes();
+      return reads;
+    };
+    const evidenceCurrent = (scope: ReturnType<typeof capture>, reads: DetailScope, id: string, version: number) =>
+      sessionOwnerKey(scope.owner) === sessionOwnerKey(get().owner) &&
+      detailScopes.get(scope.key) === reads && (reads.versions.get(id) ?? 0) === version;
+    const supersedeDetails = (scope: ReturnType<typeof capture>, ids: string[]) => {
+      const reads = detailScopeFor(scope.key);
+      for (const id of ids) {
+        reads.versions.set(id, (reads.versions.get(id) ?? 0) + 1);
+        reads.evidence.delete(id);
+        reads.pending.delete(id);
+      }
+    };
+    const overlayDetails = (scope: ReturnType<typeof capture>, operation: InventoryRead, base: FollowState | null) => {
+      const states: FollowState[] = [];
+      const ids: string[] = [];
+      for (const [id, evidence] of operation.details) {
+        if (evidenceCurrent(scope, operation.detailScope, id, evidence.version)) {
+          states.push(evidence.state);
+          ids.push(id);
+        }
+      }
+      return ids.length ? replaceFollowMetrics(base, mergeFollowStates(states), ids) : base;
+    };
+    const readFollowState = async (scope: ReturnType<typeof capture>, metricIds: string[]) => {
+      if (!scope.context || sessionOwnerKey(scope.owner) !== sessionOwnerKey(get().owner)) return null;
+      const ids = [...new Set(metricIds)];
+      const reads = detailScopeFor(scope.key);
+      const missing = ids.filter(id => !reads.pending.has(id) && !reads.evidence.has(id));
+      for (let offset = 0; offset < missing.length; offset += 200) {
+        const batch = missing.slice(offset, offset + 200);
+        const versions = new Map(batch.map(id => [id, reads.versions.get(id) ?? 0]));
+        const request = detailRequest(async () => {
+          const valid = batch.filter(id => evidenceCurrent(scope, reads, id, versions.get(id)!));
+          if (!valid.length) return null;
+          try { return await transport.followState(valid, true, scope.owner); }
+          catch (error) { return unavailableFollowState(valid, errorMessage(error)); }
+        });
+        for (const id of batch) {
+          const version = versions.get(id)!;
+          const requestForMetric = request.then(result => {
+            if (!result || !evidenceCurrent(scope, reads, id, version)) return null;
+            const evidence = { version, state: selectFollowMetrics(result, [id]) };
+            reads.evidence.set(id, evidence);
+            return evidence;
+          });
+          reads.pending.set(id, requestForMetric);
+          void requestForMetric.finally(() => {
+            if (reads.pending.get(id) === requestForMetric) reads.pending.delete(id);
+            pruneDetailScopes();
+          }).catch(() => {});
+        }
+      }
+      const requested = ids.map(id => reads.pending.get(id) ?? Promise.resolve(reads.evidence.get(id) ?? null));
+      const resolved = await Promise.all(requested);
+      const accepted: Array<{ id: string; evidence: MetricEvidence }> = [];
+      for (const [index, evidence] of resolved.entries()) {
+        const id = ids[index]!;
+        if (evidence && evidenceCurrent(scope, reads, id, evidence.version)) accepted.push({ id, evidence });
+      }
+      if (!accepted.length) return null;
+      const result = mergeFollowStates(accepted.map(({ evidence }) => evidence.state));
+      const validIds = accepted.map(({ id }) => id);
+      const operation = pending.get(scope.key);
+      if (operation?.detailScope === reads)
+        for (const { id, evidence } of accepted) operation.details.set(id, evidence);
+      const saved = cache.get(scope.key);
+      if (saved?.operation.detailScope === reads)
+        retain(scope.key, { ...saved, followState: replaceFollowMetrics(saved.followState, result, validIds) });
+      // Every caller consumes its shared result with its own current navigation scope.
+      if (current(scope)) set({ followState: replaceFollowMetrics(get().followState, result, validIds) });
+      return accepted.length === ids.length ? result : null;
+    };
     return {
       context: null,
+      owner: null,
+      mutationAvailable: true,
+      setMutationAvailable: (available) => {
+        if (get().mutationAvailable !== available) set({ mutationAvailable: available });
+      },
       datasourceName: "",
       inventory: null,
       followState: null,
@@ -124,8 +251,8 @@ export function createRegistryController(
       deleteLoading: false,
       deleteError: null,
       deleteOverridable: false,
-      setContext(context, datasourceName = "") {
-        if (key(context) === key(get().context)) {
+      setContext(context, datasourceName = "", owner = null) {
+        if (key(context, owner) === activeKey()) {
           if (datasourceName !== get().datasourceName) set({ datasourceName });
           return;
         }
@@ -134,9 +261,10 @@ export function createRegistryController(
         deleteRequest += 1;
         deleteBatches = [];
         deleteSelection = null;
-        const saved = cache.get(key(context));
+        const saved = cache.get(key(context, owner));
         set({
           context,
+          owner: owner ? { ...owner } : null,
           datasourceName,
           inventory: saved?.inventory ?? null,
           followState: saved?.followState ?? null,
@@ -144,7 +272,7 @@ export function createRegistryController(
           loading: false,
           error: null,
           busy: null,
-          results: get().outcomes[key(context)] ?? null,
+          results: get().outcomes[key(context, owner)] ?? null,
           createdMetricIds: [],
           deletePlan: null,
           deleteLoading: false,
@@ -152,88 +280,95 @@ export function createRegistryController(
           deleteOverridable: false,
         });
       },
+      async activateContext(context, datasourceName, owner = null) {
+        const changed = key(context, owner) !== activeKey();
+        get().setContext(context, datasourceName, owner);
+        if (context && changed) await get().ensureLoaded();
+      },
       async ensureLoaded() {
         if (!get().context) return;
-        if (pending?.generation === generation) return pending.promise;
-        const saved = cache.get(key(get().context));
-        if (saved && Date.now() - saved.loadedAt < 60_000) return;
+        const saved = cache.get(activeKey());
+        if (!pending.has(activeKey()) && saved && Date.now() - saved.loadedAt < 60_000) return;
         await get().load();
       },
-      async invalidate(context = get().context) {
+      async invalidate(context = get().context, owner = get().owner) {
         if (!context) return;
-        cache.delete(key(context));
-        if (key(context) === key(get().context)) {
-          pending = null;
-          await get().load();
-        }
+        const cacheKey = key(context, owner);
+        cache.delete(cacheKey);
+        pending.delete(cacheKey);
+        detailScopes.delete(cacheKey);
+        if (cacheKey === activeKey()) await get().load();
       },
       async load() {
-        if (pending?.generation === generation) return pending.promise;
-        const promise = (async () => {
-          const scope = capture();
-          if (!scope.context) return;
-          const request = ++inventoryRequest;
-          set({ loading: true, error: null });
-          try {
-            const inventory = await transport.inventory(scope.context);
-            if (!current(scope) || request !== inventoryRequest) return;
-            cache.set(key(scope.context), { inventory, followState: get().followState, loadedAt: Date.now() });
-            set({ inventory, loading: false, followLoading: true });
-            const ids = inventory.definitions.flatMap((definition) =>
-              definition.metrics.map((metric) => metric.metricId),
-            );
-            const batches: string[][] = [];
-            for (let index = 0; index < ids.length; index += 200)
-              batches.push(ids.slice(index, index + 200));
-            const states: FollowState[] = [];
-            const previous = get().followState;
-            for (let index = 0; index < batches.length; index += 4) {
-              if (!current(scope) || request !== inventoryRequest) return;
-              await Promise.all(
-                batches.slice(index, index + 4).map(async (batch) => {
-                  let result: FollowState;
-                  try {
-                    result = await transport.followState(batch);
-                  } catch (error) {
-                    result = unavailableFollowState(batch, errorMessage(error));
-                  }
-                  if (!current(scope) || request !== inventoryRequest) return;
-                  states.push(result);
-                  set({
-                    followState: mergeFollowStates([
-                      ...(previous ? [previous] : []),
-                      ...states,
-                    ]),
-                  });
-                }),
-              );
-            }
-            if (current(scope) && request === inventoryRequest) {
-              cache.set(key(scope.context), { inventory, followState: ids.length ? mergeFollowStates(states) : null, loadedAt: Date.now() });
-              set({
-                followState: ids.length ? mergeFollowStates(states) : null,
-                followLoading: false,
-              });
-            }
-          } catch (error) {
-            if (current(scope) && request === inventoryRequest)
-              set({
-                error: errorMessage(error),
-                loading: false,
-                followLoading: false,
-              });
+        const scope = capture();
+        if (!scope.context) return;
+        const request = ++inventoryRequest;
+        let operation = pending.get(scope.key);
+        if (!operation) {
+          if (pending.size >= 8) {
+            set({ error: "Wait for pending inventory requests before refreshing another datasource." });
+            return;
           }
-        })();
-        const run = { generation, promise };
-        pending = run;
-        try { await promise; } finally { if (pending === run) pending = null; }
+          detailScopes.delete(scope.key);
+          const detailScope = detailScopeFor(scope.key);
+          operation = { identity: { detailScope }, promise: undefined!, details: new Map(), detailScope };
+          const read = operation;
+          read.promise = (async (): Promise<CachedInventory> => {
+            const inventory = await transport.inventory(scope.context!, scope.owner);
+            const result = (followState: FollowState | null): CachedInventory => ({ inventory, followState, loadedAt: Date.now(), operation: read.identity });
+            if (sessionOwnerKey(scope.owner) !== sessionOwnerKey(get().owner)) return result(null);
+            read.inventory = inventory;
+            if (current(scope) && pending.get(scope.key) === read)
+              set({ inventory, loading: false, followLoading: true });
+            const ids = inventory.definitions.flatMap((definition) => definition.metrics.map((metric) => metric.metricId));
+            const states: FollowState[] = [];
+            for (let offset = 0; offset < ids.length; offset += 800) {
+              if (sessionOwnerKey(scope.owner) !== sessionOwnerKey(get().owner)) return result(null);
+              const batches = Array.from({ length: Math.ceil(Math.min(800, ids.length - offset) / 200) },
+                (_, index) => ids.slice(offset + index * 200, offset + (index + 1) * 200));
+              await Promise.all(batches.map(async (batch) => {
+                let state: FollowState;
+                try { state = await transport.followState(batch, false, scope.owner); }
+                catch (error) {
+                  state = unavailableFollowState(batch, errorMessage(error));
+                  for (const availability of Object.values(state.availabilityByMetricId ?? {})) {
+                    availability.relationshipStatus = "not_requested";
+                    availability.followerIdsStatus = "not_requested";
+                  }
+                }
+                states.push(state);
+                if (current(scope) && pending.get(scope.key) === read)
+                  set({ followState: overlayDetails(scope, read, mergeFollowStates([...(get().followState ? [get().followState!] : []), ...states])) });
+              }));
+            }
+            const completed = result(overlayDetails(scope, read, ids.length ? mergeFollowStates(states) : null));
+            if (pending.get(scope.key) === read) retain(scope.key, completed);
+            return completed;
+          })();
+          pending.set(scope.key, read);
+          void read.promise.finally(() => {
+            if (pending.get(scope.key) === read) pending.delete(scope.key);
+            pruneDetailScopes();
+          }).catch(() => {});
+        }
+        const read = operation;
+        set({ loading: !read.inventory, followLoading: Boolean(read.inventory), error: null,
+          ...(read.inventory ? { inventory: read.inventory } : {}) });
+        try {
+          await read.promise;
+          const latest = cache.get(scope.key);
+          if (current(scope) && request === inventoryRequest && latest?.operation === read.identity)
+            set({ inventory: latest.inventory, followState: latest.followState, loading: false, followLoading: false });
+        } catch (error) {
+          if (current(scope) && request === inventoryRequest) set({ error: errorMessage(error), loading: false, followLoading: false });
+        }
       },
       async fork(request, labels) {
         const scope = capture();
-        if (!scope.context || get().busy) return;
+        if (!scope.context || get().busy || !get().mutationAvailable) return;
         set({ busy: "fork", error: null });
         try {
-          const summary = await transport.fork(scope.context, request);
+          const summary = await transport.fork(scope.context, request, scope.owner);
           if (current(scope))
             set((state) => ({
               createdMetricIds: [
@@ -284,7 +419,7 @@ export function createRegistryController(
             })),
           });
         } finally {
-          await get().invalidate(scope.context);
+          await get().invalidate(scope.context, scope.owner);
           if (current(scope)) set({ busy: null });
         }
       },
@@ -294,7 +429,7 @@ export function createRegistryController(
         allowIncompleteInventory = false,
       ) {
         const scope = capture();
-        if (!scope.context || get().busy) return;
+        if (!scope.context || get().busy || !get().mutationAvailable) return;
         const request = ++deleteRequest;
         deleteBatches = [];
         deleteSelection = { metricIds, definitionIds };
@@ -395,7 +530,7 @@ export function createRegistryController(
       async executeDelete() {
         const scope = capture();
         const plan = get().deletePlan;
-        if (!scope.context || !plan || get().busy) return;
+        if (!scope.context || !plan || get().busy || !get().mutationAvailable) return;
         set({ busy: "delete", deleteError: null });
         const batches = [...deleteBatches];
         const outcomes: Awaited<ReturnType<PulseApi["delete"]>>["outcomes"] =
@@ -497,8 +632,8 @@ export function createRegistryController(
           if (current(scope)) {
             deleteBatches = [];
             set({ deletePlan: null, deleteError: failure ?? null });
-            await get().invalidate(scope.context);
-          } else cache.delete(key(scope.context));
+            await get().invalidate(scope.context, scope.owner);
+          } else cache.delete(scope.key);
         } catch (error) {
           if (current(scope))
             set({ deleteError: errorMessage(error), deletePlan: null });
@@ -508,12 +643,12 @@ export function createRegistryController(
       },
       dismissResults() {
         const outcomes = { ...get().outcomes };
-        delete outcomes[key(get().context)];
+        delete outcomes[activeKey()];
         set({ results: null, outcomes });
       },
       async follow(kind, operations, metrics, targets) {
         const scope = capture();
-        if (!scope.context || get().busy) return operations;
+        if (!scope.context || get().busy || !get().mutationAvailable) return operations;
         set({ busy: kind });
         const labels = {
           metricLabels: new Map(
@@ -541,6 +676,7 @@ export function createRegistryController(
             const response = await transport[kind](
               scope.context,
               operations.slice(index, index + 200),
+              scope.owner,
             );
             results.push(...response.results);
             if (response.terminated || response.stopped) {
@@ -592,28 +728,51 @@ export function createRegistryController(
           finishedAt: Date.now(),
           items: reconciled.items,
         });
-        if (sentCount > 0) await get().invalidate(scope.context);
+        if (sentCount > 0) {
+          const ids = operations.slice(0, sentCount).map(operation => operation.metricId);
+          supersedeDetails(scope, ids);
+          await readFollowState(scope, ids);
+        }
         if (current(scope)) set({ busy: null });
         return reconciled.retryOperations;
       },
-      loadTargets: () => transport.followTargets(),
+      invalidateTargets(owner = get().owner) {
+        const ownerKey = sessionOwnerKey(owner);
+        directories.delete(ownerKey);
+        directoryPending.delete(ownerKey);
+      },
+      async loadTargets(refresh = false) {
+        const ownerKey = sessionOwnerKey(get().owner);
+        if (refresh) get().invalidateTargets();
+        const saved = directories.get(ownerKey);
+        if (saved && Date.now() - saved.loadedAt < (saved.value.errors.length ? 15_000 : 300_000)) return saved.value;
+        const existing = directoryPending.get(ownerKey);
+        if (existing) return existing;
+        const request = transport.followTargets(get().owner);
+        directoryPending.set(ownerKey, request);
+        try {
+          const value = await request;
+          if (directoryPending.get(ownerKey) === request) {
+            directories.set(ownerKey, { value, loadedAt: Date.now() });
+            while (directories.size > 8) directories.delete(directories.keys().next().value!);
+          }
+          return value;
+        } finally { if (directoryPending.get(ownerKey) === request) directoryPending.delete(ownerKey); }
+      },
+      async ensureFollowState(metricIds) {
+        const ids = metricIds.filter((id) => {
+          const status = get().followState?.availabilityByMetricId?.[id]?.relationshipStatus;
+          return status === "not_requested" || status === undefined;
+        });
+        if (ids.length) await readFollowState(capture(), ids);
+      },
       async refreshFollowState(metricIds) {
         const scope = capture();
-        if (!scope.context) return null;
-        const ids = [...new Set(metricIds)];
-        const states: FollowState[] = [];
-        for (let offset = 0; offset < ids.length; offset += 800) {
-          if (!current(scope)) return null;
-          const batches = Array.from({ length: Math.ceil(Math.min(800, ids.length - offset) / 200) },
-            (_, index) => ids.slice(offset + index * 200, offset + (index + 1) * 200));
-          states.push(...await Promise.all(batches.map(async (batch) => {
-            try { return await transport.followState(batch); }
-            catch (error) { return unavailableFollowState(batch, errorMessage(error)); }
-          })));
-        }
-        return current(scope) ? mergeFollowStates(states) : null;
+        supersedeDetails(scope, metricIds);
+        const result = await readFollowState(scope, metricIds);
+        return current(scope) ? result : null;
       },
-      loadFollowers: (metricIds) => transport.followers(metricIds),
+      loadFollowers: (metricIds) => transport.followers(metricIds, get().owner),
     };
   });
 }

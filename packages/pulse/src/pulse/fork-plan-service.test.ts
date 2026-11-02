@@ -442,6 +442,8 @@ test('canonical planner handles more than one hundred sources with bounded provi
   let active = 0;
   let maximum = 0;
   const service = new PulseForkPlanService(dependencies({
+    getMetric: async (_owner, metricId) => ({ id: metricId, definition_id: `definition-${metricId}`, specification: {} }),
+    getDefinition: async (_owner, id) => ({ metadata: { id }, specification: { datasource: { id: 'datasource-1' } } }),
     getOrCreate: async () => {
       active++;
       maximum = Math.max(maximum, active);
@@ -458,6 +460,18 @@ test('canonical planner handles more than one hundred sources with bounded provi
   assert.equal(result.attempted, 125);
   assert.equal(result.created, 125);
   assert.ok(maximum <= 5);
+});
+
+test('identical destinations from different sources are created and owned once', async () => {
+  let sends = 0;
+  const service = new PulseForkPlanService(dependencies({ getOrCreate: async () => { sends++; return { metricId: 'destination', created: true }; } }));
+  const summary = await service.forkMetrics(session, { version: 1, sourceMetricIds: ['source-a', 'source-b'], timeframe: { key: 'LAST_30_DAYS' }, clauses: [] });
+  assert.equal(sends, 1);
+  assert.equal(summary.attempted, 2);
+  assert.equal(summary.created, 1);
+  assert.equal(summary.existing, 1);
+  assert.deepEqual(summary.results.map((result) => result.sourceMetricId), ['source-a', 'source-b']);
+  assert.deepEqual(summary.results.map((result) => result.metricId), ['destination', 'destination']);
 });
 
 test('dimension routes read every source from POST bodies and reject invalid input before provider calls', async () => {
@@ -484,14 +498,14 @@ test('dimension routes read every source from POST bodies and reject invalid inp
       assert.equal(response.statusCode, 200, response.body);
       assert.equal((await app.inject({ method: 'GET', url })).statusCode, 404);
     }
-    assert.equal(metricReads, 3000);
+    assert.equal(metricReads, 1000);
     for (const payload of [{ sourceMetricIds: [] }, { sourceMetricIds: [null] }, { sourceMetricIds: ['x'.repeat(513)] }]) {
       const response = await app.inject({ method: 'POST', url: '/api/pulse/dimensions', payload });
       assert.equal(response.statusCode, 400, response.body);
     }
     const invalidValues = await app.inject({ method: 'POST', url: '/api/pulse/dimensions/values', payload: { sourceMetricIds: ['metric'], fieldId: 'field-region', search: 'x'.repeat(257) } });
     assert.equal(invalidValues.statusCode, 400, invalidValues.body);
-    assert.equal(metricReads, 3000);
+    assert.equal(metricReads, 1000);
   } finally { clearSession(); await app.close(); }
 });
 

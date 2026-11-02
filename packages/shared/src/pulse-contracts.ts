@@ -223,11 +223,13 @@ export const PulseAuthorProposalRequestSchema = z.object({
   message: z.string().trim().min(1).max(PULSE_TEXT_LIMITS.conversation),
   document: PulseWorkspaceDocumentV1Schema.optional(),
 });
+export const PULSE_PROPOSAL_WARNING_LIMITS = { count: 20, length: 500 } as const;
 export const PulseAuthorProposalSchema = z.object({
   baseRevision: z.number().int().positive(),
   candidateDocument: PulseWorkspaceDocumentV1Schema,
   changes: z.array(z.object({ field: z.string(), message: z.string() })),
   assistantMessage: z.string(),
+  warnings: z.array(z.string().min(1).max(PULSE_PROPOSAL_WARNING_LIMITS.length)).max(PULSE_PROPOSAL_WARNING_LIMITS.count).optional(),
 });
 export type PulseAuthorProposal = z.infer<typeof PulseAuthorProposalSchema>;
 export const PreparePulseDeleteRequestSchema = z.object({
@@ -352,8 +354,8 @@ export const PulseFollowStateSchema = z.object({
   availabilityByMetricId: z.record(
     z.object({
       status: availability,
-      relationshipStatus: availability,
-      followerIdsStatus: availability.optional(),
+      relationshipStatus: z.enum(['available', 'partial', 'unavailable', 'not_requested']),
+      followerIdsStatus: z.enum(['available', 'partial', 'unavailable', 'not_requested']).optional(),
       followerCountStatus: z.enum(['available', 'unavailable']),
       diagnostics: z.array(PulseProviderDiagnosticSchema),
     }),

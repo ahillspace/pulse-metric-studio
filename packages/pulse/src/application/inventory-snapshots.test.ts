@@ -69,3 +69,11 @@ test('reactivating the same session object invalidates its earlier snapshot gene
     (error: unknown) => error instanceof PulseApplicationError && error.code === 'delete_snapshot_unavailable');
   assert.equal(reads, beforeReactivation);
 });
+
+test('reactivation at identical coordinates reloads the definition inventory for the new generation', async () => {
+  await loadPulseInventory(session, owner.datasourceLuid);
+  const before = reads;
+  setSession(session, { connectionId: owner.connectionId, patSecret: '' });
+  await loadPulseInventory(session, owner.datasourceLuid);
+  assert.equal(reads - before, 3);
+});

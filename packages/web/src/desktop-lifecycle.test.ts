@@ -106,6 +106,25 @@ test('cancelled persistence releases the native request without completing shutd
   cleanup();
 });
 
+test('failed native cancellation keeps persistence consequences visible without manual save instructions', async () => {
+  const f = fixture();
+  f.callbacks.prepareClose = async () => { throw new DOMException('Closing cancelled.', 'AbortError'); };
+  f.events.shutdown = async (action) => {
+    f.actions.push(action);
+    if (action === 'cancel') throw new Error('IPC unavailable');
+  };
+  const cleanup = subscribeDesktopLifecycle(f.callbacks, f.events, f.browser);
+  await Promise.resolve();
+  f.handlers.get('pulse-shutdown-requested')!({});
+  await Promise.resolve(); await Promise.resolve();
+  assert.deepEqual(f.actions, ['ready', 'cancel']);
+  assert.equal(f.cancelled(), 1);
+  assert.match(f.messages[0], /automatic persistence may still be pending/i);
+  assert.match(f.messages[0], /keep Pulse Metric Studio open/i);
+  assert.doesNotMatch(f.messages[0], /sav(e|ing) your work|restart/i);
+  cleanup();
+});
+
 test('StrictMode cleanup releases both listeners registered after unmount', async () => {
   const f = fixture();
   const registrations: Array<() => void> = [];

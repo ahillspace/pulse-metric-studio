@@ -75,6 +75,82 @@ function fixture() {
   return { db, vault, store, stateStore, saved, save };
 }
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+const concurrentProfile: LlmProfileWrite = {
+  id: 'concurrent', label: 'Concurrent', protocol: 'openai-chat',
+  baseUrl: 'https://gateway.example.test/v1', model: 'model', authMode: 'bearer',
+};
+
+test('overlapping settings updates resolve preserved references after the preceding rotation and cleanup', async () => {
+  const { db, vault, store, stateStore, saved, save } = fixture();
+  await save({ ...concurrentProfile, secret: 'old-fixture-secret' });
+  const entered = deferred();
+  const release = deferred();
+  const originalStore = vault.store.bind(vault);
+  vault.store = async (value) => {
+    if (value === 'new-fixture-secret') { entered.resolve(); await release.promise; }
+    return originalStore(value);
+  };
+  const registry = new ProviderRegistry({ store, stateStore, environment: {} });
+  const app = await routes(registry);
+  const otherApp = await routes(new ProviderRegistry({ store: new DbLlmProfileStore(() => db, () => vault), stateStore, environment: {} }));
+  try {
+    const rotation = app.inject({ method: 'PUT', url: '/api/llm/profiles/concurrent', payload: { ...concurrentProfile, secret: 'new-fixture-secret' } });
+    const rotating = rotation.then((response) => response);
+    await entered.promise;
+    const edit = otherApp.inject({ method: 'PUT', url: '/api/llm/profiles/concurrent', payload: { ...concurrentProfile, headers: { 'x-route': 'fixture-route' } } }).then((response) => response);
+    await new Promise<void>((done) => setImmediate(done));
+    const independent = await app.inject({ method: 'PUT', url: '/api/llm/profiles/independent', payload: { ...concurrentProfile, id: 'independent', secret: 'independent-fixture' } });
+    assert.equal(independent.statusCode, 200, independent.body);
+    release.resolve();
+    assert.equal((await rotating).statusCode, 200);
+    assert.equal((await edit).statusCode, 200);
+    assert.equal(saved('concurrent')?.secret, 'new-fixture-secret');
+    assert.equal(saved('concurrent')?.headers['x-route'], 'fixture-route');
+    assert.deepEqual(new Set(vault.secrets.values()), new Set(['new-fixture-secret', 'fixture-route', 'independent-fixture']));
+  } finally { release.resolve(); await app.close(); await otherApp.close(); }
+});
+
+test('overlapping settings update and delete leave no profile or orphaned winning secret', async () => {
+  const { vault, store, stateStore, save } = fixture();
+  await save({ ...concurrentProfile, secret: 'old-fixture-secret' });
+  const entered = deferred();
+  const release = deferred();
+  const originalStore = vault.store.bind(vault);
+  vault.store = async (value) => { entered.resolve(); await release.promise; return originalStore(value); };
+  const registry = new ProviderRegistry({ store, stateStore, environment: {} });
+  const updating = registry.saveProfile({ ...concurrentProfile, secret: 'replacement-fixture' });
+  await entered.promise;
+  const deleting = registry.deleteProfile(concurrentProfile.id);
+  await new Promise<void>((done) => setImmediate(done));
+  release.resolve();
+  await Promise.all([updating, deleting]);
+  assert.deepEqual(store.list(), []);
+  assert.equal(vault.secrets.size, 0);
+  await registry.close();
+});
+
+test('failed settings persistence cleans only its new references and releases the profile queue', async () => {
+  const { db, vault, store, stateStore, saved, save } = fixture();
+  await save({ ...concurrentProfile, secret: 'retained-fixture' });
+  db.exec("CREATE TEMP TRIGGER reject_profile_edit BEFORE UPDATE ON llm_profiles WHEN NEW.label = 'Reject' BEGIN SELECT RAISE(ABORT, 'fixture rejection'); END");
+  const registry = new ProviderRegistry({ store, stateStore, environment: {} });
+  try {
+    const failed = registry.saveProfile({ ...concurrentProfile, label: 'Reject', secret: 'discarded-fixture' });
+    const failure = assert.rejects(failed, /fixture rejection/);
+    const winning = registry.saveProfile({ ...concurrentProfile, headers: { 'x-route': 'retained-route' } });
+    await failure;
+    await winning;
+    assert.equal(saved('concurrent')?.secret, 'retained-fixture');
+    assert.deepEqual(new Set(vault.secrets.values()), new Set(['retained-fixture', 'retained-route']));
+  } finally { db.exec('DROP TRIGGER reject_profile_edit'); await registry.close(); }
+});
+
 async function routes(registry: InstanceType<typeof ProviderRegistry>) {
   const app = Fastify();
   await app.register(sensible);

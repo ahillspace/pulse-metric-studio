@@ -339,6 +339,6 @@ export function VariantDialog({
         </div>
       </fieldset>
     </Modal>,
-    document.body,
+    document.getElementById("pulse-workspace-dialogs") ?? document.body,
   );
 }

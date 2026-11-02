@@ -1,6 +1,6 @@
 import {
   getFieldCatalog,
-  invalidateFieldsCache,
+  getSessionContext,
   type TableauSession,
 } from '@pulse-metric-studio/core';
 import {
@@ -75,12 +75,7 @@ export interface PulseDimensionalForkDependencies {
 const defaultDependencies: PulseDimensionalForkDependencies = {
   getMetric: getPulseMetric,
   getDefinition: getPulseDefinition,
-  getCatalog: async (session, datasourceLuid) => {
-    const catalog = await getFieldCatalog(session, datasourceLuid);
-    if (catalog.source !== 'cache') return catalog;
-    invalidateFieldsCache(datasourceLuid);
-    return getFieldCatalog(session, datasourceLuid);
-  },
+  getCatalog: getFieldCatalog,
   queryValues: queryPulseDimensionValues,
   queryCount: queryPulseDimensionDistinctCount,
 };
@@ -101,6 +96,11 @@ interface ResolvedContext {
 }
 
 export class PulseDimensionalForkService {
+  private readonly contexts = new WeakMap<TableauSession, {
+    owner: ReturnType<typeof getSessionContext>;
+    coordinates: string;
+    entries: Map<string, { expiresAt: number; request: Promise<ResolvedContext> }>;
+  }>();
   constructor(
     private readonly dependencies: PulseDimensionalForkDependencies = defaultDependencies,
   ) {}
@@ -207,6 +207,38 @@ export class PulseDimensionalForkService {
     session: TableauSession,
     sourceMetricIds: string[],
   ): Promise<ResolvedContext> {
+    const owner = getSessionContext(session);
+    const coordinates = JSON.stringify([session.serverUrl, session.siteId, session.userId]);
+    let retained = this.contexts.get(session);
+    if (!retained || retained.owner !== owner || retained.coordinates !== coordinates) {
+      retained = { owner, coordinates, entries: new Map() };
+      this.contexts.set(session, retained);
+    }
+    const key = JSON.stringify(sourceMetricIds);
+    const existing = retained.entries.get(key);
+    if (existing && existing.expiresAt > Date.now()) {
+      const context = await existing.request;
+      if (getSessionContext(session) !== owner || JSON.stringify([session.serverUrl, session.siteId, session.userId]) !== coordinates)
+        throw new PulseDimensionalForkError('The Tableau session changed while dimension context was loading.', 409);
+      return context;
+    }
+    const request = this.loadContext(session, sourceMetricIds);
+    const entry = { expiresAt: Date.now() + 60_000, request };
+    retained.entries.delete(key);
+    retained.entries.set(key, entry);
+    while (retained.entries.size > 8) retained.entries.delete(retained.entries.keys().next().value!);
+    try {
+      const result = await request;
+      if (getSessionContext(session) !== owner || JSON.stringify([session.serverUrl, session.siteId, session.userId]) !== coordinates)
+        throw new PulseDimensionalForkError('The Tableau session changed while dimension context was loading.', 409);
+      return result;
+    } catch (error) {
+      if (retained.entries.get(key) === entry) retained.entries.delete(key);
+      throw error;
+    }
+  }
+
+  private async loadContext(session: TableauSession, sourceMetricIds: string[]): Promise<ResolvedContext> {
     const metrics = await mapWithConcurrency(
       sourceMetricIds,
       PROVIDER_CONCURRENCY,

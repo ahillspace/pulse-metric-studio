@@ -1,5 +1,4 @@
 interface PulseDefinitionResponse { definition?: { metadata?: { id?: string; name?: string } } }
-interface PulseMetricSummary { id?: string; metadata?: { id?: string; name?: string }; is_default?: boolean; specification?: unknown }
 import type { TableauSession } from '@pulse-metric-studio/core';
 import { TableauError,apiPath,deleteReq,getJson,isPastEndError,postJson } from '@pulse-metric-studio/core';
 import { boundedProviderDiagnostic,type PulseProviderDiagnostic } from './provider-diagnostics.js';
@@ -40,6 +39,12 @@ export interface PulseExactMetric {
   specification_reference?: { definition_id?: string };
   specification?: Record<string, unknown>;
   metric_specification?: Record<string, unknown>;
+}
+
+export interface PulseMetricInventory {
+  metrics: PulseExactMetric[];
+  truncated: boolean;
+  diagnostic?: PulseProviderDiagnostic;
 }
 
 export async function createDefinition(
@@ -101,13 +106,66 @@ export async function getPulseMetric(session: TableauSession, metricId: string, 
   return candidate as PulseExactMetric;
 }
 
-export async function listMetricsForDefinition(session: TableauSession, definitionId: string): Promise<PulseMetricSummary[]> {
-  const data = await getJson<unknown>(
-    session,
-    `${PULSE}/definitions/${encodeURIComponent(definitionId)}/metrics`,
-  );
-  if (!isRecord(data) || !Array.isArray(data.metrics)) throw unsupportedContract('definition metrics', data);
-  return data.metrics as PulseMetricSummary[];
+export async function listMetricsInventory(
+  session: TableauSession,
+  definitionId: string,
+  limits: { maxPages?: number; maxItems?: number } = {},
+): Promise<PulseMetricInventory> {
+  const metrics: PulseExactMetric[] = [];
+  const ids = new Set<string>();
+  const tokens = new Set<string>();
+  const maxPages = Math.max(1, Math.trunc(limits.maxPages ?? 200));
+  const maxItems = Math.max(1, Math.trunc(limits.maxItems ?? 100000));
+  let token = '';
+  let advertisedTotal = 0;
+  const partial = (message: string): PulseMetricInventory => ({ metrics, truncated: true, diagnostic: { message } });
+  for (let page = 0; page < maxPages; page++) {
+    let data: unknown;
+    try {
+      const query = new URLSearchParams({ page_size: '100' });
+      if (token) query.set('page_token', token);
+      data = await getJson<unknown>(session, `${PULSE}/definitions/${encodeURIComponent(definitionId)}/metrics?${query}`);
+    } catch (error) {
+      if ((error instanceof TableauError && error.kind === 'auth') || page === 0) throw error;
+      return { metrics, truncated: true, diagnostic: boundedProviderDiagnostic(error) };
+    }
+    if (!isRecord(data) || !Array.isArray(data.metrics)) return partial('Pulse metric inventory page requires a metrics array.');
+    if (data.total_available !== undefined) {
+      if (!Number.isSafeInteger(data.total_available) || (data.total_available as number) < 0)
+        return partial('Pulse metric inventory has an invalid total.');
+      advertisedTotal = Math.max(advertisedTotal, data.total_available as number);
+    }
+    const before = metrics.length;
+    for (const record of data.metrics) {
+      if (!isRecord(record)) return partial('Pulse metric inventory contains a malformed record.');
+      const metadata = isRecord(record.metadata) ? record.metadata : undefined;
+      const id = stringValue(record.id ?? metadata?.id);
+      if (!id) return partial('Pulse metric inventory contains a record without an identifier.');
+      if (ids.has(id)) continue;
+      if (metrics.length >= maxItems) return partial('Pulse metric inventory exceeds the local item limit.');
+      ids.add(id);
+      metrics.push(record as PulseExactMetric);
+    }
+    const next = data.next_page_token;
+    if (next === undefined || next === null || next === '') {
+      if (advertisedTotal > metrics.length)
+        return partial('Pulse metric inventory ended before its advertised total or has an invalid total.');
+      // Exhaustion of the continuation protocol establishes completion, even when no total is supplied.
+      return { metrics, truncated: false };
+    }
+    if (typeof next !== 'string' || !next.trim() || tokens.has(next) || metrics.length === before)
+      return partial('Pulse metric inventory has an invalid or repeated continuation.');
+    tokens.add(next);
+    token = next;
+  }
+  return partial('Pulse metric inventory exceeds the local page limit.');
+}
+
+/** Callers requiring a complete list must not silently consume a partial prefix. */
+export async function listMetricsForDefinition(session: TableauSession, definitionId: string): Promise<PulseExactMetric[]> {
+  const inventory = await listMetricsInventory(session, definitionId);
+  if (inventory.truncated) throw new TableauError(inventory.diagnostic?.message ?? 'Pulse metric inventory is incomplete.', 502);
+  return inventory.metrics;
 }
 
 /**
@@ -358,41 +416,86 @@ export async function listSubscriptionsForMetric(session: TableauSession, metric
   throw new TableauError('Pulse follower inventory continuation exceeds the local read limit.', 502);
 }
 
+export interface SubscriptionWriteTarget {
+  metricId: string;
+  targetId: string;
+  targetType: 'USER' | 'GROUP';
+}
+export interface SubscriptionWriteResult {
+  metricId: string;
+  targetId: string;
+  targetType?: 'USER' | 'GROUP';
+  ok: boolean;
+  alreadyExists: boolean;
+  unknown?: boolean;
+  error?: string;
+}
 export class SubscriptionBatchInterrupted extends TableauError {
+  readonly failed: { metricId: string; targetId: string };
   constructor(
     cause: TableauError,
-    public readonly completed: Array<{ metricId: string; targetId: string; ok: boolean; alreadyExists: boolean; error?: string }>,
-    public readonly failed: { metricId: string; targetId: string },
-  ) { super(cause.message, cause.status, cause.bodySnippet, cause.kind); }
+    public readonly completed: SubscriptionWriteResult[],
+    failed: { metricId: string; targetId: string },
+    public readonly failedTargets: SubscriptionWriteTarget[] = [],
+    public readonly phase: 'submission' | 'confirmation' = 'submission',
+  ) {
+    super(cause.message, cause.status, cause.bodySnippet, cause.kind);
+    this.failed = failed;
+  }
 }
 
-export async function batchCreateGroupSubscriptions(
-  session: TableauSession,
-  items: Array<{ metricId: string; groupId: string }>,
-): Promise<Array<{ metricId: string; targetId: string; ok: boolean; alreadyExists: boolean; error?: string }>> {
-  const results: Array<{ metricId: string; targetId: string; ok: boolean; alreadyExists: boolean; error?: string }> = [];
+/** Local request-size bound, not a claimed Tableau provider limit. */
+export const SUBSCRIPTION_REQUEST_LIMIT = 200;
+export async function batchCreateSubscriptions(session: TableauSession, items: SubscriptionWriteTarget[]): Promise<SubscriptionWriteResult[]> {
+  const results: SubscriptionWriteResult[] = [];
+  const byMetric = new Map<string, SubscriptionWriteTarget[]>();
   for (const item of items) {
-    try {
-      // This endpoint takes a flat request body and uses the subscription
-      // service vendor media type, unlike the metric query endpoints.
-      await postJson<any>(session, `${PULSE}/subscriptions:batchCreate`, {
-        metric_id: item.metricId,
-        followers: [{ group_id: item.groupId }],
-      }, {
-        contentType: 'application/vnd.tableau.pulse.subscriptionservice.v1.BatchCreateSubscriptionsRequest+json',
-      });
-      results.push({ metricId: item.metricId, targetId: item.groupId, ok: true, alreadyExists: false });
-    } catch (e) {
-      if (e instanceof TableauError && (e.kind === 'auth' || e.kind === 'network' || e.status >= 500)) throw new SubscriptionBatchInterrupted(e, results, { metricId: item.metricId, targetId: item.groupId });
-      if (isAlreadyFollowedError(e)) {
-        results.push({ metricId: item.metricId, targetId: item.groupId, ok: true, alreadyExists: true });
-      } else {
-        results.push({
-          metricId: item.metricId,
-          targetId: item.groupId,
-          ok: false,
-          alreadyExists: false,
-          error: e instanceof Error ? e.message : String(e),
+    const group = byMetric.get(item.metricId) ?? [];
+    if (!group.some((entry) => entry.targetType === item.targetType && entry.targetId === item.targetId)) group.push(item);
+    byMetric.set(item.metricId, group);
+  }
+  for (const [metricId, recipients] of byMetric) {
+    for (let offset = 0; offset < recipients.length; offset += SUBSCRIPTION_REQUEST_LIMIT) {
+      const batch = recipients.slice(offset, offset + SUBSCRIPTION_REQUEST_LIMIT);
+      let records: SubscriptionRecord[];
+      let alreadyExists = false;
+      try {
+        const data = await postJson<unknown>(session, `${PULSE}/subscriptions:batchCreate`, {
+          metric_id: metricId,
+          followers: batch.map((item) => item.targetType === 'GROUP' ? { group_id: item.targetId } : { user_id: item.targetId }),
+        }, {
+          contentType: 'application/vnd.tableau.pulse.subscriptionservice.v1.BatchCreateSubscriptionsRequest+json',
+          accept: 'application/vnd.tableau.pulse.subscriptionservice.v1.BatchCreateSubscriptionsResponse+json',
+        });
+        try { records = normalizeSubscriptionEnvelope({ subscriptions: subscriptionRecords(data).filter((record) => record.metric_id === undefined || record.metric_id === metricId) }); }
+        catch { records = []; }
+      } catch (error) {
+        if (!(error instanceof TableauError) || error.kind === 'auth' || error.kind === 'network' || error.status >= 500) {
+          const cause = error instanceof TableauError ? error : new TableauError('Subscription batch outcome is unknown.', 502);
+          throw new SubscriptionBatchInterrupted(cause, results, batch[0]!, batch);
+        }
+        if (isAlreadyFollowedError(error) && batch.length === 1) {
+          results.push({ ...batch[0]!, ok: true, alreadyExists: true });
+          continue;
+        }
+        if (error.status === 409 && batch.length > 1) {
+          // A conflict says nothing about the other submitted identities. Read evidence, never replay writes.
+          try { records = await listSubscriptionsForMetric(session, metricId); alreadyExists = true; }
+          catch (verificationError) {
+            if (verificationError instanceof TableauError && verificationError.kind === 'auth')
+              throw new SubscriptionBatchInterrupted(verificationError, results, batch[0]!, batch, 'confirmation');
+            records = [];
+          }
+        } else {
+          results.push(...batch.map((item) => ({ ...item, ok: false, alreadyExists: false, error: error.message })));
+          continue;
+        }
+      }
+      const identities = new Set(records.map((record) => `${record.follower.type}\u0000${record.follower.id}`));
+      for (const item of batch) {
+        const confirmed = identities.has(`${item.targetType}\u0000${item.targetId}`);
+        results.push({ ...item, ok: confirmed, alreadyExists: confirmed && alreadyExists,
+          ...(!confirmed ? { unknown: true, error: 'Tableau did not confirm this submitted recipient. Check follow state before retrying.' } : {}),
         });
       }
     }
@@ -400,41 +503,11 @@ export async function batchCreateGroupSubscriptions(
   return results;
 }
 
-export async function batchCreateUserSubscriptions(
-  session: TableauSession,
-  items: Array<{ metricId: string; userId: string }>,
-): Promise<Array<{ metricId: string; targetId: string; ok: boolean; alreadyExists: boolean; error?: string }>> {
-  const results: Array<{ metricId: string; targetId: string; ok: boolean; alreadyExists: boolean; error?: string }> = [];
-  for (const item of items) {
-    try {
-      // User follows go through the SAME subscription-service batchCreate
-      // endpoint and media type as group follows; a follower is `{ user_id }`
-      // or `{ group_id }`. The previous singular `/subscriptions` POST with a
-      // metricqueryservice CreateSubscriptionRequest media type was rejected by
-      // Tableau, so user follows failed while group follows succeeded.
-      await postJson<any>(session, `${PULSE}/subscriptions:batchCreate`, {
-        metric_id: item.metricId,
-        followers: [{ user_id: item.userId }],
-      }, {
-        contentType: 'application/vnd.tableau.pulse.subscriptionservice.v1.BatchCreateSubscriptionsRequest+json',
-      });
-      results.push({ metricId: item.metricId, targetId: item.userId, ok: true, alreadyExists: false });
-    } catch (e) {
-      if (e instanceof TableauError && (e.kind === 'auth' || e.kind === 'network' || e.status >= 500)) throw new SubscriptionBatchInterrupted(e, results, { metricId: item.metricId, targetId: item.userId });
-      if (isAlreadyFollowedError(e)) {
-        results.push({ metricId: item.metricId, targetId: item.userId, ok: true, alreadyExists: true });
-      } else {
-        results.push({
-          metricId: item.metricId,
-          targetId: item.userId,
-          ok: false,
-          alreadyExists: false,
-          error: e instanceof Error ? e.message : String(e),
-        });
-      }
-    }
-  }
-  return results;
+export async function batchCreateGroupSubscriptions(session: TableauSession, items: Array<{ metricId: string; groupId: string }>): Promise<SubscriptionWriteResult[]> {
+  return (await batchCreateSubscriptions(session, items.map((item) => ({ metricId: item.metricId, targetId: item.groupId, targetType: 'GROUP' })))).map(({ targetType: _type, ...result }) => result);
+}
+export async function batchCreateUserSubscriptions(session: TableauSession, items: Array<{ metricId: string; userId: string }>): Promise<SubscriptionWriteResult[]> {
+  return (await batchCreateSubscriptions(session, items.map((item) => ({ metricId: item.metricId, targetId: item.userId, targetType: 'USER' })))).map(({ targetType: _type, ...result }) => result);
 }
 
 function isAlreadyFollowedError(error: unknown): boolean {
@@ -546,7 +619,8 @@ export async function listTableauGroups(
     for (const record of records) {
       const id = stringValue(record.id ?? record.luid);
       const name = stringValue(record.name);
-      if (id && name) out.push({ id, name });
+      if (!id || !name) throw unsupportedContract('group directory record', record);
+      out.push({ id, name });
     }
     if (records.length < GROUP_LIST_PAGE_SIZE) break;
     pageNumber++;
@@ -656,6 +730,7 @@ function normalizeSubscriptionRecord(record: Record<string, unknown>, index: num
   const nestedGroup = isRecord(follower.group) ? follower.group : undefined;
   const userId = stringValue(follower.user_id ?? follower.userId ?? nestedUser?.id ?? nestedUser?.luid);
   const groupId = stringValue(follower.group_id ?? follower.groupId ?? nestedGroup?.id ?? nestedGroup?.luid);
+  if (userId && groupId) throw unsupportedContract(`subscription follower ${index} has conflicting identities`, record);
   const explicitType = stringValue(follower.type ?? follower.subjectType ?? follower.kind).toUpperCase();
   const genericId = stringValue(follower.follower_id ?? follower.followerId ?? follower.id ?? follower.luid);
   const id = groupId || userId || genericId;

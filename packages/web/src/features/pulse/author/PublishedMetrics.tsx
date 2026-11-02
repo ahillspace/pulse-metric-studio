@@ -7,9 +7,34 @@ import type {
 import { calculationLabel } from "../metric-labels";
 import { requestMetricPreview } from "../registry/preview-controller";
 import { openTableauUrl, pulseMetricUrl } from "../shell/tableau-links";
+import type { SessionOwner } from "../shell/session-events";
 
 /** Cards that load their preview without a click; the rest load on demand. */
 export const AUTO_PREVIEW_COUNT = 3;
+
+/** Owned by the publication result, so confirmation subtrees can unmount safely. */
+export function createPublishedPreviewCache(transport = requestMetricPreview) {
+  let scope = "";
+  const entries = new Map<string, Promise<PulseMetricPreview>>();
+  return {
+    setScope(next: string) { if (scope !== next) { scope = next; entries.clear(); } },
+    load(context: PulseDraftContext, metricId: string, definitionId: string | null | undefined, refresh = false) {
+      const key = JSON.stringify([scope, metricId, definitionId]);
+      if (refresh) entries.delete(key);
+      const existing = entries.get(key);
+      if (existing) return existing;
+      const request = transport(context, metricId).then((image) => {
+        if (image.metricId !== metricId || image.definitionId !== definitionId)
+          throw new Error("Tableau returned a preview for a different metric.");
+        return image;
+      });
+      entries.set(key, request);
+      while (entries.size > 16) entries.delete(entries.keys().next().value!);
+      void request.catch(() => { if (entries.get(key) === request) entries.delete(key); });
+      return request;
+    },
+  };
+}
 
 type PreviewLoad =
   | { status: "idle" }
@@ -20,20 +45,24 @@ type PreviewLoad =
 interface Props {
   items: PulsePublishItemReceipt[];
   /** Present when the current Tableau session can render previews and links. */
-  live: { context: PulseDraftContext; siteContentUrl: string } | null;
+  live: { context: PulseDraftContext; siteContentUrl: string; owner?: SessionOwner } | null;
+  previews: ReturnType<typeof createPublishedPreviewCache>;
+  previewScope: string;
   onLinkError(message: string): void;
 }
 
-export function PublishedMetrics({ items, live, onLinkError }: Props) {
+export function PublishedMetrics({ items, live, onLinkError, previews, previewScope }: Props) {
   if (items.length === 0) return null;
   return (
     <ul className="pulse-published-metrics" aria-label="Published metrics">
       {items.map((item, index) => (
         <PublishedMetric
-          key={item.itemIndex}
+          key={`${previewScope}:${item.itemIndex}`}
           item={item}
           live={live}
           autoPreview={index < AUTO_PREVIEW_COUNT}
+          previews={previews}
+          previewScope={previewScope}
           onLinkError={onLinkError}
         />
       ))}
@@ -46,10 +75,14 @@ function PublishedMetric({
   live,
   autoPreview,
   onLinkError,
+  previews,
+  previewScope,
 }: {
   item: PulsePublishItemReceipt;
   live: Props["live"];
   autoPreview: boolean;
+  previews: Props["previews"];
+  previewScope: string;
   onLinkError(message: string): void;
 }) {
   const [preview, setPreview] = useState<PreviewLoad>({ status: "idle" });
@@ -57,11 +90,11 @@ function PublishedMetric({
   const canPreview = Boolean(live && resolved);
   const slicers = item.summary.slicers.length;
 
-  const load = () => {
+  const load = (refresh = false) => {
     if (!live || !item.metricId) return () => {};
     let current = true;
     setPreview({ status: "loading" });
-    requestMetricPreview(live.context, item.metricId)
+    previews.load(live.context, item.metricId, item.definitionId, refresh)
       .then((image) => {
         if (!current) return;
         if (image.metricId !== item.metricId || image.definitionId !== item.definitionId)
@@ -81,9 +114,10 @@ function PublishedMetric({
   };
 
   useEffect(() => {
+    setPreview({ status: "idle" });
     if (autoPreview && canPreview) return load();
     return undefined;
-  }, [autoPreview, canPreview, item.metricId]);
+  }, [autoPreview, canPreview, item.metricId, previewScope]);
 
   return (
     <li className="pulse-published-metric">
@@ -101,6 +135,9 @@ function PublishedMetric({
             <button className="btn small" type="button" onClick={() => load()}>
               Preview
             </button>
+          )}
+          {canPreview && (preview.status === "ready" || preview.status === "error") && (
+            <button className="btn small" type="button" onClick={() => load(true)}>Refresh preview</button>
           )}
           <button
             className="btn small"

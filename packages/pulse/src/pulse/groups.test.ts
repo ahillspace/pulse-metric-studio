@@ -38,6 +38,19 @@ test('group lookup reuses the exact full name instead of a shortened punctuation
   assert.deepEqual(await ensureGroup(session, name), { id: 'existing-group', name, existedBefore: true });
 });
 
+test('group lookup accepts a singleton REST record and rejects malformed inventory before creating', async () => {
+  for (const malformed of [false, true]) {
+    let writes = 0;
+    globalThis.fetch = async (input, init) => {
+      if (init?.method === 'POST') { writes++; return new Response('<group id="unexpected" />'); }
+      return Response.json(String(input).includes('/api/-/') ? { groups: [] } : { groups: { group: malformed ? 'invalid' : { id: 'existing', name: 'Audience' } } });
+    };
+    if (malformed) await assert.rejects(ensureGroup(session, 'Audience'), /Unsupported Pulse/);
+    else assert.equal((await ensureGroup(session, 'Audience')).id, 'existing');
+    assert.equal(writes, 0);
+  }
+});
+
 test('XML group creation rejects oversized success bodies without repeating the mutation', async () => {
   let writes = 0;
   globalThis.fetch = async (input, init) => {

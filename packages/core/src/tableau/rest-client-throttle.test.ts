@@ -70,5 +70,50 @@ test('Retry-After accepts seconds and HTTP dates and falls back when absent', ()
   assert.equal(retryAfterMs('Wed, 21 Oct 2026 22:59:00 GMT', now), 0);
   assert.equal(retryAfterMs(null, now), 2000);
   assert.equal(retryAfterMs('soon', now), 2000);
-  assert.equal(retryAfterMs('3600', now), 30_000);
+  assert.equal(retryAfterMs('3600', now), 3_600_000);
+});
+
+test('provider Retry-After beyond the local deadline returns unavailable without an early retry', async () => {
+  const identity = session();
+  let calls = 0;
+  globalThis.fetch = async () => { calls++; return throttled('3600'); };
+  await assert.rejects(getJson(identity, '/api/-/pulse/definitions', undefined, 10),
+    (error: unknown) => error instanceof TableauError && error.status === 429);
+  assert.equal(calls, 1);
+  await assert.rejects(getJson(identity, '/api/-/pulse/definitions', undefined, 10),
+    (error: unknown) => error instanceof TableauError && error.status === 429);
+  assert.equal(calls, 1, 'the identity gate also honors the provider minimum for new callers');
+});
+
+test('the last throttling response still defers other requests for that identity', async () => {
+  const identity = session();
+  let calls = 0;
+  globalThis.fetch = async () => throttled(++calls < 5 ? '0' : '3600');
+  await assert.rejects(getJson(identity, '/api/-/pulse/definitions'));
+  assert.equal(calls, 5);
+  await assert.rejects(getJson(identity, '/api/-/pulse/definitions', undefined, 10));
+  assert.equal(calls, 5);
+});
+
+test('REST version negotiation makes forward progress and commits only a successful candidate', async () => {
+  const identity = session();
+  const paths: string[] = [];
+  globalThis.fetch = async (url) => {
+    paths.push(new URL(String(url)).pathname);
+    return new Response('{"error":{"code":"404003"}}', { status: 404 });
+  };
+  await assert.rejects(getJson(identity, '/api/3.29/sites/site/groups'), (error: unknown) => error instanceof TableauError && error.status === 404);
+  assert.equal(identity.apiVersion, '3.29');
+  assert.equal(new Set(paths).size, paths.length);
+  assert.ok(paths.length <= 6);
+  paths.length = 0;
+  globalThis.fetch = async (url) => {
+    const path = new URL(String(url)).pathname;
+    paths.push(path);
+    return path.includes('/3.25/') ? Response.json({ ok: true })
+      : new Response('{"error":{"code":"404003"}}', { status: 404 });
+  };
+  assert.deepEqual(await getJson(identity, '/api/3.29/sites/site/groups'), { ok: true });
+  assert.equal(identity.apiVersion, '3.25');
+  assert.equal(new Set(paths).size, paths.length);
 });
