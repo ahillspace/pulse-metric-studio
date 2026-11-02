@@ -53,6 +53,7 @@ function reviewFixture(t: TestContext) {
   });
   return (targets: PulseDeletePlan["targets"]) => {
     const plan: PulseDeletePlan = {
+      snapshotId: cached.snapshotId,
       context: record.context, metricIds: targets.filter((item) => item.kind === "metric").map((item) => item.id),
       definitionIds: targets.filter((item) => item.kind === "definition").map((item) => item.id),
       allowIncompleteInventory: true, previewFingerprint: "fresh-plan-fingerprint",

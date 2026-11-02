@@ -118,6 +118,7 @@ export function receipt(id = "receipt"): PulsePublishReceipt {
 }
 export function inventory(id = "metric"): PulseInventoryResponse {
   return {
+    snapshotId: `snapshot-${id}`,
     definitions: [
       {
         definitionId: `definition-${id}`,

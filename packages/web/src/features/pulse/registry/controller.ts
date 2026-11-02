@@ -55,7 +55,7 @@ interface RegistryState {
     definitionIds: string[],
     allowIncompleteInventory?: boolean,
   ) => Promise<void>;
-  /** Reviews the last selection again as a deletion by ID. */
+  /** Reviews deletion of known definitions whose cached child inventory is incomplete. */
   reviewDeleteAnyway: () => Promise<void>;
   cancelDelete: () => void;
   executeDelete: () => Promise<void>;
@@ -91,7 +91,6 @@ export function createRegistryController(
     null;
   const INCOMPLETE_INVENTORY_CODES = [
     "delete_inventory_incomplete",
-    "delete_metric_unavailable",
   ];
   const overridable = (error: unknown) =>
     error instanceof PulseApiError &&
@@ -158,70 +157,76 @@ export function createRegistryController(
         if (pending?.generation === generation) return pending.promise;
         const saved = cache.get(key(get().context));
         if (saved && Date.now() - saved.loadedAt < 60_000) return;
-        const promise = get().load();
-        const run = { generation, promise };
-        pending = run;
-        try { await promise; } finally { if (pending === run) pending = null; }
+        await get().load();
       },
       async invalidate(context = get().context) {
         if (!context) return;
         cache.delete(key(context));
-        if (key(context) === key(get().context)) await get().load();
+        if (key(context) === key(get().context)) {
+          pending = null;
+          await get().load();
+        }
       },
       async load() {
-        const scope = capture();
-        if (!scope.context) return;
-        const request = ++inventoryRequest;
-        set({ loading: true, error: null });
-        try {
-          const inventory = await transport.inventory(scope.context);
-          if (!current(scope) || request !== inventoryRequest) return;
-          cache.set(key(scope.context), { inventory, followState: get().followState, loadedAt: Date.now() });
-          set({ inventory, loading: false, followLoading: true });
-          const ids = inventory.definitions.flatMap((definition) =>
-            definition.metrics.map((metric) => metric.metricId),
-          );
-          const batches: string[][] = [];
-          for (let index = 0; index < ids.length; index += 200)
-            batches.push(ids.slice(index, index + 200));
-          const states: FollowState[] = [];
-          const previous = get().followState;
-          for (let index = 0; index < batches.length; index += 4) {
+        if (pending?.generation === generation) return pending.promise;
+        const promise = (async () => {
+          const scope = capture();
+          if (!scope.context) return;
+          const request = ++inventoryRequest;
+          set({ loading: true, error: null });
+          try {
+            const inventory = await transport.inventory(scope.context);
             if (!current(scope) || request !== inventoryRequest) return;
-            await Promise.all(
-              batches.slice(index, index + 4).map(async (batch) => {
-                let result: FollowState;
-                try {
-                  result = await transport.followState(batch);
-                } catch (error) {
-                  result = unavailableFollowState(batch, errorMessage(error));
-                }
-                if (!current(scope) || request !== inventoryRequest) return;
-                states.push(result);
-                set({
-                  followState: mergeFollowStates([
-                    ...(previous ? [previous] : []),
-                    ...states,
-                  ]),
-                });
-              }),
+            cache.set(key(scope.context), { inventory, followState: get().followState, loadedAt: Date.now() });
+            set({ inventory, loading: false, followLoading: true });
+            const ids = inventory.definitions.flatMap((definition) =>
+              definition.metrics.map((metric) => metric.metricId),
             );
+            const batches: string[][] = [];
+            for (let index = 0; index < ids.length; index += 200)
+              batches.push(ids.slice(index, index + 200));
+            const states: FollowState[] = [];
+            const previous = get().followState;
+            for (let index = 0; index < batches.length; index += 4) {
+              if (!current(scope) || request !== inventoryRequest) return;
+              await Promise.all(
+                batches.slice(index, index + 4).map(async (batch) => {
+                  let result: FollowState;
+                  try {
+                    result = await transport.followState(batch);
+                  } catch (error) {
+                    result = unavailableFollowState(batch, errorMessage(error));
+                  }
+                  if (!current(scope) || request !== inventoryRequest) return;
+                  states.push(result);
+                  set({
+                    followState: mergeFollowStates([
+                      ...(previous ? [previous] : []),
+                      ...states,
+                    ]),
+                  });
+                }),
+              );
+            }
+            if (current(scope) && request === inventoryRequest) {
+              cache.set(key(scope.context), { inventory, followState: ids.length ? mergeFollowStates(states) : null, loadedAt: Date.now() });
+              set({
+                followState: ids.length ? mergeFollowStates(states) : null,
+                followLoading: false,
+              });
+            }
+          } catch (error) {
+            if (current(scope) && request === inventoryRequest)
+              set({
+                error: errorMessage(error),
+                loading: false,
+                followLoading: false,
+              });
           }
-          if (current(scope) && request === inventoryRequest) {
-            cache.set(key(scope.context), { inventory, followState: ids.length ? mergeFollowStates(states) : null, loadedAt: Date.now() });
-            set({
-              followState: ids.length ? mergeFollowStates(states) : null,
-              followLoading: false,
-            });
-          }
-        } catch (error) {
-          if (current(scope) && request === inventoryRequest)
-            set({
-              error: errorMessage(error),
-              loading: false,
-              followLoading: false,
-            });
-        }
+        })();
+        const run = { generation, promise };
+        pending = run;
+        try { await promise; } finally { if (pending === run) pending = null; }
       },
       async fork(request, labels) {
         const scope = capture();
@@ -300,15 +305,23 @@ export function createRegistryController(
           deleteOverridable: false,
         });
         try {
+          const inventory = get().inventory;
+          if (!inventory?.snapshotId)
+            throw new Error("Refresh metrics before reviewing a deletion.");
+          const followState = get().followState;
+          const followerCounts = new Map(Object.entries(followState?.followerCountsByMetricId ?? {})
+            .map(([id, count]) => [id, followState?.availabilityByMetricId?.[id]?.followerCountStatus === "unavailable" ? null : count] as const));
+          const metricNames = new Map(inventory.definitions.flatMap((definition) =>
+            definition.metrics.map((metric) => [metric.metricId, metric.name || definition.name] as const),
+          ));
           const definitions = [...new Set(definitionIds)];
           const covered = new Set(
-            get()
-              .inventory?.definitions.filter((definition) =>
+            inventory.definitions.filter((definition) =>
                 definitions.includes(definition.definitionId),
               )
               .flatMap((definition) =>
                 definition.metrics.map((metric) => metric.metricId),
-              ) ?? [],
+              ),
           );
           const metrics = [...new Set(metricIds)].filter(
             (id) => !covered.has(id),
@@ -321,12 +334,23 @@ export function createRegistryController(
           ) {
             const plan = await deletion.previewDelete({
               context: scope.context,
+              snapshotId: inventory.snapshotId,
               metricIds: metrics.slice(offset, offset + 1000),
               definitionIds: definitions.slice(offset, offset + 1000),
               allowIncompleteInventory,
             });
             if (!current(scope) || request !== deleteRequest) return;
-            plans.push(plan);
+            plans.push({
+              ...plan,
+              targets: plan.targets.map((target) => ({
+                ...target,
+                affectedMetrics: target.affectedMetricIds.map((id) => ({
+                  id,
+                  name: metricNames.get(id) ?? id,
+                  followerCount: followerCounts.get(id) ?? null,
+                })),
+              })),
+            });
           }
           if (!plans.length)
             throw new Error("Select at least one resource to delete.");
@@ -392,6 +416,7 @@ export function createRegistryController(
             );
             const response = await deletion.delete({
               context: batch.context,
+              snapshotId: batch.snapshotId,
               metricIds: batch.metricIds,
               definitionIds: batch.definitionIds,
               previewFingerprint: batch.previewFingerprint,

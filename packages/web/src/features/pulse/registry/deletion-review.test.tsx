@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { reviewedDefinitionLabel, reviewedMetricLabel, reviewedFollowerLines, ReviewedMetricFollowers } from "./views";
+import { reviewedDefinitionLabel, reviewedMetricLabel, ReviewedMetricFollowers } from "./views";
+import { useRegistry } from "./controller";
 import type { PulseRegistryMetric } from "../fork-plan";
 import { inventory } from "../testing/fixtures";
 
@@ -36,24 +37,12 @@ test("definition labels prefer the plan and never use raw cached identities as t
   }
 });
 
-test("follower details never substitute another metric or treat missing results as zero", () => {
-  const details = [{ metricId: "other", followers: [], errors: [] }];
-  assert.match(reviewedFollowerLines("reviewed", details)[0].text, /unavailable/);
-  assert.equal(reviewedFollowerLines("reviewed", details)[0].error, true);
-  assert.equal(reviewedFollowerLines("reviewed", [{ metricId: "reviewed", followers: [], status: "available", errors: [] }])[0].text, "No followers yet");
-});
-
-test("partial and unknown identities retain diagnostics and identifiable fallbacks", () => {
-  const lines = reviewedFollowerLines("reviewed", [{ metricId: "reviewed", status: "partial", followers: [{ id: "unresolved", name: "", type: "UNKNOWN" }], errors: ["Directory incomplete"] }]);
-  assert.equal(lines[0].text, "Unknown - unresolved");
-  assert.match(lines[1].text, /partial.*Directory incomplete/);
-  assert.equal(lines[1].error, true);
-});
-
-test("review follower disclosure starts collapsed and preserves unavailable counts", () => {
-  const unavailable = renderToStaticMarkup(<ReviewedMetricFollowers metricId="reviewed" followerCount={null} />);
+test("review renders cached follower counts without live detail controls or requests", (t) => {
+  const requests = t.mock.method(useRegistry.getState(), "loadFollowers", async () => { throw new Error("Deletion review must not fetch followers"); });
+  const unavailable = renderToStaticMarkup(<ReviewedMetricFollowers followerCount={null} />);
   assert.match(unavailable, /Followers unavailable/);
-  assert.doesNotMatch(unavailable, /open=|Loading followers|No followers/);
-  const zero = renderToStaticMarkup(<ReviewedMetricFollowers metricId="reviewed" followerCount={0} />);
+  assert.doesNotMatch(unavailable, /details|summary|Loading followers|No followers/);
+  const zero = renderToStaticMarkup(<ReviewedMetricFollowers followerCount={0} />);
   assert.match(zero, /0 followers/);
+  assert.equal(requests.mock.callCount(), 0);
 });

@@ -72,6 +72,10 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
     if (visible && context && connected)
       void useRegistry.getState().ensureLoaded();
   }, [visible, contextKey, connected]);
+  useEffect(() => {
+    if (registry.deleteLoading || registry.deletePlan || registry.busy === "delete")
+      setFollowersOf(null);
+  }, [registry.deleteLoading, registry.deletePlan, registry.busy]);
   const existing = registry.inventory;
   const [usePreview] = useState(() => createPreviewController());
   const preview = usePreview();
@@ -564,7 +568,7 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
                   disabled={registry.deleteLoading}
                   onClick={() => void registry.reviewDeleteAnyway()}
                 >
-                  Review deletion by ID
+                  Review whole-definition deletion
                 </button>
               ) : (
                 <button
@@ -583,13 +587,13 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
           }
         >
           {registry.deleteLoading && (
-            <p role="status">Checking exact deletion effects in Tableau...</p>
+            <p role="status">Preparing deletion from loaded metrics...</p>
           )}
           {registry.deleteError && (
             <p className="warning-banner" role="alert">
               {registry.deleteError}
               {registry.deleteOverridable &&
-                " Refresh metrics to retry, or review the deletion by ID. Tableau then deletes the selected resources, including any metrics it did not list."}
+                " Refresh metrics to retry, or review the loaded definition with its incomplete inventory. Tableau deletes all metrics under that definition, including any not listed."}
             </p>
           )}
           {registry.deletePlan && (
@@ -620,7 +624,6 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
                             <ReviewedResourceId id={metric.id} name={metric.name} kind="metric" />
                             <ReviewedMetricFollowers
                               key={`${contextKey}-${registry.deletePlan!.previewFingerprint}-${metric.id}`}
-                              metricId={metric.id}
                               followerCount={metric.followerCount}
                             />
                           </li>
@@ -636,8 +639,9 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
                 </p>
               ))}
               <p>
-                Changed deletion effects require a new review. This action
-                cannot be undone by the app.
+                This review uses loaded metrics and follower counts. Deleting a
+                definition removes all its metrics and subscriptions in Tableau.
+                This action cannot be undone by the app.
               </p>
             </>
           )}

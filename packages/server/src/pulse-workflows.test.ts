@@ -648,9 +648,7 @@ test("unreviewed legacy deletion cannot bypass a backend plan", async () => {
   }
 });
 
-test("backend deletion rejects incomplete cascades and changed plans without deleting visible children as a definition", async () => {
-  let completeness: "complete" | "partial" = "partial";
-  let extra = false;
+test("backend cached deletion rejects incomplete cascades and tampered plans without deleting visible children as a definition", async () => {
   const deletions: unknown[] = [];
   const variant = (metricId: string): any => ({
     metricId,
@@ -666,7 +664,7 @@ test("backend deletion rejects incomplete cascades and changed plans without del
   });
   const server = app({
     deletion: {
-      inventory: async () => ({
+      inventory: async (_session, _context, snapshotId) => ({
         totalScanned: 1,
         truncated: false,
         failures: [],
@@ -678,8 +676,8 @@ test("backend deletion rejects incomplete cascades and changed plans without del
             measure: "Sales",
             aggregation: "SUM",
             timeDimension: "Date",
-            inventoryStatus: completeness,
-            metrics: [variant("metric"), ...(extra ? [variant("later")] : [])],
+            inventoryStatus: snapshotId === "partial-snapshot" ? "partial" : "complete",
+            metrics: [variant("metric")],
           },
         ],
       }),
@@ -695,7 +693,7 @@ test("backend deletion rejects incomplete cascades and changed plans without del
     },
   });
   try {
-    const selection = { context, definitionIds: ["definition"], metricIds: [] };
+    const selection = { context, snapshotId: "partial-snapshot", definitionIds: ["definition"], metricIds: [] };
     assert.equal(
       (
         await server.inject({
@@ -706,7 +704,7 @@ test("backend deletion rejects incomplete cascades and changed plans without del
       ).statusCode,
       409,
     );
-    completeness = "complete";
+    selection.snapshotId = "complete-snapshot";
     const plan = (
       await server.inject({
         method: "POST",
@@ -714,16 +712,15 @@ test("backend deletion rejects incomplete cascades and changed plans without del
         payload: selection,
       })
     ).json();
-    extra = true;
     const changed = await server.inject({
       method: "POST",
       url: "/api/pulse/registry/delete",
-      payload: { ...selection, previewFingerprint: plan.previewFingerprint },
+      payload: { ...selection, previewFingerprint: "tampered" },
     });
     assert.equal(changed.statusCode, 409);
     assert.equal(changed.json().code, "delete_plan_changed");
     assert.equal(deletions.length, 0);
-    const exact = { context, definitionIds: [], metricIds: ["metric"] };
+    const exact = { context, snapshotId: "complete-snapshot", definitionIds: [], metricIds: ["metric"] };
     const exactPlan = (
       await server.inject({
         method: "POST",
@@ -750,9 +747,7 @@ test("backend deletion rejects incomplete cascades and changed plans without del
   }
 });
 
-test("backend deletion deletes by ID when the user overrides incomplete inventory", async () => {
-  let status: "partial" | "unavailable" = "partial";
-  let listed = true;
+test("backend cached deletion accepts an acknowledged partial definition and a known standalone metric", async () => {
   const deletions: unknown[] = [];
   const variant = (metricId: string): any => ({
     metricId,
@@ -780,8 +775,8 @@ test("backend deletion deletes by ID when the user overrides incomplete inventor
             measure: "Sales",
             aggregation: "SUM",
             timeDimension: "Date",
-            inventoryStatus: status,
-            metrics: status === "partial" ? [variant("known")] : [],
+            inventoryStatus: "partial",
+            metrics: [variant("known")],
           },
           {
             definitionId: "other",
@@ -790,8 +785,8 @@ test("backend deletion deletes by ID when the user overrides incomplete inventor
             measure: "Cost",
             aggregation: "SUM",
             timeDimension: "Date",
-            inventoryStatus: listed ? "complete" : "unavailable",
-            metrics: listed ? [variant("orphan")] : [],
+            inventoryStatus: "complete",
+            metrics: [variant("orphan")],
           },
         ],
       }),
@@ -802,7 +797,7 @@ test("backend deletion deletes by ID when the user overrides incomplete inventor
     },
   });
   try {
-    const selection = { context, definitionIds: ["definition"], metricIds: ["orphan"] };
+    const selection = { context, snapshotId: "partial-snapshot", definitionIds: ["definition"], metricIds: ["orphan"] };
     const blocked = await server.inject({ method: "POST", url: "/api/pulse/registry/delete-preview", payload: selection });
     assert.equal(blocked.statusCode, 409);
     assert.equal(blocked.json().code, "delete_inventory_incomplete");
@@ -819,9 +814,6 @@ test("backend deletion deletes by ID when the user overrides incomplete inventor
     const unconfirmed = await server.inject({ method: "POST", url: "/api/pulse/registry/delete", payload: { ...selection, previewFingerprint: plan.previewFingerprint } });
     assert.equal(unconfirmed.statusCode, 409);
     assert.equal(deletions.length, 0);
-    // Throttled reloads may change what Tableau returns between review and deletion.
-    status = "unavailable";
-    listed = false;
     const deleted = await server.inject({ method: "POST", url: "/api/pulse/registry/delete", payload: { ...override, previewFingerprint: plan.previewFingerprint } });
     assert.equal(deleted.statusCode, 200, deleted.body);
     assert.deepEqual(deletions, [

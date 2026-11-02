@@ -225,19 +225,31 @@ Inventory, variants, subscriptions, and deletion have separate named responsibil
 Dimension discovery, member counts, and value queries send validated POST bodies so large selections do not exceed desktop URL limits.
 Source metric and definition reads use bounded concurrency, and repeated definition reads share one request within the operation.
 Date and dimensional variants use the canonical variant endpoint.
-Deletion first asks the backend for a plan, then submits the exact selection and plan fingerprint.
+Inventory acquisition retains an immutable backend snapshot and returns its opaque identifier with the displayed inventory.
+The backend derives connection ownership from the active Tableau session and binds snapshots to that session generation, principal, connection, and datasource.
+Snapshots remain in memory without a time limit; each session retains its latest 32 snapshots.
+Deletion preview uses the displayed snapshot identifier and makes no Tableau requests.
+Missing, evicted, or mismatched snapshots require an explicit inventory refresh; deletion never falls back to provider reads.
+Deletion submits the exact selection, snapshot identifier, and reviewed plan fingerprint.
+Execution validates those cached inputs and sends only DELETE requests, without checking concurrent external edits.
+Deleting a definition sends one definition DELETE; Tableau removes its metrics and subscriptions.
+Selected child metrics covered by that definition do not receive individual DELETE requests.
+Snapshots remain available across deletion batches, and the controller refreshes inventory one time after the operation, including partial or unknown outcomes.
 A bulk selection containing defaults opens an explicit review of the affected definitions and their metrics.
 An ordinary variant selection never authorizes deleting its parent definition.
 Incomplete inventory cannot establish that a selection covers every dependent resource.
+You can explicitly review deletion of a known definition with incomplete child inventory; the review identifies its unknown reach.
+This choice never authorizes an identity absent from the displayed datasource snapshot or bypasses the default-metric guard.
 
 Create variants inherits the Manager selection, with source editing behind Change when metrics are already selected.
 Source changes remain local to that dialog until submission.
 Follow / Unfollow's Add existing reads a fresh identity snapshot for the exact selected metrics through the existing batched follow-state endpoint.
 It merges direct user and group subscribers into the selected targets without expanding group membership, and reports incomplete identity reads.
 The directory supplies display names, not subscription evidence.
-Deletion review prefers meaningful resource names from the fresh deletion plan without changing reviewed resource IDs or fingerprints.
-Cached Manager metadata supplies fallback labels only when the plan has no meaningful name, with an exact-ID disclosure for those resources.
-Follower counts can disclose current identities through the existing per-metric follower-detail endpoint; unavailable or partial reads remain explicit.
+Deletion review uses names and metric identities from the immutable inventory snapshot without changing reviewed IDs or fingerprints.
+Follower counts come from the Manager's cached follow state; unavailable counts remain unknown.
+Deletion review does not fetch follower identities or refresh counts.
+Outside deletion review, deliberate follower inspection uses the per-metric follower-detail endpoint; unavailable or partial reads remain explicit.
 
 Metric Manager previews use Tableau's springboard insight and metric card image APIs through the existing authenticated connection.
 The backend verifies the exact metric, definition, and datasource before rendering.

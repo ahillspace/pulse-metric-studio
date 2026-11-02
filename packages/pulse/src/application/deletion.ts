@@ -4,39 +4,38 @@ import type {
   PreparePulseDeleteRequest,
   PulseDeletePlan,
 } from "@pulse-metric-studio/shared";
-import { compareCanonicalStrings } from "@pulse-metric-studio/shared";
 import { requirePulseOwner } from "./context.js";
 import { executeDeletes } from "./delete-execution.js";
 import { PulseApplicationError } from "./errors.js";
 import { fingerprint } from "./fingerprint.js";
-import { batchGetFollowerCounts } from "../pulse/pulse-client.js";
-import {
-  getExistingMetrics,
-  invalidatePulseDefinitionInventory,
-} from "./inventory.js";
+import { getPulseInventorySnapshot } from "./inventory-snapshots.js";
+import type { ExistingMetricsResult } from "./inventory.js";
 
 export interface DeleteDependencies {
-  inventory: typeof getExistingMetrics;
+  /** Resolves the displayed immutable snapshot without contacting Tableau. */
+  inventory: (
+    session: TableauSession,
+    context: PreparePulseDeleteRequest["context"],
+    snapshotId: string,
+  ) => ExistingMetricsResult | Promise<ExistingMetricsResult>;
   execute: typeof executeDeletes;
-  followerCounts?: typeof batchGetFollowerCounts;
 }
 export class PulseDeletionService {
   constructor(
     private readonly dependencies: DeleteDependencies = {
-      inventory: getExistingMetrics,
+      inventory: getPulseInventorySnapshot,
       execute: executeDeletes,
-      followerCounts: batchGetFollowerCounts,
     },
   ) {}
   private async plan(
     request: PreparePulseDeleteRequest,
     session: TableauSession,
-    includeDetails = true,
   ): Promise<PulseDeletePlan> {
-    invalidatePulseDefinitionInventory(session);
+    requirePulseOwner(request.context, session);
     const inventory = await this.dependencies.inventory(
       session,
-      request.context.datasourceLuid,
+      request.context,
+      request.snapshotId,
     );
     requirePulseOwner(request.context, session);
     const definitionIds = [...new Set(request.definitionIds)].sort();
@@ -46,19 +45,16 @@ export class PulseDeletionService {
         "delete_selection_empty",
         "Select at least one resource to delete.",
       );
-    // An override deletes by ID: inventory still supplies names and the
-    // default-metric guard, but its contents no longer gate the deletion and
-    // are left out of the fingerprint, so a reload Tableau throttles
-    // differently after review cannot invalidate the confirmed plan.
+    // Incomplete inventory affects the displayed reach, never target ownership.
+    // Only identities in this datasource's displayed snapshot authorize deletes.
     const override = request.allowIncompleteInventory;
     const targets: PulseDeletePlan["targets"] = [];
-    const relevant: unknown[] = [];
     for (const definitionId of definitionIds) {
       const definition = inventory.definitions.find(
         (entry) => entry.definitionId === definitionId,
       );
+      if (!definition) throw selectionUnavailable();
       const inventoryComplete =
-        !!definition &&
         !inventory.truncated &&
         definition.inventoryStatus === "complete";
       if (!inventoryComplete && !override)
@@ -67,24 +63,17 @@ export class PulseDeletionService {
           "Tableau did not return the complete current inventory for this definition.",
           409,
         );
-      const affectedMetricIds = (definition?.metrics ?? [])
+      const affectedMetricIds = definition.metrics
         .map((entry) => entry.metricId)
         .sort();
       targets.push({
         kind: "definition",
         id: definitionId,
-        name: definition?.name ?? definitionId,
+        name: definition.name,
         definitionId,
         inventoryComplete,
         affectedMetricIds,
       });
-      if (definition && !override)
-        relevant.push({
-          ...definition,
-          metrics: [...definition.metrics].sort((left, right) =>
-            compareCanonicalStrings(left.metricId, right.metricId),
-          ),
-        });
     }
     for (const metricId of metricIds) {
       const definition = inventory.definitions.find((entry) =>
@@ -93,23 +82,7 @@ export class PulseDeletionService {
       const metric = definition?.metrics.find(
         (entry) => entry.metricId === metricId,
       );
-      if (!definition || !metric) {
-        if (!override)
-          throw new PulseApplicationError(
-            "delete_metric_unavailable",
-            "A selected metric is absent from current inventory. Reload the registry.",
-            409,
-          );
-        targets.push({
-          kind: "metric",
-          id: metricId,
-          name: metricId,
-          definitionId: null,
-          inventoryComplete: false,
-          affectedMetricIds: [metricId],
-        });
-        continue;
-      }
+      if (!definition || !metric) throw selectionUnavailable();
       if (definitionIds.includes(definition.definitionId)) continue;
       if (metric.isDefault !== false)
         throw new PulseApplicationError(
@@ -125,44 +98,20 @@ export class PulseDeletionService {
         inventoryComplete: true,
         affectedMetricIds: [metricId],
       });
-      if (!override) relevant.push({ definitionId: definition.definitionId, metric });
     }
     const previewFingerprint = fingerprint({
       context: request.context,
+      snapshotId: request.snapshotId,
       override,
-      targets: override
-        ? targets.map(({ kind, id }) => ({ kind, id }))
-        : targets,
-      relevant,
+      targets,
     });
-    if (includeDetails) {
-      const metricNames = new Map(
-        inventory.definitions.flatMap((definition) =>
-          definition.metrics.map(
-            (metric) =>
-              [metric.metricId, metric.name || definition.name] as const,
-          ),
-        ),
-      );
-      const ids = [
-        ...new Set(targets.flatMap((target) => target.affectedMetricIds)),
-      ];
-      let counts: Record<string, number> = {};
-      try {
-        if (this.dependencies.followerCounts)
-          counts = (await this.dependencies.followerCounts(session, ids))
-            .countsByMetricId;
-      } catch {
-        /* Unknown follower reach never becomes a confirmed zero. */
-      }
-      requirePulseOwner(request.context, session);
-      for (const target of targets)
-        target.affectedMetrics = target.affectedMetricIds.map((id) => ({
-          id,
-          name: metricNames.get(id) ?? id,
-          followerCount: counts[id] ?? null,
-        }));
-    }
+    const metricNames = new Map(inventory.definitions.flatMap((definition) =>
+      definition.metrics.map((metric) =>
+        [metric.metricId, metric.name || definition.name] as const)));
+    for (const target of targets)
+      target.affectedMetrics = target.affectedMetricIds.map((id) => ({
+        id, name: metricNames.get(id) ?? id, followerCount: null,
+      }));
     const warnings: string[] = [];
     if (definitionIds.length)
       warnings.push(
@@ -174,6 +123,7 @@ export class PulseDeletionService {
       );
     return {
       context: request.context,
+      snapshotId: request.snapshotId,
       metricIds,
       definitionIds,
       allowIncompleteInventory: override,
@@ -187,11 +137,11 @@ export class PulseDeletionService {
   }
   async execute(request: ExecutePulseDeleteRequest) {
     const session = requirePulseOwner(request.context);
-    const plan = await this.plan(request, session, false);
+    const plan = await this.plan(request, session);
     if (plan.previewFingerprint !== request.previewFingerprint)
       throw new PulseApplicationError(
         "delete_plan_changed",
-        "Affected resources changed. Review a new deletion preview.",
+        "The deletion selection does not match its reviewed plan. Review the selection again.",
         409,
       );
     requirePulseOwner(request.context, session);
@@ -204,4 +154,12 @@ export class PulseDeletionService {
       ),
     );
   }
+}
+
+function selectionUnavailable(): PulseApplicationError {
+  return new PulseApplicationError(
+    "delete_selection_unavailable",
+    "A selected resource is absent from the displayed datasource inventory. Refresh metrics and review the selection again.",
+    409,
+  );
 }
