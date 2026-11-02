@@ -1,11 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod bounded_log;
 mod credential_broker;
 mod pulse_transport;
 mod updater;
 
 use std::collections::HashSet;
-use std::fs::OpenOptions;
 use std::io::Write;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use bounded_log::{BoundedLog, LogDrains, LOG_ARCHIVES, LOG_BYTES};
 use pulse_transport::{pulse_api_request, PulseTransport};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -28,7 +29,14 @@ use credential_broker::{
 use updater::{pulse_update_apply, pulse_update_status, Updater};
 use uuid::Uuid;
 
-struct ServerHandle(Mutex<Option<Child>>);
+struct ServerProcess {
+    child: Child,
+    logs: LogDrains,
+}
+
+struct ServerHandle(Mutex<Option<ServerProcess>>);
+#[derive(Default)]
+struct DesktopLog(Mutex<Option<BoundedLog>>);
 
 #[derive(Default)]
 struct ShutdownState {
@@ -127,21 +135,35 @@ fn slug(value: &str) -> String {
 }
 
 fn log_line(app: &AppHandle, identity: &DesktopIdentity, message: &str) {
-    let Ok(directory) = app.path().app_data_dir() else {
+    let Some(state) = app.try_state::<DesktopLog>() else {
         return;
     };
-    let _ = std::fs::create_dir_all(&directory);
+    let log = {
+        let Ok(mut writer) = state.0.lock() else {
+            return;
+        };
+        if writer.is_none() {
+            let Ok(directory) = app.path().app_data_dir() else {
+                return;
+            };
+            let Ok(log) = BoundedLog::open(
+                directory.join(format!("{}-desktop.log", identity.log_slug)),
+                LOG_BYTES,
+                LOG_ARCHIVES,
+            ) else {
+                return;
+            };
+            *writer = Some(log);
+        }
+        writer.as_ref().unwrap().clone()
+    };
     let line = format!(
         "[{}] [{}] {}\n",
         unix_timestamp(),
         identity.identifier,
         message
     );
-    let _ = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(directory.join(format!("{}-desktop.log", identity.log_slug)))
-        .and_then(|mut file| file.write_all(line.as_bytes()));
+    let _ = log.append(line.as_bytes());
 }
 
 fn unix_timestamp() -> String {
@@ -275,6 +297,7 @@ fn resolve_node_runtime(app: &AppHandle) -> Result<PathBuf, String> {
 fn main() {
     let app = tauri::Builder::default()
         .manage(ServerHandle(Mutex::new(None)))
+        .manage(DesktopLog::default())
         .manage(ShutdownState::default())
         .invoke_handler(tauri::generate_handler![
             tableau_credential_capability,
@@ -361,11 +384,7 @@ fn main() {
             );
 
             let server_log_path = data_directory.join(format!("{}-server.log", identity.log_slug));
-            let server_stdout = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&server_log_path)?;
-            let server_stderr = server_stdout.try_clone()?;
+            let server_log = BoundedLog::open(server_log_path, LOG_BYTES, LOG_ARCHIVES)?;
 
             let pulse_transport = PulseTransport { port, token: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()) };
 
@@ -378,8 +397,8 @@ fn main() {
                 .env("PULSE_METRIC_STUDIO_DATA_DIR", &data_directory)
                 .env("PULSE_METRIC_STUDIO_DESKTOP_IDENTIFIER", "com.ahillspace.pulsemetricstudio")
                 .env("PULSE_METRIC_STUDIO_CREDENTIAL_BROKER_URL", &credential_broker_url)
-                .stdout(Stdio::from(server_stdout))
-                .stderr(Stdio::from(server_stderr));
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
             server_command.stdin(Stdio::piped()).env("PULSE_METRIC_STUDIO_DESKTOP_PIPE", "1")
                 .env_remove("PULSE_METRIC_STUDIO_CREDENTIAL_BROKER_TOKEN")
                 .env_remove("PULSE_METRIC_STUDIO_DESKTOP_BOOTSTRAP_TOKEN");
@@ -402,18 +421,22 @@ fn main() {
                     );
                     format!("Failed to start the desktop server: {error}")
                 })?;
+            let logs = match LogDrains::attach(&mut child, server_log) {
+                Ok(logs) => logs,
+                Err(error) => { let _ = child.kill(); let _ = child.wait(); return Err(error.into()); }
+            };
             {
                 let handshake = serde_json::json!({ "protocol": pulse_transport::PROTOCOL, "token": pulse_transport.token, "brokerToken": credential_broker_token });
                 let result = child.stdin.as_mut().ok_or("Desktop startup pipe is unavailable")
                     .and_then(|pipe| writeln!(pipe, "{handshake}").map_err(|_| "Desktop startup pipe failed"));
-                if let Err(error) = result { let _ = child.kill(); let _ = child.wait(); return Err(error.into()); }
+                if let Err(error) = result { let _ = child.kill(); let _ = child.wait(); logs.finish(Duration::from_millis(500)); return Err(error.into()); }
             }
             log_line(
                 app.handle(),
                 &identity,
                 &format!("server started with process ID {}", child.id()),
             );
-            *app.state::<ServerHandle>().0.lock().unwrap() = Some(child);
+            *app.state::<ServerHandle>().0.lock().unwrap() = Some(ServerProcess { child, logs });
 
             let ready = {
                 let start = Instant::now();
@@ -421,7 +444,7 @@ fn main() {
                     if pulse_transport.ready() { break true; }
                     if start.elapsed() > Duration::from_secs(25) { break false; }
                     let exited = app.state::<ServerHandle>().0.lock().unwrap().as_mut()
-                        .is_none_or(|child| child.try_wait().ok().flatten().is_some());
+                        .is_none_or(|server| server.child.try_wait().ok().flatten().is_some());
                     if exited { break false; }
                     std::thread::sleep(Duration::from_millis(200));
                 }
@@ -499,19 +522,25 @@ fn main() {
 
 fn kill_server(app: &AppHandle) {
     if let Some(state) = app.try_state::<ServerHandle>() {
-        if let Some(mut child) = state.0.lock().unwrap().take() {
+        if let Some(mut server) = state.0.lock().unwrap().take() {
+            let child = &mut server.child;
+            let mut exited = false;
             {
                 drop(child.stdin.take());
                 let deadline = Instant::now() + Duration::from_secs(11);
                 while Instant::now() < deadline {
                     if child.try_wait().ok().flatten().is_some() {
-                        return;
+                        exited = true;
+                        break;
                     }
                     std::thread::sleep(Duration::from_millis(50));
                 }
             }
-            let _ = child.kill();
+            if !exited {
+                let _ = child.kill();
+            }
             let _ = child.wait();
+            server.logs.finish(Duration::from_millis(500));
         }
     }
 }
@@ -525,10 +554,10 @@ fn monitor_pulse_child(app: AppHandle) {
         let Ok(mut child) = state.0.lock() else {
             return;
         };
-        let Some(child) = child.as_mut() else {
+        let Some(server) = child.as_mut() else {
             return;
         };
-        if child.try_wait().ok().flatten().is_some() {
+        if server.child.try_wait().ok().flatten().is_some() {
             let _ = app.emit("pulse-backend-unavailable", serde_json::json!({
                 "message": "The desktop service stopped. Restart Pulse Metric Studio and inspect Activity before repeating a change."
             }));
