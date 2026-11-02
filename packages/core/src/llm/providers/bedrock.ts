@@ -34,6 +34,9 @@ function envBedrockProfile(): StoredLlmProfile {
 export class BedrockProvider {
   readonly id: string;
   readonly label: string;
+  private sdkClient?: BedrockRuntimeClient;
+  private disposed = false;
+  private requests = 0;
 
   constructor(
     private readonly profile: StoredLlmProfile = envBedrockProfile(),
@@ -67,16 +70,12 @@ export class BedrockProvider {
     if (process.env.AWS_BEARER_TOKEN_BEDROCK) {
       return { installed: true, configured: true, healthy: null, reasonCode: 'not_tested', reason: 'Run a connection test to verify model access.', resolvedModel: this.profile.model };
     }
-    try {
-      await this.client().config.credentials();
-      return { installed: true, configured: true, healthy: null, reasonCode: 'not_tested', reason: 'AWS credentials resolved. Run a connection test to verify model access.', resolvedModel: this.profile.model };
-    } catch {
-      return { installed: true, configured: false, healthy: false, reasonCode: 'authentication_failed', reason: 'AWS credentials could not be resolved.', resolvedModel: this.profile.model };
-    }
+    return { installed: true, configured: true, healthy: null, reasonCode: 'not_tested', reason: 'AWS region and model are configured. Run a connection test to verify credentials and model access.', resolvedModel: this.profile.model };
   }
 
   client(): BedrockRuntimeClient {
-    return new BedrockRuntimeClient({
+    if (this.disposed && !this.requests) throw new LlmProviderError({ code: 'provider_unavailable', message: 'This Bedrock profile is no longer active.', provider: this.id });
+    return this.sdkClient ??= new BedrockRuntimeClient({
       region: this.profile.region,
       ...(this.profile.baseUrl ? { endpoint: this.profile.baseUrl } : {}),
       // A custom endpoint stays on public addresses for every connection, not just the first check.
@@ -86,6 +85,22 @@ export class BedrockProvider {
   }
 
   async complete(opts: CompleteOptions): Promise<CompleteResult> {
+    if (this.disposed) throw new LlmProviderError({ code: 'provider_unavailable', message: 'This Bedrock profile is no longer active.', provider: this.id });
+    this.requests++;
+    try { return await this.completeRequest(opts); }
+    finally {
+      this.requests--;
+      if (this.disposed && !this.requests) this.sdkClient?.destroy();
+    }
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    if (!this.requests) this.sdkClient?.destroy();
+  }
+
+  private async completeRequest(opts: CompleteOptions): Promise<CompleteResult> {
     opts.signal?.throwIfAborted();
     const health = await this.getHealth();
     opts.signal?.throwIfAborted();

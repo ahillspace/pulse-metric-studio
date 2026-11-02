@@ -7,6 +7,7 @@ import {
 import {
   applyPulseProposal,
   describePulseDocumentChanges,
+  PULSE_PROPOSAL_WARNING_LIMITS,
   type DatasourceCatalog,
   type Op,
   type PulseAuthorProposal,
@@ -28,7 +29,7 @@ export interface ProposalDependencies {
   ): Promise<DatasourceCatalog>;
   propose(
     input: ProposalInput,
-  ): Promise<{ ops: Op[]; assistantMessage: string; digestAudience?: string }>;
+  ): Promise<{ ops: Op[]; assistantMessage: string; digestAudience?: string; warnings?: string[] }>;
 }
 async function propose(input: ProposalInput) {
   return authorOps(await getLlmRegistry().pick(), {
@@ -101,6 +102,8 @@ export class PulseProposalService {
       candidateDocument,
       changes,
       assistantMessage: response.assistantMessage,
+      warnings: (response.warnings ?? []).slice(0, PULSE_PROPOSAL_WARNING_LIMITS.count)
+        .map((warning) => warning.slice(0, PULSE_PROPOSAL_WARNING_LIMITS.length)).filter(Boolean),
     };
   }
 }

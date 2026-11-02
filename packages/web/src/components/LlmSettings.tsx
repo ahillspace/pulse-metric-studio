@@ -367,8 +367,8 @@ export function ProfileEditor({
           {localAccount && <p className="section-hint">Configure authentication through your CLI, for example <code>{form.protocol === 'codex-cli' ? 'codex login' : 'claude auth login'}</code>. Pulse does not sign you in or out or change your billing route.</p>}
           <button className="btn" type="button" onClick={() => void onCheck()}>Check setup</button>
           {detectedSetup && <div className="llm-setup-result" role="status">
-            <span>CLI: {detectedSetup.installed ? 'Installed' : 'Not found'}</span>
-            <span>Configuration: {detectedSetup.configured ? 'Ready for test' : 'Not configured'}</span>
+            <span>CLI: {detectedSetup.installed === null ? 'Not checked' : detectedSetup.installed ? 'Installed' : 'Not found'}</span>
+            <span>Configuration: {detectedSetup.configured ? detectedSetup.installed === null ? 'Configured, not checked' : 'Ready for test' : 'Not configured'}</span>
             <p>{detectedSetup.reason ?? 'Setup detected. Test the connection to verify a model response.'}</p>
           </div>}
         </section>}

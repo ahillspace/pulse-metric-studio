@@ -49,7 +49,12 @@ export interface LlmProfileStore {
   /** Saves values into the vault and returns the profile as stored, by reference. */
   save(profile: StoredLlmProfile): Promise<StoredLlmProfile>;
   delete(id: string): Promise<void>;
+  /** Holds this profile's mutation ownership through resolution, persistence, and cleanup. */
+  withProfileMutation?<T>(id: string, work: (writer: LlmProfileWriter) => Promise<T>): Promise<T>;
 }
+
+export type LlmProfileWriter = Pick<LlmProfileStore, 'save' | 'delete'>;
+const profileMutations = new WeakMap<Db, Map<string, Promise<unknown>>>();
 
 export interface LlmReadinessResult {
   fingerprint: string;
@@ -122,6 +127,29 @@ export class DbLlmProfileStore implements LlmProfileStore {
   }
 
   async save(profile: StoredLlmProfile): Promise<StoredLlmProfile> {
+    return this.withProfileMutation(profile.id, (writer) => writer.save(profile));
+  }
+
+  async withProfileMutation<T>(id: string, work: (writer: LlmProfileWriter) => Promise<T>): Promise<T> {
+    const db = this.db();
+    let queue = profileMutations.get(db);
+    if (!queue) { queue = new Map(); profileMutations.set(db, queue); }
+    const pending = (queue.get(id) ?? Promise.resolve()).catch(() => {}).then(() => work({
+      save: (profile) => {
+        if (profile.id !== id) throw new Error('Profile mutation ownership does not match.');
+        return this.saveOwned(profile);
+      },
+      delete: (profileId) => {
+        if (profileId !== id) throw new Error('Profile mutation ownership does not match.');
+        return this.deleteOwned(id);
+      },
+    }));
+    queue.set(id, pending);
+    try { return await pending; }
+    finally { if (queue.get(id) === pending) queue.delete(id); }
+  }
+
+  private async saveOwned(profile: StoredLlmProfile): Promise<StoredLlmProfile> {
     const previous = this.row(profile.id);
     const created: string[] = [];
     let saved: StoredLlmProfile;
@@ -173,6 +201,10 @@ export class DbLlmProfileStore implements LlmProfileStore {
   }
 
   async delete(id: string): Promise<void> {
+    return this.withProfileMutation(id, (writer) => writer.delete(id));
+  }
+
+  private async deleteOwned(id: string): Promise<void> {
     const previous = this.row(id);
     if (!previous) return;
     this.db().prepare('DELETE FROM llm_profiles WHERE id = ?').run(id);

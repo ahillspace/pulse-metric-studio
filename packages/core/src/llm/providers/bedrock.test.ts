@@ -4,8 +4,72 @@ import type { StoredLlmProfile } from '../profiles.js';
 import { BedrockProvider, classifyBedrockError } from './bedrock.js';
 import { clearCredentialCache } from './credential.js';
 import { LlmProviderError } from '../types.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
+import { ProviderRegistry } from '../registry.js';
 
 const allowEndpoint = async () => undefined;
+
+test('ordinary registry completion resolves an installed SDK credential_process once and reuses the client', async (t) => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'pulse-bedrock-sdk-'));
+  const keys = ['AWS_CONFIG_FILE', 'AWS_SHARED_CREDENTIALS_FILE', 'AWS_BEARER_TOKEN_BEDROCK', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN'];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  const counter = path.join(temporary, 'count');
+  const expiration = path.join(temporary, 'expiration');
+  fs.writeFileSync(expiration, '2099-01-01T00:00:00Z');
+  const helper = path.join(temporary, 'credentials.cjs');
+  fs.writeFileSync(helper, `const fs=require('node:fs'); fs.appendFileSync(${JSON.stringify(counter)}, 'called\\n'); process.stdout.write(JSON.stringify({Version:1,AccessKeyId:'fixture-access',SecretAccessKey:'fixture-secret',SessionToken:'fixture-token',Expiration:fs.readFileSync(${JSON.stringify(expiration)},'utf8')}));`);
+  fs.writeFileSync(path.join(temporary, 'config'), `[profile fixture]\ncredential_process = "${process.execPath}" "${helper}"\n`);
+  fs.writeFileSync(path.join(temporary, 'credentials'), '');
+  for (const key of keys) delete process.env[key];
+  process.env.AWS_CONFIG_FILE = path.join(temporary, 'config');
+  process.env.AWS_SHARED_CREDENTIALS_FILE = path.join(temporary, 'credentials');
+  const originalSend = BedrockRuntimeClient.prototype.send;
+  let sends = 0;
+  t.mock.method(BedrockRuntimeClient.prototype, 'send', function (this: BedrockRuntimeClient, ...args: any[]) {
+    this.config.requestHandler = {
+      handle: async () => {
+        sends++;
+        return { response: { statusCode: 200, headers: { 'content-type': 'application/json' }, body: Buffer.from(JSON.stringify({ output: { message: { role: 'assistant', content: [{ text: 'OK' }] } }, stopReason: 'end_turn' })) } };
+      },
+      updateHttpClientConfig: () => {}, httpHandlerConfigs: () => ({}),
+    };
+    return Reflect.apply(originalSend, this, args);
+  });
+  const profile: StoredLlmProfile = {
+    id: 'sdk-fixture', label: 'SDK fixture', protocol: 'bedrock-converse', baseUrl: '', model: 'fixture-model',
+    authMode: 'aws', secret: null, headers: {}, region: 'us-east-1', awsProfile: 'fixture', command: '',
+    credentialCommand: null, credentialCommandHint: null, source: 'saved',
+  };
+  const created: BedrockProvider[] = [];
+  const registry = new ProviderRegistry({
+    environment: {}, store: { list: () => [profile], save: async (value) => value, delete: async () => {} },
+    stateStore: { getActive: () => profile.id, setActive: () => {}, getReadiness: () => null, setReadiness: () => {}, deleteReadiness: () => {} },
+    providerFactory: (value) => { const provider = new BedrockProvider(value); created.push(provider); return provider; },
+  });
+  try {
+    assert.equal((await (await registry.pick()).complete({ messages: [{ role: 'user', content: 'hello' }] })).text, 'OK');
+    assert.equal(fs.readFileSync(counter, 'utf8').trim().split('\n').length, 1);
+    await (await registry.pick()).complete({ messages: [{ role: 'user', content: 'again' }] });
+    assert.equal(fs.readFileSync(counter, 'utf8').trim().split('\n').length, 1);
+    assert.equal(sends, 2);
+    assert.equal(created.length, 1, 'unchanged registry profile reuses its provider');
+    assert.equal(created[0].client(), created[0].client());
+    await registry.status();
+    assert.equal(fs.readFileSync(counter, 'utf8').trim().split('\n').length, 1, 'passive status never executes AWS credential helpers');
+    t.mock.timers.enable({ apis: ['Date'], now: new Date('2099-01-02T00:00:00Z') });
+    fs.writeFileSync(expiration, '2100-01-01T00:00:00Z');
+    await (await registry.pick()).complete({ messages: [{ role: 'user', content: 'refresh' }] });
+    assert.equal(fs.readFileSync(counter, 'utf8').trim().split('\n').length, 2, 'the installed SDK refreshes expired credentials');
+    assert.equal(sends, 3);
+  } finally {
+    await registry.close();
+    for (const key of keys) { if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key]; }
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+});
 
 test('Bedrock bearer and SDK requests honor caller cancellation', async () => {
   for (const authMode of ['bearer', 'aws'] as const) {
@@ -28,6 +92,31 @@ test('Bedrock bearer and SDK requests honor caller cancellation', async () => {
     controller.abort();
     await rejected;
   }
+});
+
+test('retiring a Bedrock provider drains an admitted SDK request before destroying its client', async () => {
+  const provider = new BedrockProvider({
+    id: 'retiring', label: 'Retiring', protocol: 'bedrock-converse', baseUrl: '', model: 'fixture-model',
+    authMode: 'aws', secret: null, headers: {}, region: 'us-east-1', awsProfile: '', command: '',
+    credentialCommand: null, credentialCommandHint: null, source: 'saved',
+  });
+  const client = provider.client();
+  let destroyed = 0;
+  let finish!: (response: any) => void;
+  let started!: () => void;
+  const ready = new Promise<void>((resolve) => { started = resolve; });
+  client.send = (() => { started(); return new Promise((resolve) => { finish = resolve; }); }) as typeof client.send;
+  client.destroy = () => { destroyed++; };
+  const pending = provider.complete({ messages: [] });
+  await ready;
+  provider.dispose();
+  assert.equal(destroyed, 0);
+  await assert.rejects(() => provider.complete({ messages: [] }), /no longer active/);
+  finish({ output: { message: { content: [{ text: 'done' }] } } });
+  assert.equal((await pending).text, 'done');
+  assert.equal(destroyed, 1);
+  provider.dispose();
+  assert.equal(destroyed, 1);
 });
 
 test('Bedrock bearer profiles use the verified Converse HTTP contract', async () => {

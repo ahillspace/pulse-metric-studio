@@ -48,6 +48,10 @@ export function ProposalReview({ entry }: { entry: DraftEditor }) {
   const changes = describePulseDocumentChanges(entry.document, merged.document, entry.catalog);
   return (
     <section className="pulse-proposal" aria-label="Proposed draft changes">
+      {Boolean(proposal.warnings?.length) && <div className="warning-banner" role="note" aria-label="Assistant validation warnings">
+        <strong>Review validation warnings before applying these changes.</strong>
+        <ul>{proposal.warnings!.map((warning, index) => <li key={index}>{warning}</li>)}</ul>
+      </div>}
       {merged.skipped.length > 0 && <p className="section-hint">Your newer or protected edits are kept in this preview.</p>}
       <details open className="pulse-proposal-diff">
         <summary>Measures and filters</summary>

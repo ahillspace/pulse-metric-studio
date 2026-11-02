@@ -33,7 +33,7 @@ export interface CompleteResult {
 }
 
 export interface LlmProviderHealth {
-  installed: boolean;
+  installed: boolean | null;
   configured: boolean;
   healthy: boolean | null;
   reasonCode: LlmHealthReasonCode;
@@ -66,6 +66,8 @@ export interface LlmProvider {
   complete(opts: CompleteOptions): Promise<CompleteResult>;
   /** Present when the provider was obtained through ProviderRegistry.pick(). */
   tracking?: LlmCompletionTracker;
+  /** Release owned clients after already-admitted work finishes. */
+  dispose?(): void;
 }
 
 export type LlmProviderErrorCode =

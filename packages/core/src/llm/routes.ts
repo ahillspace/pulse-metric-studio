@@ -93,14 +93,22 @@ export function registerLlmRoutes(
 
   if (options.authorOps) {
     app.post('/api/llm/author', async (request: FastifyRequest) => {
+      if (!request.body || typeof request.body !== 'object' || Array.isArray(request.body)) throw app.httpErrors.badRequest('An author request object is required.');
       const input = (request.body ?? {}) as {
         catalog?: { datasourceLuid?: string };
         userMessage?: string;
         chat?: unknown[];
         selection?: unknown;
       };
-      if (!input.catalog?.datasourceLuid) throw app.httpErrors.badRequest('catalog with datasourceLuid is required.');
-      if (!input.userMessage?.trim()) throw app.httpErrors.badRequest('userMessage is required.');
+      if (!input.catalog || typeof input.catalog !== 'object' || Array.isArray(input.catalog)
+        || typeof input.catalog.datasourceLuid !== 'string' || !input.catalog.datasourceLuid.trim()) throw app.httpErrors.badRequest('catalog with datasourceLuid is required.');
+      if (typeof input.userMessage !== 'string' || !input.userMessage.trim()) throw app.httpErrors.badRequest('userMessage is required.');
+      if (input.chat !== undefined && (!Array.isArray(input.chat) || input.chat.some((item) => {
+        if (!item || typeof item !== 'object') return true;
+        const message = item as { role?: unknown; content?: unknown; proposalContext?: unknown };
+        return !['system', 'user', 'assistant'].includes(String(message.role)) || typeof message.content !== 'string'
+          || message.proposalContext !== undefined && typeof message.proposalContext !== 'string';
+      }))) throw app.httpErrors.badRequest('chat must contain messages with a valid role and string content.');
       return options.authorOps!(await service.pick(), {
         catalog: input.catalog,
         chat: Array.isArray(input.chat) ? input.chat.slice(-12) : [],
