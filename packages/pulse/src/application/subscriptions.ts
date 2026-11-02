@@ -43,6 +43,7 @@ import {
   type SubscriptionDependencies,
 } from "./registry-dependencies.js";
 import { sessionCacheKey } from './session-cache-key.js';
+import { cachedUserGroupMemberships, clearUserGroupMemberships } from '../pulse/user-group-memberships.js';
 const PROVIDER_CONCURRENCY = 5;
 const NAME_CACHE_TTL_MS = 300000;
 const MAX_NAME_CACHE_ENTRIES = 512;
@@ -53,7 +54,6 @@ interface NameCacheEntry {
 }
 
 const nameCache = new Map<string, NameCacheEntry>();
-const memberships = new Map<string, { expiresAt: number; request: Promise<Array<{ id: string; name: string }>> }>();
 export type MetricAvailability =
   PulseFollowState["availabilityByMetricId"][string];
 
@@ -234,16 +234,7 @@ export async function listUserGroupIds(
   session: TableauSession,
   userId: string,
 ): Promise<Array<{ id: string; name: string }>> {
-  const key = `${sessionCacheKey(session)}\u0000${userId}`;
-  const cached = memberships.get(key);
-  if (cached && cached.expiresAt > Date.now()) return structuredClone(await cached.request);
-  const request = loadUserGroupIds(session, userId);
-  const entry = { expiresAt: Date.now() + 60_000, request };
-  memberships.delete(key);
-  memberships.set(key, entry);
-  while (memberships.size > 8) memberships.delete(memberships.keys().next().value!);
-  try { return structuredClone(await request); }
-  catch (error) { if (memberships.get(key) === entry) memberships.delete(key); throw error; }
+  return cachedUserGroupMemberships(session, userId, () => loadUserGroupIds(session, userId));
 }
 
 async function loadUserGroupIds(session: TableauSession, userId: string): Promise<Array<{ id: string; name: string }>> {
@@ -481,17 +472,18 @@ export async function followTargets(
           }
           for (const operation of batch) {
             if (results.has(followOperationKey(operation))) continue;
-            const rejected =
+            const submitted =
               error instanceof SubscriptionBatchInterrupted &&
               (error.failedTargets.length
                 ? error.failedTargets.some((item) => item.metricId === operation.metricId && item.targetId === operation.target.id && item.targetType === operation.target.kind)
                 : error.failed.metricId === operation.metricId && error.failed.targetId === operation.target.id);
             const authentication = error.kind === "auth";
+            const writeRejected = authentication && (!(error instanceof SubscriptionBatchInterrupted) || error.phase === 'submission');
             results.set(followOperationKey(operation), {
               ...operationResult(
                 operation,
-                rejected
-                  ? authentication
+                submitted
+                  ? writeRejected
                     ? "failed"
                     : "unknown"
                   : "not_attempted",
@@ -887,5 +879,5 @@ function rethrowIfAuth(error: unknown): void {
 
 export function clearSubscriptionCaches(): void {
   nameCache.clear();
-  memberships.clear();
+  clearUserGroupMemberships();
 }

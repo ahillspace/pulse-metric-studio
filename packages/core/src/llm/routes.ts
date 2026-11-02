@@ -104,9 +104,9 @@ export function registerLlmRoutes(
         || typeof input.catalog.datasourceLuid !== 'string' || !input.catalog.datasourceLuid.trim()) throw app.httpErrors.badRequest('catalog with datasourceLuid is required.');
       if (typeof input.userMessage !== 'string' || !input.userMessage.trim()) throw app.httpErrors.badRequest('userMessage is required.');
       if (input.chat !== undefined && (!Array.isArray(input.chat) || input.chat.some((item) => {
-        if (!item || typeof item !== 'object') return true;
+        if (!item || typeof item !== 'object' || Array.isArray(item)) return true;
         const message = item as { role?: unknown; content?: unknown; proposalContext?: unknown };
-        return !['system', 'user', 'assistant'].includes(String(message.role)) || typeof message.content !== 'string'
+        return typeof message.role !== 'string' || !['system', 'user', 'assistant'].includes(message.role) || typeof message.content !== 'string'
           || message.proposalContext !== undefined && typeof message.proposalContext !== 'string';
       }))) throw app.httpErrors.badRequest('chat must contain messages with a valid role and string content.');
       return options.authorOps!(await service.pick(), {

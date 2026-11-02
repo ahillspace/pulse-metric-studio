@@ -81,7 +81,11 @@ Build installers on the target operating system:
 npm run tauri:build
 ```
 
-This command builds all workspaces, then [build-native.mjs](scripts/build-native.mjs) stages a separate source copy and links installed dependencies.
+This command runs [build-native.mjs](scripts/build-native.mjs), which stages a separate source copy and prepares installed dependencies.
+The stage discards copied workspace outputs and rebuilds them from staged sources.
+Workspace imports resolve to staged packages; external dependencies can share the installed dependency tree.
+Keep installed external dependencies unchanged during packaging.
+Changes to compiled workspace files in the original checkout after staging cannot change the stage's backend bundle.
 Tauri invokes [copy-resources.mjs](scripts/copy-resources.mjs) in that stage.
 Resource composition bundles the backend and copies the frontend, installer helpers, Node executable, and native SQLite module.
 It verifies a SQLite round trip with the packaged Node executable.
@@ -108,7 +112,6 @@ Windows bundles configure the WebView2 download bootstrapper.
 For a separate validation identity and output directory, run:
 
 ```sh
-npm run build
 node scripts/build-native.mjs --validation
 ```
 

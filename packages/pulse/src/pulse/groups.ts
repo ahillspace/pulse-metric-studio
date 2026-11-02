@@ -9,6 +9,7 @@ import {
   tableauFetch,
 } from "@pulse-metric-studio/core";
 import { listTableauGroups } from "./pulse-client.js";
+import { captureMembershipInvalidation } from "./user-group-memberships.js";
 
 /**
  * Group ensure/lookup for the digest-follow flow.
@@ -102,30 +103,36 @@ export async function addUserToGroup(
   groupId: string,
   userId: string,
 ): Promise<void> {
-  const resp = await tableauFetch(
-    session,
-    apiPath(
+  const invalidate = captureMembershipInvalidation(session, userId);
+  let response: Response | undefined;
+  try {
+    response = await tableauFetch(
       session,
-      `/sites/${encodeURIComponent(session.siteId)}/groups/${encodeURIComponent(groupId)}/users`,
-    ),
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "text/xml",
-        Accept: "application/xml",
+      apiPath(
+        session,
+        `/sites/${encodeURIComponent(session.siteId)}/groups/${encodeURIComponent(groupId)}/users`,
+      ),
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "text/xml",
+          Accept: "application/xml",
+        },
+        body: `<tsRequest><user id="${escapeXml(userId)}" /></tsRequest>`,
+        timeoutMs: 20_000,
       },
-      body: `<tsRequest><user id="${escapeXml(userId)}" /></tsRequest>`,
-      timeoutMs: 20_000,
-    },
-  );
-  if (resp.ok || resp.status === 409) return; // 409 = already a member
-  const text = await readBoundedBody(resp, DEFAULT_MAX_RESPONSE_BYTES, 20_000).catch(() => "");
-  throw new TableauError(
-    `Add user to group failed (${resp.status})`,
-    resp.status,
-    text.slice(0, 200),
-    classifyStatus(resp.status, text),
-  );
+    );
+    if (response.ok || response.status === 409) return; // 409 = already a member
+    const text = await readBoundedBody(response, DEFAULT_MAX_RESPONSE_BYTES, 20_000).catch(() => "");
+    throw new TableauError(
+      `Add user to group failed (${response.status})`,
+      response.status,
+      text.slice(0, 200),
+      classifyStatus(response.status, text),
+    );
+  } finally {
+    if (!response || response.ok || response.status === 409 || response.status === 408 || response.status >= 500) invalidate();
+  }
 }
 
 function extractId(xml: string): string | null {
@@ -138,20 +145,26 @@ export async function deleteGroup(
   session: TableauSession,
   groupId: string,
 ): Promise<void> {
-  const response = await tableauFetch(
-    session,
-    apiPath(
+  const invalidate = captureMembershipInvalidation(session);
+  let response: Response | undefined;
+  try {
+    response = await tableauFetch(
       session,
-      `/sites/${encodeURIComponent(session.siteId)}/groups/${encodeURIComponent(groupId)}`,
-    ),
-    { method: "DELETE", timeoutMs: 20_000 },
-  );
-  if (response.ok || response.status === 404) return;
-  const body = await readBoundedBody(response, DEFAULT_MAX_RESPONSE_BYTES, 20_000).catch(() => "");
-  throw new TableauError(
-    `Group deletion failed (${response.status})`,
-    response.status,
-    body.slice(0, 300),
-    classifyStatus(response.status, body),
-  );
+      apiPath(
+        session,
+        `/sites/${encodeURIComponent(session.siteId)}/groups/${encodeURIComponent(groupId)}`,
+      ),
+      { method: "DELETE", timeoutMs: 20_000 },
+    );
+    if (response.ok || response.status === 404) return;
+    const body = await readBoundedBody(response, DEFAULT_MAX_RESPONSE_BYTES, 20_000).catch(() => "");
+    throw new TableauError(
+      `Group deletion failed (${response.status})`,
+      response.status,
+      body.slice(0, 300),
+      classifyStatus(response.status, body),
+    );
+  } finally {
+    if (!response || response.ok || response.status === 404 || response.status === 408 || response.status >= 500) invalidate();
+  }
 }

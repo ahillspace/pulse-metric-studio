@@ -437,6 +437,7 @@ export class SubscriptionBatchInterrupted extends TableauError {
     public readonly completed: SubscriptionWriteResult[],
     failed: { metricId: string; targetId: string },
     public readonly failedTargets: SubscriptionWriteTarget[] = [],
+    public readonly phase: 'submission' | 'confirmation' = 'submission',
   ) {
     super(cause.message, cause.status, cause.bodySnippet, cause.kind);
     this.failed = failed;
@@ -482,7 +483,7 @@ export async function batchCreateSubscriptions(session: TableauSession, items: S
           try { records = await listSubscriptionsForMetric(session, metricId); alreadyExists = true; }
           catch (verificationError) {
             if (verificationError instanceof TableauError && verificationError.kind === 'auth')
-              throw new SubscriptionBatchInterrupted(verificationError, results, batch[0]!, batch);
+              throw new SubscriptionBatchInterrupted(verificationError, results, batch[0]!, batch, 'confirmation');
             records = [];
           }
         } else {

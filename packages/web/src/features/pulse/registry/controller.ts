@@ -13,7 +13,7 @@ import {
   forkRegistryActionItem,
   type RegistryActionResults,
 } from "../registry-actions";
-import { mergeFollowStates, replaceFollowMetrics, unavailableFollowState } from "../follow-state";
+import { mergeFollowStates, replaceFollowMetrics, selectFollowMetrics, unavailableFollowState } from "../follow-state";
 import type { FollowState } from "./view-types";
 import {
   reconcileFollowTargetResults,
@@ -73,6 +73,7 @@ interface RegistryState {
     targets: FollowTargetChoice[],
   ) => Promise<PulseFollowOperation[]>;
   loadTargets: (refresh?: boolean) => ReturnType<RegistryApi["followTargets"]>;
+  invalidateTargets: (owner?: SessionOwner | null) => void;
   ensureFollowState: (metricIds: string[]) => Promise<void>;
   /** Reads a fresh, selection-scoped identity snapshot without replacing inventory state. */
   refreshFollowState: (metricIds: string[]) => Promise<FollowState | null>;
@@ -89,10 +90,27 @@ export function createRegistryController(
   transport: RegistryApi = registryApi,
   deletion: Pick<PulseApi, "previewDelete" | "delete"> = pulseApi,
 ) {
-  type CachedInventory = { inventory: PulseInventoryResponse; followState: FollowState | null; loadedAt: number };
+  type MetricEvidence = { version: number; state: FollowState };
+  type DetailScope = { versions: Map<string, number>; evidence: Map<string, MetricEvidence>; pending: Map<string, Promise<MetricEvidence | null>> };
+  type InventoryIdentity = { detailScope: DetailScope };
+  type InventoryRead = { identity: InventoryIdentity; promise: Promise<CachedInventory>; inventory?: PulseInventoryResponse; details: Map<string, MetricEvidence>; detailScope: DetailScope };
+  type CachedInventory = { inventory: PulseInventoryResponse; followState: FollowState | null; loadedAt: number; operation: InventoryIdentity };
   const cache = new Map<string, CachedInventory>();
-  const pending = new Map<string, { promise: Promise<CachedInventory>; inventory?: PulseInventoryResponse; details: Array<{ result: FollowState; ids: string[] }> }>();
-  const detailsPending = new Map<string, Promise<FollowState | null>>();
+  const pending = new Map<string, InventoryRead>();
+  const detailScopes = new Map<string, DetailScope>();
+  let activeDetailRequests = 0;
+  const waitingDetailRequests: Array<() => void> = [];
+  const detailRequest = <T,>(read: () => Promise<T>): Promise<T> => new Promise((resolve, reject) => {
+    const start = () => {
+      activeDetailRequests++;
+      void read().then(resolve, reject).finally(() => {
+        activeDetailRequests--;
+        waitingDetailRequests.shift()?.();
+      });
+    };
+    if (activeDetailRequests < 4) start();
+    else waitingDetailRequests.push(start);
+  });
   const directories = new Map<string, { value: Awaited<ReturnType<RegistryApi["followTargets"]>>; loadedAt: number }>();
   const directoryPending = new Map<string, ReturnType<RegistryApi["followTargets"]>>();
   const retain = (cacheKey: string, value: CachedInventory) => {
@@ -126,34 +144,91 @@ export function createRegistryController(
         outcomes: { ...state.outcomes, [scope.key]: results },
         ...(current(scope) ? { results } : {}),
       }));
+    const pruneDetailScopes = () => {
+      for (const [scopeKey, reads] of detailScopes) {
+        if (detailScopes.size <= 8) break;
+        if (scopeKey !== activeKey() && !cache.has(scopeKey) && !pending.has(scopeKey) && !reads.pending.size) detailScopes.delete(scopeKey);
+      }
+    };
+    const detailScopeFor = (scopeKey: string) => {
+      let reads = detailScopes.get(scopeKey);
+      if (!reads) {
+        reads = { versions: new Map(), evidence: new Map(), pending: new Map() };
+        detailScopes.set(scopeKey, reads);
+      }
+      pruneDetailScopes();
+      return reads;
+    };
+    const evidenceCurrent = (scope: ReturnType<typeof capture>, reads: DetailScope, id: string, version: number) =>
+      sessionOwnerKey(scope.owner) === sessionOwnerKey(get().owner) &&
+      detailScopes.get(scope.key) === reads && (reads.versions.get(id) ?? 0) === version;
+    const supersedeDetails = (scope: ReturnType<typeof capture>, ids: string[]) => {
+      const reads = detailScopeFor(scope.key);
+      for (const id of ids) {
+        reads.versions.set(id, (reads.versions.get(id) ?? 0) + 1);
+        reads.evidence.delete(id);
+        reads.pending.delete(id);
+      }
+    };
+    const overlayDetails = (scope: ReturnType<typeof capture>, operation: InventoryRead, base: FollowState | null) => {
+      const states: FollowState[] = [];
+      const ids: string[] = [];
+      for (const [id, evidence] of operation.details) {
+        if (evidenceCurrent(scope, operation.detailScope, id, evidence.version)) {
+          states.push(evidence.state);
+          ids.push(id);
+        }
+      }
+      return ids.length ? replaceFollowMetrics(base, mergeFollowStates(states), ids) : base;
+    };
     const readFollowState = async (scope: ReturnType<typeof capture>, metricIds: string[]) => {
       if (!scope.context || sessionOwnerKey(scope.owner) !== sessionOwnerKey(get().owner)) return null;
       const ids = [...new Set(metricIds)];
-      const readKey = JSON.stringify([scope.key, [...ids].sort()]);
-      const existing = detailsPending.get(readKey);
-      if (existing) return existing;
-      const read = (async () => {
-        const states: FollowState[] = [];
-        for (let offset = 0; offset < ids.length; offset += 800) {
-          if (sessionOwnerKey(scope.owner) !== sessionOwnerKey(get().owner)) return null;
-          const batches = Array.from({ length: Math.ceil(Math.min(800, ids.length - offset) / 200) },
-            (_, index) => ids.slice(offset + index * 200, offset + (index + 1) * 200));
-          states.push(...await Promise.all(batches.map(async (batch) => {
-            try { return await transport.followState(batch, true, scope.owner); }
-            catch (error) { return unavailableFollowState(batch, errorMessage(error)); }
-          })));
+      const reads = detailScopeFor(scope.key);
+      const missing = ids.filter(id => !reads.pending.has(id) && !reads.evidence.has(id));
+      for (let offset = 0; offset < missing.length; offset += 200) {
+        const batch = missing.slice(offset, offset + 200);
+        const versions = new Map(batch.map(id => [id, reads.versions.get(id) ?? 0]));
+        const request = detailRequest(async () => {
+          const valid = batch.filter(id => evidenceCurrent(scope, reads, id, versions.get(id)!));
+          if (!valid.length) return null;
+          try { return await transport.followState(valid, true, scope.owner); }
+          catch (error) { return unavailableFollowState(valid, errorMessage(error)); }
+        });
+        for (const id of batch) {
+          const version = versions.get(id)!;
+          const requestForMetric = request.then(result => {
+            if (!result || !evidenceCurrent(scope, reads, id, version)) return null;
+            const evidence = { version, state: selectFollowMetrics(result, [id]) };
+            reads.evidence.set(id, evidence);
+            return evidence;
+          });
+          reads.pending.set(id, requestForMetric);
+          void requestForMetric.finally(() => {
+            if (reads.pending.get(id) === requestForMetric) reads.pending.delete(id);
+            pruneDetailScopes();
+          }).catch(() => {});
         }
-        if (sessionOwnerKey(scope.owner) !== sessionOwnerKey(get().owner)) return null;
-        const result = mergeFollowStates(states);
-        pending.get(scope.key)?.details.push({ result, ids });
-        const saved = cache.get(scope.key);
-        if (saved) retain(scope.key, { ...saved, followState: replaceFollowMetrics(saved.followState, result, ids) });
-        if (current(scope)) set({ followState: replaceFollowMetrics(get().followState, result, ids) });
-        return result;
-      })();
-      detailsPending.set(readKey, read);
-      try { return await read; }
-      finally { if (detailsPending.get(readKey) === read) detailsPending.delete(readKey); }
+      }
+      const requested = ids.map(id => reads.pending.get(id) ?? Promise.resolve(reads.evidence.get(id) ?? null));
+      const resolved = await Promise.all(requested);
+      const accepted: Array<{ id: string; evidence: MetricEvidence }> = [];
+      for (const [index, evidence] of resolved.entries()) {
+        const id = ids[index]!;
+        if (evidence && evidenceCurrent(scope, reads, id, evidence.version)) accepted.push({ id, evidence });
+      }
+      if (!accepted.length) return null;
+      const result = mergeFollowStates(accepted.map(({ evidence }) => evidence.state));
+      const validIds = accepted.map(({ id }) => id);
+      const operation = pending.get(scope.key);
+      if (operation?.detailScope === reads)
+        for (const { id, evidence } of accepted) operation.details.set(id, evidence);
+      const saved = cache.get(scope.key);
+      if (saved?.operation.detailScope === reads)
+        retain(scope.key, { ...saved, followState: replaceFollowMetrics(saved.followState, result, validIds) });
+      // Every caller consumes its shared result with its own current navigation scope.
+      if (current(scope)) set({ followState: replaceFollowMetrics(get().followState, result, validIds) });
+      return accepted.length === ids.length ? result : null;
     };
     return {
       context: null,
@@ -221,31 +296,34 @@ export function createRegistryController(
         const cacheKey = key(context, owner);
         cache.delete(cacheKey);
         pending.delete(cacheKey);
+        detailScopes.delete(cacheKey);
         if (cacheKey === activeKey()) await get().load();
       },
       async load() {
         const scope = capture();
         if (!scope.context) return;
         const request = ++inventoryRequest;
-        let promise = pending.get(scope.key)?.promise;
-        if (!promise) {
+        let operation = pending.get(scope.key);
+        if (!operation) {
           if (pending.size >= 8) {
             set({ error: "Wait for pending inventory requests before refreshing another datasource." });
             return;
           }
-          promise = (async (): Promise<CachedInventory> => {
+          detailScopes.delete(scope.key);
+          const detailScope = detailScopeFor(scope.key);
+          operation = { identity: { detailScope }, promise: undefined!, details: new Map(), detailScope };
+          const read = operation;
+          read.promise = (async (): Promise<CachedInventory> => {
             const inventory = await transport.inventory(scope.context!, scope.owner);
-            if (sessionOwnerKey(scope.owner) !== sessionOwnerKey(get().owner))
-              return { inventory, followState: null, loadedAt: Date.now() };
-            const entry = pending.get(scope.key);
-            if (entry && entry.promise === promise) entry.inventory = inventory;
-            if (current(scope) && pending.get(scope.key)?.promise === promise)
+            const result = (followState: FollowState | null): CachedInventory => ({ inventory, followState, loadedAt: Date.now(), operation: read.identity });
+            if (sessionOwnerKey(scope.owner) !== sessionOwnerKey(get().owner)) return result(null);
+            read.inventory = inventory;
+            if (current(scope) && pending.get(scope.key) === read)
               set({ inventory, loading: false, followLoading: true });
             const ids = inventory.definitions.flatMap((definition) => definition.metrics.map((metric) => metric.metricId));
             const states: FollowState[] = [];
             for (let offset = 0; offset < ids.length; offset += 800) {
-              if (sessionOwnerKey(scope.owner) !== sessionOwnerKey(get().owner))
-                return { inventory, followState: null, loadedAt: Date.now() };
+              if (sessionOwnerKey(scope.owner) !== sessionOwnerKey(get().owner)) return result(null);
               const batches = Array.from({ length: Math.ceil(Math.min(800, ids.length - offset) / 200) },
                 (_, index) => ids.slice(offset + index * 200, offset + (index + 1) * 200));
               await Promise.all(batches.map(async (batch) => {
@@ -259,32 +337,28 @@ export function createRegistryController(
                   }
                 }
                 states.push(state);
-                if (current(scope) && pending.get(scope.key)?.promise === promise) {
-                  let followState = mergeFollowStates([...(get().followState ? [get().followState!] : []), ...states]);
-                  for (const detail of pending.get(scope.key)?.details ?? []) followState = replaceFollowMetrics(followState, detail.result, detail.ids);
-                  set({ followState });
-                }
+                if (current(scope) && pending.get(scope.key) === read)
+                  set({ followState: overlayDetails(scope, read, mergeFollowStates([...(get().followState ? [get().followState!] : []), ...states])) });
               }));
             }
-            let followState: FollowState | null = ids.length ? mergeFollowStates(states) : null;
-            for (const detail of pending.get(scope.key)?.details ?? []) followState = replaceFollowMetrics(followState, detail.result, detail.ids);
-            const result = { inventory, followState, loadedAt: Date.now() };
-            if (pending.get(scope.key)?.promise === promise) retain(scope.key, result);
-            return result;
+            const completed = result(overlayDetails(scope, read, ids.length ? mergeFollowStates(states) : null));
+            if (pending.get(scope.key) === read) retain(scope.key, completed);
+            return completed;
           })();
-          pending.set(scope.key, { promise, details: [] });
-          // Settled requests retain bounded results, never their promises or errors.
-          void promise.finally(() => {
-            if (pending.get(scope.key)?.promise === promise) pending.delete(scope.key);
+          pending.set(scope.key, read);
+          void read.promise.finally(() => {
+            if (pending.get(scope.key) === read) pending.delete(scope.key);
+            pruneDetailScopes();
           }).catch(() => {});
         }
-        const displayed = pending.get(scope.key)?.inventory;
-        set({ loading: !displayed, followLoading: Boolean(displayed), error: null,
-          ...(displayed ? { inventory: displayed } : {}) });
+        const read = operation;
+        set({ loading: !read.inventory, followLoading: Boolean(read.inventory), error: null,
+          ...(read.inventory ? { inventory: read.inventory } : {}) });
         try {
-          const result = await promise;
-          if (current(scope) && request === inventoryRequest && cache.get(scope.key) === result)
-            set({ inventory: result.inventory, followState: result.followState, loading: false, followLoading: false });
+          await read.promise;
+          const latest = cache.get(scope.key);
+          if (current(scope) && request === inventoryRequest && latest?.operation === read.identity)
+            set({ inventory: latest.inventory, followState: latest.followState, loading: false, followLoading: false });
         } catch (error) {
           if (current(scope) && request === inventoryRequest) set({ error: errorMessage(error), loading: false, followLoading: false });
         }
@@ -654,13 +728,22 @@ export function createRegistryController(
           finishedAt: Date.now(),
           items: reconciled.items,
         });
-        if (sentCount > 0) await readFollowState(scope, operations.slice(0, sentCount).map((operation) => operation.metricId));
+        if (sentCount > 0) {
+          const ids = operations.slice(0, sentCount).map(operation => operation.metricId);
+          supersedeDetails(scope, ids);
+          await readFollowState(scope, ids);
+        }
         if (current(scope)) set({ busy: null });
         return reconciled.retryOperations;
       },
+      invalidateTargets(owner = get().owner) {
+        const ownerKey = sessionOwnerKey(owner);
+        directories.delete(ownerKey);
+        directoryPending.delete(ownerKey);
+      },
       async loadTargets(refresh = false) {
         const ownerKey = sessionOwnerKey(get().owner);
-        if (refresh) { directories.delete(ownerKey); directoryPending.delete(ownerKey); }
+        if (refresh) get().invalidateTargets();
         const saved = directories.get(ownerKey);
         if (saved && Date.now() - saved.loadedAt < (saved.value.errors.length ? 15_000 : 300_000)) return saved.value;
         const existing = directoryPending.get(ownerKey);
@@ -685,6 +768,7 @@ export function createRegistryController(
       },
       async refreshFollowState(metricIds) {
         const scope = capture();
+        supersedeDetails(scope, metricIds);
         const result = await readFollowState(scope, metricIds);
         return current(scope) ? result : null;
       },

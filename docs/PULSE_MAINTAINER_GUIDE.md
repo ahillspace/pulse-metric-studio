@@ -247,6 +247,10 @@ Initial loads and navigation share the current inventory and follower request.
 The Manager's **Refresh metrics** button starts replacement inventory immediately, even while earlier follower data remains pending, and discards late results from the earlier request.
 Bounded caches and pending reads include connection, principal, session generation, and datasource ownership.
 Returning to a datasource in the same session joins its pending read; another session cannot reuse its snapshots or follower state.
+Relationship reads share pending work per owned metric, including overlapping expanded selections.
+Manual inventory refresh supersedes earlier relationship evidence; subscription reconciliation requests evidence dispatched after the relevant mutation.
+Late results cannot replace newer relationship evidence in the display, retained inventory, or pending inventory enrichment.
+Inventory completion settles its loading flags independently of relationship merges while preserving their latest evidence.
 Automatic local persistence depends on stable context values and does not trigger a remote inventory refresh.
 The backend derives connection ownership from the active Tableau session and binds snapshots to that session generation, principal, connection, and datasource.
 Snapshots remain in memory without a time limit; each session retains its latest 32 snapshots.
@@ -272,9 +276,14 @@ Initial summaries request follower counts without subscriber identities or user-
 Visible rows and explicit actions request identity detail; not-requested information remains distinct from zero, unavailable, or complete information.
 Follow mutations retain inventory and reconcile only affected metric IDs, including partial and unknown outcomes.
 Directory reads share bounded session-owned cache entries with an explicit refresh path.
+Group creation and removal invalidate the affected owner's target directory; ordinary subscription changes retain it.
+Backend membership reads share session/user-owned evidence until expiry or a relevant membership or group mutation.
+Potentially effective writes invalidate that evidence even when their outcome is uncertain; earlier pending reads cannot restore it.
 Subscription writes group recipients by metric and match response identities to each requested recipient.
 The 200-recipient chunk is an app request-size bound, not a published Tableau maximum.
 Missing receipt identities remain unknown, and ambiguous writes are not replayed.
+Authentication loss during post-submission confirmation leaves submitted outcomes unknown and stops unsent work.
+A direct authentication rejection of the mutation retains its definitive failure outcome.
 See the [Pulse API reference](https://help.tableau.com/current/api/rest_api/en-us/REST/rest_api_ref_pulse.htm) for the supported subscription endpoint.
 Deletion review uses names and metric identities from the immutable inventory snapshot without changing reviewed IDs or fingerprints.
 Follower counts come from the Manager's cached follow state; unavailable counts remain unknown.
@@ -471,6 +480,8 @@ npm run tauri:build
 This builds the app and stages native packaging in a temporary directory, so files used by an already running app are not replaced.
 Artifacts are copied to `native-artifacts/` by default.
 Build evidence captures the Git revision, dirty state, and normalized source-content identity before copying, then verifies that identity after copying.
+The native stage rebuilds workspace outputs from its captured sources and resolves workspace imports inside that stage.
+Shared external dependencies do not link workspace imports back to compiled outputs in the original checkout.
 Sanitized public release evidence carries relative artifact hashes without local paths or arbitrary private diagnostics.
 Release staging requires matching source evidence and rejects conflicts before promoting a complete output directory.
 The native host serves bundled assets and forwards permitted API requests through a restricted native command.

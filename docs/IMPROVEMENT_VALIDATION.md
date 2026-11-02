@@ -49,7 +49,7 @@ These IDs follow the nine observations in the implementation brief, in their ori
 | O03 | Confirmed and fixed | Passive configuration status uses `installed:null` for unchecked CLIs; [registry](../packages/core/src/llm/registry.test.ts) and [renderer tests](../packages/web/src/components/llm-passive-status.test.tsx) preserve explicit testing. |
 | O04 | Confirmed and fixed | Directories share bounded owner/session state across mounts, while explicit refresh and session changes reload them; [directory tests](../packages/web/src/features/pulse/registry/controller.test.ts) preserve freshness. |
 | O05 | Confirmed and fixed | Continuous native log rotation bounds active files and two archives; [fixed-buffer stream tests](../src-tauri/src/bounded_log.rs) cover oversized files, bursts, sink failure, and shutdown. |
-| O06 | Confirmed and fixed | Source identity and sanitized evidence prevent mixed-source or conflicting-byte promotion; [provenance](../scripts/release-provenance.test.mjs), [staging](../scripts/stage-release.test.mjs), and [build tests](../scripts/build-native.test.mjs) cover the contract. |
+| O06 | Confirmed and fixed, including C06 below | Staged workspace compilation isolates executable app inputs; source evidence and artifact hashes reject conflicting release inputs. [Provenance](../scripts/release-provenance.test.mjs), [staging](../scripts/stage-release.test.mjs), and [build tests](../scripts/build-native.test.mjs) cover these boundaries. |
 | O07 | Reviewed; no product defect established | Validation remains local under [Contributing](../CONTRIBUTING.md), with no hosted service, repository setting, or new formatting/lint policy enabled. |
 | O08 | Confirmed parsing defects fixed; broader cleanup deferred | [Group parsing](../packages/pulse/src/pulse/groups.test.ts) avoids unintended creation, and [malformed legacy author requests](../packages/core/src/llm/routes.test.ts) return HTTP 400 while compatibility routes remain. |
 | O09 | Confirmed and fixed | Canonical destination specification plus definition ID deduplicates writes and creation/undo ownership; [fork-plan tests](../packages/pulse/src/pulse/fork-plan-service.test.ts) cover source mapping and outcomes. |
@@ -57,6 +57,26 @@ These IDs follow the nine observations in the implementation brief, in their ori
 The R09 envelope follows the [official Tableau Pulse methods reference](https://help.tableau.com/current/api/rest_api/en-us/REST/rest_api_ref_pulse.htm).
 The 200-recipient request bound is a local app limit, not a claimed Tableau maximum.
 A batch-level conflict does not establish that every recipient already follows.
+
+## PR review corrections
+
+The review of `ae83edc23d467c7b8834d490544885a4944d8d2a` identifies seven additional issues, C01-C07.
+The earlier isolated checks do not establish correctness for these combined and deferred-response cases.
+C06 concerns inherited packaging behavior and the scope of the new provenance guarantee.
+C07 concerns legacy API input quality rather than the maintained authoring interface.
+
+| ID | Correction | Regression boundary |
+| --- | --- | --- |
+| C01 | Share relationship reads per owned metric and supersede evidence after mutations or explicit inventory refresh. | Deferred pre-write and overlapping responses, repeated row expansion, and A -> B -> A navigation cannot duplicate or overwrite current evidence. |
+| C02 | Complete inventory operations using stable request ownership while preserving merged relationship state. | Both count/detail response orders and same-turn completion settle loading flags and permit further detail loading. |
+| C03 | Invalidate session/user-owned membership evidence after relevant group and membership writes, including uncertain outcomes. | Production group adapters cannot reuse or restore membership evidence that predates their writes; ordinary reads retain sharing. |
+| C04 | Distinguish direct mutation rejection from authentication loss during confirmation. | POST 409 followed by confirmation GET 401 leaves submitted recipients unknown, later recipients unattempted, and sends one mutation POST. |
+| C05 | Invalidate the affected owner's target directory after group changes. | Publication and group-removal callbacks refresh choices without discarding the directory after ordinary metric subscriptions. |
+| C06 | Resolve workspace imports inside the native stage and compile them from staged source. | The production backend bundler retains staged code after original-checkout source and compiled outputs change. |
+| C07 | Validate legacy message roles as strings and reject array message entries. | Malformed roles return HTTP 400 before provider selection; valid legacy requests remain supported. |
+
+The final PR identifies the correction commit, independent review outcome, and covering check results.
+Native installers and live provider workflows retain the qualification limits below.
 
 ## Measured request changes
 
@@ -116,6 +136,12 @@ They describe implementation checks, not a complete suite at the final commit.
 | Shared build and relevant workspace TypeScript checks | Passed during focused implementation. |
 | Rust formatting and changed-file whitespace checks | Passed during focused implementation. |
 | Architecture guard | Passed after frontend owner-admission wiring and in the final integrated check. |
+| C01/C02/C05 frontend corrections and affected Author/Activity/Manager flows | Before: nine detail/loading and eight directory failures. After: 148 passed, zero failed, and zero skipped. |
+| C03/C04 backend corrections and affected subscription/group services | Before: six reproduced failures. After: 62 passed, zero failed, and zero skipped. |
+| C03/C04 cached-deletion, publication, and request-budget compatibility selection | 42 passed, zero failed, and zero skipped. |
+| C06 real compiler/backend-bundler isolation fixture | Passed after original source and compiled outputs changed; staged output and original dependency contents remained correct. |
+| C06 real repository stage and resource composition | All five staged workspace builds passed; staged backend bundle, packaged Node 22.23.2, and SQLite verification passed. |
+| C07 legacy route validation | 14 passed, including malformed roles rejected before provider selection. |
 
 The installer checks use Windows PowerShell and a POSIX shell with fake process boundaries.
 The logging check runs a real synthetic child producing stdout/stderr bursts, without starting the desktop UI.
@@ -123,6 +149,13 @@ Readers use fixed 8 KiB buffers and continue draining when log writes fail.
 The Bedrock check uses the installed SDK, a synthetic credential helper, fake time, and a fake HTTP handler.
 No fixture calls live Tableau, AWS, or an AI service.
 Existing server-rendered authoring tests emit React layout-effect warnings; those warnings do not establish native UI behavior.
+
+Private browser fixtures exercise the compiled React app, real routes, persistence, and adapters against deterministic fake provider responses.
+Ten overlapping expansions request ten distinct identities, and late pre-write details cannot overwrite two confirmed follows across manual inventory refresh.
+Releasing delayed counts permits the remaining rows to load detail; the **Following** filter retains the two confirmed follows.
+Publication and Activity group deletion advance directory reads from one to two to three; ordinary reopening adds no read.
+These flows finish before directory expiry, distinguishing mutation invalidation from timeout behavior.
+Exact same-turn response scheduling remains covered by deterministic controller tests rather than the browser fixture.
 
 ### Final integration record
 
@@ -135,7 +168,7 @@ The integrated checks use the pinned Node.js 22.23.2 runtime and the committed d
 | `npm run build` | Passed for all workspaces. |
 | `npm run typecheck` | Passed. |
 | `npm run check:architecture` | Passed. |
-| `npm test` | 857 tests: 855 passed, zero failed, and two platform-specific skips. |
+| `npm test` | 891 tests: 889 passed, zero failed, and two platform-specific skips. |
 | `node scripts/copy-resources.mjs` | Passed; bundled Node reports 22.23.2 and the SQLite startup probe passed. |
 | `cargo test --locked --manifest-path src-tauri/Cargo.toml` | 32 passed, zero failed, and zero ignored. |
 | `cargo fmt --manifest-path src-tauri/Cargo.toml --check` | Passed. |

@@ -1,5 +1,18 @@
 import type { FollowState } from './registry/view-types';
 
+/** Restrict evidence before merging it so an obsolete overlapping metric cannot leak through. */
+export function selectFollowMetrics(state: FollowState, metricIds: string[]): FollowState {
+  const selected = new Set(metricIds);
+  const select = <T>(values: Record<string, T> | undefined): Record<string, T> =>
+    Object.fromEntries(Object.entries(values ?? {}).filter(([id]) => selected.has(id)));
+  return { ...state,
+    userFollowsByMetricId: select(state.userFollowsByMetricId), groupFollowsByMetricId: select(state.groupFollowsByMetricId),
+    userFollowerIdsByMetricId: select(state.userFollowerIdsByMetricId), groupFollowerIdsByMetricId: select(state.groupFollowerIdsByMetricId),
+    followerCountsByMetricId: select(state.followerCountsByMetricId), availabilityByMetricId: select(state.availabilityByMetricId),
+    errors: state.errors.filter(error => metricIds.some(id => error.startsWith(`${id}:`))),
+  };
+}
+
 /** A failed targeted replacement must not leave old identities looking current. */
 export function replaceFollowMetrics(previous: FollowState | null, replacement: FollowState, metricIds: string[]): FollowState {
   if (!previous) return replacement;
@@ -17,25 +30,25 @@ export function replaceFollowMetrics(previous: FollowState | null, replacement: 
 }
 
 export function mergeFollowStates(states: FollowState[]): FollowState {
-  return states.reduce<FollowState>((merged, state) => ({
-    userFollowsByMetricId: { ...merged.userFollowsByMetricId, ...state.userFollowsByMetricId },
-    groupFollowsByMetricId: { ...merged.groupFollowsByMetricId, ...state.groupFollowsByMetricId },
-    groupFollowerIdsByMetricId: { ...merged.groupFollowerIdsByMetricId, ...state.groupFollowerIdsByMetricId },
-    userFollowerIdsByMetricId: { ...merged.userFollowerIdsByMetricId, ...state.userFollowerIdsByMetricId },
-    followerCountsByMetricId: { ...merged.followerCountsByMetricId, ...state.followerCountsByMetricId },
-    errors: [...merged.errors, ...state.errors],
-    availabilityByMetricId: { ...merged.availabilityByMetricId, ...state.availabilityByMetricId },
-    groupContextUnavailable: merged.groupContextUnavailable || state.groupContextUnavailable,
-  }), {
-    userFollowsByMetricId: {},
-    groupFollowsByMetricId: {},
-    groupFollowerIdsByMetricId: {},
-    userFollowerIdsByMetricId: {},
-    followerCountsByMetricId: {},
-    errors: [],
-    availabilityByMetricId: {},
-    groupContextUnavailable: false,
-  });
+  const assign = <T>(target: Record<string, T>, source: Record<string, T> | undefined) => {
+    for (const [key, value] of Object.entries(source ?? {}))
+      Object.defineProperty(target, key, { value, enumerable: true, configurable: true, writable: true });
+  };
+  const merged: FollowState = {
+    userFollowsByMetricId: {}, groupFollowsByMetricId: {}, groupFollowerIdsByMetricId: {}, userFollowerIdsByMetricId: {},
+    followerCountsByMetricId: {}, errors: [], availabilityByMetricId: {}, groupContextUnavailable: false,
+  };
+  for (const state of states) {
+    assign(merged.userFollowsByMetricId, state.userFollowsByMetricId);
+    assign(merged.groupFollowsByMetricId, state.groupFollowsByMetricId);
+    assign(merged.groupFollowerIdsByMetricId!, state.groupFollowerIdsByMetricId);
+    assign(merged.userFollowerIdsByMetricId!, state.userFollowerIdsByMetricId);
+    assign(merged.followerCountsByMetricId, state.followerCountsByMetricId);
+    assign(merged.availabilityByMetricId!, state.availabilityByMetricId);
+    merged.errors.push(...state.errors);
+    merged.groupContextUnavailable ||= state.groupContextUnavailable;
+  }
+  return merged;
 }
 
 export function metricIsFollowed(followState: FollowState | null, metricId: string): boolean {

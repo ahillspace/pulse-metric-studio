@@ -170,7 +170,7 @@ export function createAuthorController(
     useConnection.getState().session,
   onReceipt: (receipt: PulsePublishReceipt) => void = () => {},
   debounceMs = 600,
-  onInventoryChanged: (context: PulseDraftContext, owner: SessionOwner | null) => void = () => {},
+  onInventoryChanged: (context: PulseDraftContext, owner: SessionOwner | null, directoryChanged: boolean) => void = () => {},
 ) {
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
   const writers = new Map<string, Promise<PulseDraftRecord>>();
@@ -763,6 +763,7 @@ export function createAuthorController(
           publishCommandId: commandId,
         });
         let sent = false;
+        let directoryChanged = false;
         const owner = session();
         try {
           if (!entry.publishCommandId) requireRemote(entry);
@@ -772,9 +773,11 @@ export function createAuthorController(
             previewFingerprint: entry.preview.previewFingerprint,
             commandId,
           });
+          directoryChanged = receipt.follow.group.status === "created" || receipt.follow.group.status === "unknown";
           update(id, { receipt, preview: null, publishCommandId: null });
           onReceipt(receipt);
         } catch (error) {
+          directoryChanged = entry.preview.groupFollow && (!(error instanceof PulseApiError) || error.status >= 500);
           const message =
             error instanceof PulseApiError
               ? error.message
@@ -787,7 +790,7 @@ export function createAuthorController(
           });
         } finally {
           update(id, { publishBusy: false });
-          if (sent) onInventoryChanged(entry.preview.context, owner);
+          if (sent) onInventoryChanged(entry.preview.context, owner, directoryChanged);
         }
       },
       closeReceipt() {
@@ -845,5 +848,8 @@ export const useAuthor = createAuthorController(
     useActivity.getState().received(receipt);
   },
   600,
-  (context, owner) => { void useRegistry.getState().invalidate(context, owner); },
+  (context, owner, directoryChanged) => {
+    if (directoryChanged) useRegistry.getState().invalidateTargets(owner);
+    void useRegistry.getState().invalidate(context, owner);
+  },
 );

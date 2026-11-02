@@ -4,7 +4,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { linkNativeStageDependencies } from "./native-stage-dependencies.mjs";
+import { buildNativeStageWorkspaces, linkNativeStageDependencies } from "./native-stage-dependencies.mjs";
 import { captureSourceIdentity, publicReleaseEvidence, sourceIdentityKey } from './release-provenance.mjs';
 import {
   assertMacRuntime,
@@ -86,8 +86,6 @@ const output = path.resolve(
 if (!["win32", "darwin"].includes(process.platform))
   throw new Error("Native Pulse Metric Studio installers require Windows or macOS.");
 assertMacRuntime();
-if (!fs.existsSync(path.join(root, "packages/web/dist/index.html")))
-  throw new Error("Build the Pulse frontend before native packaging.");
 
 const temporary = fs.realpathSync(os.tmpdir());
 const target = path.join(
@@ -146,6 +144,7 @@ try {
   if (sourceIdentityKey(captureSourceIdentity(root)) !== sourceIdentityKey(source))
     throw new Error('Source changed while staging the native build. Previous artifacts were preserved; retry from a stable source tree.');
   linkNativeStageDependencies(root, stage);
+  buildNativeStageWorkspaces(stage);
   const configFile = path.join(stage, "src-tauri/tauri.conf.json");
   const config = JSON.parse(fs.readFileSync(configFile, "utf8"));
   if (validation) {
@@ -154,20 +153,6 @@ try {
     fs.writeFileSync(configFile, JSON.stringify(config, null, 2));
     console.log(`Isolated validation identity: ${config.identifier}`);
   }
-  const frontend = spawnSync(
-    process.execPath,
-    [
-      path.join(root, "node_modules/vite/bin/vite.js"),
-      "build",
-    ],
-    {
-      cwd: path.join(stage, "packages/web"),
-      stdio: "inherit",
-      windowsHide: true,
-    },
-  );
-  if (frontend.error || frontend.status !== 0)
-    throw new Error("The staged Pulse frontend did not build.");
   const environment = { ...process.env, CARGO_TARGET_DIR: target };
   if (process.platform === "darwin")
     environment.MACOSX_DEPLOYMENT_TARGET = MACOS_COMPATIBILITY_VERSION;
@@ -175,7 +160,7 @@ try {
   const result = spawnSync(
     process.execPath,
     [
-      path.join(root, "node_modules/@tauri-apps/cli/tauri.js"),
+      path.join(stage, "node_modules/@tauri-apps/cli/tauri.js"),
       "build",
       "--config",
       "src-tauri/tauri.conf.json",

@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { afterEach, beforeEach, test } from 'node:test';
 import { clearSession, setSession, type TableauSession } from '@pulse-metric-studio/core';
 import { followTargets } from '../application/subscriptions.js';
+import Fastify from 'fastify';
+import { registerPulseRoutes } from './routes.js';
 const originalFetch = globalThis.fetch;
 const session: TableauSession = { serverUrl: 'https://example.test', siteContentUrl: 'site', siteId: 'site', userId: 'user', token: 'token', apiVersion: '3.27' };
 beforeEach(() => setSession(session, { connectionId: 'connection', patSecret: '' }));
@@ -78,3 +80,27 @@ for (const failure of ['network', 'timeout', 'auth'] as const) {
     assert.equal(posts, 1);
   });
 }
+
+test('a conflict verification 401 leaves submitted recipients unknown and later metrics unsent', async () => {
+  const calls: string[] = [];
+  let posts = 0;
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(String(input));
+    if (init?.method === 'POST') { posts++; calls.push('POST'); return Response.json({ error: 'conflict' }, { status: 409 }); }
+    calls.push(`GET ${url.searchParams.get('metric_id')}`);
+    return posts ? Response.json({ error: 'invalid token' }, { status: 401 }) : Response.json({ subscriptions: [] });
+  };
+  const app = Fastify();
+  registerPulseRoutes(app);
+  try {
+    const response = await app.inject({ method: 'POST', url: '/api/pulse/follow', payload: { context: { connectionId: 'connection', serverUrl: session.serverUrl, siteId: session.siteId, datasourceLuid: 'datasource' }, operations: [operations[0], operations[2], { ...operations[1], metricId: 'later-metric' }] } });
+    assert.equal(response.statusCode, 200, response.body);
+    const result = response.json();
+    assert.deepEqual(result.results.map((entry: { status: string }) => entry.status), ['unknown', 'unknown', 'not_attempted']);
+    assert.equal(result.terminated, true);
+    assert.equal(result.stopped, true);
+    assert.ok(result.results.every((entry: { code: string }) => entry.code === 'authentication_required'));
+    assert.equal(posts, 1);
+    assert.deepEqual(calls, ['GET metric', 'GET later-metric', 'POST', 'GET metric']);
+  } finally { await app.close(); }
+});

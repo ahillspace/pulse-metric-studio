@@ -1,7 +1,7 @@
 import type { TableauSession } from '@pulse-metric-studio/core';
 import { TableauError } from '@pulse-metric-studio/core';
 import { boundedProviderDiagnostic,type PulseProviderDiagnostic } from './provider-diagnostics.js';
-import { sessionCacheKey } from '../application/session-cache-key.js';
+import { sessionCacheKey } from './session-cache-key.js';
 import {
 getPulseDefinition,
 getPulseMetric,

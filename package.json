@@ -25,7 +25,7 @@
     "start": "node packages/server/dist/index.js",
     "tauri": "tauri",
     "tauri:dev": "node scripts/dev.mjs --desktop",
-    "tauri:build": "npm run build && node scripts/build-native.mjs",
+    "tauri:build": "node scripts/build-native.mjs",
     "icons": "node scripts/render-icons.mjs && tauri icon src-tauri/icons/app-icon.png --output src-tauri/icons",
     "check:architecture": "node scripts/check-pulse-architecture.mjs"
   },
