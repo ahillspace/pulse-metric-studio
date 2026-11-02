@@ -150,6 +150,7 @@ Requests without that optional expectation retain the existing compatibility beh
 Connection status exposes the authenticated user's verified site role and group-creation access as allowed, denied, or unknown.
 Existing own-user reads obtain this metadata; PATs remain opaque credentials rather than locally decoded permission claims.
 Access metadata belongs to the complete authenticated session owner.
+Superseded checks cannot replace newer access or connection-status results for the same owner.
 Permission checks update that owner's access without refreshing datasource or metric inventory.
 Missing role information remains unknown, and a permission failure does not by itself expire authentication.
 See [`tableau-connections-api.ts`](../packages/web/src/tableau-connections-api.ts), [`routes.ts`](../packages/core/src/tableau/routes.ts), and [`session.ts`](../packages/core/src/tableau/session.ts).

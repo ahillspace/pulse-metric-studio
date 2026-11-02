@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import Fastify from 'fastify';
-import { captureTableauUserAccess, clearSession, closeDb, config, getDb, setSession, type TableauSession } from '@pulse-metric-studio/core';
+import { captureTableauUserAccess, clearSession, closeDb, config, getDb, registerTableauRoutes, setSession, type TableauSession } from '@pulse-metric-studio/core';
 import { defaultPulseMetric, emptyPulseDocument, type DatasourceCatalog } from '@pulse-metric-studio/shared';
 import { registerPulseRoutes } from '../pulse/routes.js';
 
@@ -109,6 +109,45 @@ test('self publication follows captured publisher and persists receipt without a
     await run.publish();
     assert.equal(run.calls.writes, 2);
   } finally { await run.app.close(); }
+});
+
+test('a delayed older allowed status cannot replace a newer denial and admit group publication', async () => {
+  const owner = { ...session, serverUrl: 'https://fixture.online.tableau.com' };
+  setSession(owner, { connectionId: 'connection', patSecret: '' });
+  let reads = 0;
+  let started!: () => void;
+  let release!: (response: Response) => void;
+  const oldReadStarted = new Promise<void>((resolve) => { started = resolve; });
+  const status = Fastify();
+  registerTableauRoutes(status, { fetchImpl: async (input) => {
+    assert.ok(String(input).endsWith('/users/current'));
+    reads++;
+    if (reads === 2) { started(); return new Promise<Response>((resolve) => { release = resolve; }); }
+    return Response.json({ user: { id: owner.userId, siteRole: reads === 1 ? 'SiteAdministratorCreator' : 'Creator' } });
+  } });
+  let run: Awaited<ReturnType<typeof fixture>> | undefined;
+  try {
+    assert.equal((await status.inject('/api/tableau/status')).json().session.groupCreation.state, 'allowed');
+    run = await fixture('group', 'actual', owner);
+    const oldAllowed = status.inject('/api/tableau/status').then((response) => response);
+    await oldReadStarted;
+    const latest = await status.inject('/api/tableau/status');
+    assert.equal(latest.json().session.groupCreation.state, 'denied');
+    release(Response.json({ user: { id: owner.userId, siteRole: 'SiteAdministratorCreator' } }));
+    await oldAllowed;
+    const publication = await run.publish();
+    assert.equal(publication.statusCode, 403, publication.body);
+    assert.equal(publication.json().code, 'tableau_group_creation_unavailable');
+    assert.equal(run.calls.writes, 0);
+    assert.equal(run.calls.group, 0);
+    assert.equal(run.calls.currentUser, 0);
+    assert.equal(run.calls.access, 0);
+    assert.equal(reads, 3);
+  } finally {
+    release?.(Response.json({}));
+    await run?.app.close();
+    await status.close();
+  }
 });
 
 for (const access of ['denied', 'unknown'] as const) {

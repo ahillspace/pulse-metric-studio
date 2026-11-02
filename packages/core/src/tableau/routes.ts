@@ -10,6 +10,7 @@ import { invalidateFieldsCache, listDatasources } from './vds-fields.js';
 import { discoverRestApiVersion, patSignin } from './signin.js';
 import {
   clearSession,
+  beginTableauUserAccessCheck,
   captureTableauUserAccess,
   getGroupCreationAccess,
   markTableauUserAccessUnavailable,
@@ -19,6 +20,7 @@ import {
   getSessionContext,
   getSessionGeneration,
   isSessionCurrent,
+  isTableauUserAccessCheckCurrent,
   listConnections,
   normalizeServerUrl,
   replaceConnectionCredential,
@@ -30,6 +32,7 @@ import {
   type CredentialStorageKind,
   type ConnectionProfile,
   type StoredConnection,
+  type TableauUserAccessCheck,
 } from './session.js';
 
 export interface TableauRouteDependencies {
@@ -45,6 +48,18 @@ function currentStatusAfterSwitch() {
     ? { connected: true, reachable: false, session: publicSession(current), availabilityError: 'The Tableau connection changed during the status check. Retry connection status.' }
     : { connected: false, hasStoredProfile: getStoredConnection() != null };
 }
+
+type TableauStatusResult = ReturnType<typeof currentStatusAfterSwitch> | {
+  connected: true;
+  reachable: boolean;
+  restored?: false;
+  session: ReturnType<typeof publicSession>;
+  availabilityError?: string;
+};
+const latestStatusChecks = new WeakMap<TableauSession, {
+  check: TableauUserAccessCheck;
+  result: Promise<TableauStatusResult>;
+}>();
 
 type CredentialInput = {
   storageKind?: CredentialStorageKind;
@@ -175,7 +190,19 @@ export function registerTableauRoutes(
       }
     }
 
-    const owner = getSessionContext(session);
+    const check = beginTableauUserAccessCheck(session);
+    const result = checkCurrentSessionStatus(session, check);
+    latestStatusChecks.set(session, { check, result });
+    return result;
+  });
+
+  function supersededStatus(session: TableauSession, check: TableauUserAccessCheck): Promise<TableauStatusResult> | TableauStatusResult {
+    if (!isSessionCurrent(session) || getSessionContext(session) !== check.context) return currentStatusAfterSwitch();
+    const latest = latestStatusChecks.get(session);
+    return latest && latest.check !== check ? latest.result : currentStatusAfterSwitch();
+  }
+
+  async function checkCurrentSessionStatus(session: TableauSession, check: TableauUserAccessCheck): Promise<TableauStatusResult> {
     try {
       const response = await fetchImpl(
         `${session.serverUrl}${apiPath(session, `/sites/${encodeURIComponent(session.siteId)}/users/current`)}`,
@@ -190,11 +217,11 @@ export function registerTableauRoutes(
         throw new TableauError('Tableau status check failed.', response.status, '', classifyStatus(response.status, body));
       }
       const payload = await readBoundedBody(response, DEFAULT_MAX_RESPONSE_BYTES, 10_000).then(text => JSON.parse(text)).catch(() => null);
-      if (!isSessionCurrent(session) || getSessionContext(session) !== owner) return currentStatusAfterSwitch();
+      if (!isTableauUserAccessCheckCurrent(session, check)) return supersededStatus(session, check);
       captureCurrentUserName(session, payload);
       return { connected: true, reachable: true, restored: false, session: publicSession(session) };
     } catch (error) {
-      if (!isSessionCurrent(session) || getSessionContext(session) !== owner) return currentStatusAfterSwitch();
+      if (!isTableauUserAccessCheckCurrent(session, check)) return supersededStatus(session, check);
       if (error instanceof TableauError && error.kind === 'auth') {
         clearSession();
         return { connected: false, hasStoredProfile: getStoredConnection() != null };
@@ -203,7 +230,7 @@ export function registerTableauRoutes(
       return { connected: true, reachable: false, session: publicSession(session),
         availabilityError: 'Tableau is temporarily unavailable. Retry connection status to check again.' };
     }
-  });
+  }
 
   app.get('/api/tableau/connections', async () => ({ connections: listConnections() }));
 
@@ -667,6 +694,7 @@ async function ensureCurrentUserName(
   session: TableauSession,
   fetchImpl: typeof fetch,
 ): Promise<void> {
+  const check = beginTableauUserAccessCheck(session);
   try {
     const response = await fetchImpl(
       `${session.serverUrl}${apiPath(session, `/sites/${encodeURIComponent(session.siteId)}/users/current`)}`,
@@ -676,10 +704,14 @@ async function ensureCurrentUserName(
         signal: AbortSignal.timeout(10_000),
       },
     );
-    if (!response.ok) { markTableauUserAccessUnavailable(session); return; }
-    captureCurrentUserName(session, await readBoundedBody(response, DEFAULT_MAX_RESPONSE_BYTES, 10_000).then(text => JSON.parse(text)).catch(() => null));
+    if (!response.ok) {
+      if (isTableauUserAccessCheckCurrent(session, check)) markTableauUserAccessUnavailable(session);
+      return;
+    }
+    const payload = await readBoundedBody(response, DEFAULT_MAX_RESPONSE_BYTES, 10_000).then(text => JSON.parse(text)).catch(() => null);
+    if (isTableauUserAccessCheckCurrent(session, check)) captureCurrentUserName(session, payload);
   } catch {
-    markTableauUserAccessUnavailable(session);
+    if (isTableauUserAccessCheckCurrent(session, check)) markTableauUserAccessUnavailable(session);
     // display name is best-effort; the picker falls back to a generic "(you)" label
   }
 }

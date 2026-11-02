@@ -158,3 +158,62 @@ test('verified administrator roles establish group access on Server and custom h
     } finally { await app.close(); }
   }
 });
+
+for (const [olderStatus, olderRole, newerStatus, newerRole, expectedAccess] of [
+  [200, 'SiteAdministratorCreator', 200, 'Creator', 'denied'],
+  [200, 'SiteAdministratorCreator', 503, undefined, 'unknown'],
+  [401, undefined, 200, 'Creator', 'denied'],
+  [503, undefined, 200, 'SiteAdministratorCreator', 'allowed'],
+  [200, 'Creator', 200, 'SiteAdministratorCreator', 'allowed'],
+] as const) {
+  test(`same-owner older ${olderStatus}/${olderRole} cannot replace newer ${newerStatus}/${newerRole} status`, async () => {
+    const owner = actor();
+    sessions.setSession(owner, { connectionId: 'fixture-connection', patSecret: 'fixture-pat' });
+    let finishOlder!: (response: Response) => void;
+    let started!: () => void;
+    let calls = 0;
+    const ready = new Promise<void>((resolve) => { started = resolve; });
+    const app = await fixture(async () => {
+      calls++;
+      if (calls === 1) return new Promise<Response>((resolve) => { finishOlder = resolve; started(); });
+      return Response.json({ user: { id: owner.userId, siteRole: newerRole, fullName: 'Latest name' } }, { status: newerStatus });
+    });
+    try {
+      const pendingOlder = app.inject('/api/tableau/status').then((response) => response.json());
+      await ready;
+      const newer = (await app.inject('/api/tableau/status')).json();
+      assert.equal(newer.session.groupCreation.state, expectedAccess);
+      finishOlder(Response.json({ user: { id: owner.userId, siteRole: olderRole, fullName: 'Stale name' } }, { status: olderStatus }));
+      const older = await pendingOlder;
+      assert.equal(sessions.getSession(), owner, 'a superseded auth failure must not clear the current session');
+      assert.equal(sessions.getGroupCreationAccess(owner).state, expectedAccess, 'only latest own-user facts remain authoritative');
+      assert.deepEqual(older, newer, 'superseded status must report latest facts and reachability');
+      assert.equal(owner.userName, newerStatus === 200 ? 'Latest name' : 'Existing display');
+      assert.equal(calls, 2, 'ordering must not add provider queries');
+    } finally { await app.close(); }
+  });
+}
+
+test('superseded status waits for the newest pending check instead of attributing old reachability', async () => {
+  const owner = actor();
+  sessions.setSession(owner, { connectionId: 'fixture-connection', patSecret: 'fixture-pat' });
+  const finishes: Array<(response: Response) => void> = [];
+  let started!: () => void;
+  let ready = new Promise<void>((resolve) => { started = resolve; });
+  const app = await fixture(() => new Promise<Response>((resolve) => { finishes.push(resolve); started(); }));
+  try {
+    const older = app.inject('/api/tableau/status').then((response) => response.json());
+    await ready;
+    ready = new Promise<void>((resolve) => { started = resolve; });
+    const newer = app.inject('/api/tableau/status').then((response) => response.json());
+    await ready;
+    finishes[0](Response.json({ user: { id: owner.userId, siteRole: 'SiteAdministratorCreator' } }));
+    finishes[1](Response.json({ unavailable: true }, { status: 503 }));
+    const [oldResult, newResult] = await Promise.all([older, newer]);
+    assert.equal(newResult.reachable, false);
+    assert.equal(newResult.session.groupCreation.state, 'unknown');
+    assert.deepEqual(oldResult, newResult);
+    assert.equal(sessions.getGroupCreationAccess(owner).state, 'unknown');
+    assert.equal(finishes.length, 2);
+  } finally { await app.close(); }
+});

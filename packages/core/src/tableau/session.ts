@@ -128,6 +128,23 @@ interface UserAccessFacts {
   verified: boolean;
 }
 const userAccess = new WeakMap<TableauSession, UserAccessFacts>();
+export interface TableauUserAccessCheck {
+  readonly context: TableauSessionContext | null;
+  readonly generation: number;
+}
+const userAccessChecks = new WeakMap<TableauSession, TableauUserAccessCheck>();
+
+/** Only the newest dispatched own-user read may update this session's facts. */
+export function beginTableauUserAccessCheck(session: TableauSession): TableauUserAccessCheck {
+  const check = Object.freeze({ context: getSessionContext(session), generation: getSessionGeneration() });
+  userAccessChecks.set(session, check);
+  return check;
+}
+
+export function isTableauUserAccessCheckCurrent(session: TableauSession, check: TableauUserAccessCheck): boolean {
+  return userAccessChecks.get(session) === check && check.generation === getSessionGeneration()
+    && check.context === getSessionContext(session) && (!check.context || isSessionCurrent(session));
+}
 
 /** Permission metadata is evidence about this authenticated user, never a decoded PAT. */
 export function captureTableauUserAccess(session: TableauSession, payload: unknown): boolean {
