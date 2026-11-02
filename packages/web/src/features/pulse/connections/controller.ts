@@ -47,7 +47,8 @@ export function createConnectionController(
     accessChecking: false,
     async init() {
       accessRequest++;
-      set({ accessChecking: false });
+      sourceRequest++;
+      set({ accessChecking: false, loadingDatasources: false });
       const request = ++generation;
       try {
         const status = await transport.status();
@@ -83,18 +84,22 @@ export function createConnectionController(
       const owner = get().session;
       if (!owner || !get().startAction()) return;
       const request = generation;
+      const ownerKey = sessionOwnerKey(owner);
+      const current = () => request === generation && ownerKey === sessionOwnerKey(get().session);
       try {
         await transport.disconnect({
           connectionId: owner.connectionId,
           sessionGeneration: owner.sessionGeneration,
         });
-        if (request !== generation || owner !== get().session) return;
+        if (!current()) return;
         generation += 1;
+        accessRequest += 1;
         sourceRequest += 1;
         set({
           session: null,
           datasources: [],
           loadingDatasources: false,
+          accessChecking: false,
           error: null,
         });
         useNotices
@@ -104,8 +109,7 @@ export function createConnectionController(
             "Disconnected. Saved drafts and publication history remain available.",
           );
       } catch (error) {
-        if (request === generation && owner === get().session)
-          set({ error: errorMessage(error) });
+        if (current()) set({ error: errorMessage(error) });
       } finally {
         get().finishAction();
       }
@@ -114,15 +118,17 @@ export function createConnectionController(
       const request = ++sourceRequest;
       const owner = get().session;
       if (!owner) return;
+      const ownerGeneration = generation;
+      const ownerKey = sessionOwnerKey(owner);
+      const current = () => request === sourceRequest && ownerGeneration === generation && ownerKey === sessionOwnerKey(get().session);
       set({ loadingDatasources: true });
       try {
         const response = await transport.datasources();
-        if (request === sourceRequest && get().session === owner)
-          set({ datasources: response.datasources });
+        if (current()) set({ datasources: response.datasources });
       } catch (error) {
-        if (request === sourceRequest) set({ error: errorMessage(error) });
+        if (current()) set({ error: errorMessage(error) });
       } finally {
-        if (request === sourceRequest) set({ loadingDatasources: false });
+        if (current()) set({ loadingDatasources: false });
       }
     },
     async refreshAccess() {
@@ -130,13 +136,14 @@ export function createConnectionController(
       if (!owner || get().accessChecking) return;
       const request = ++accessRequest;
       const ownerGeneration = generation;
-      const current = () => request === accessRequest && ownerGeneration === generation && sessionOwnerKey(owner) === sessionOwnerKey(get().session);
+      const ownerKey = sessionOwnerKey(owner);
+      const current = () => request === accessRequest && ownerGeneration === generation && ownerKey === sessionOwnerKey(get().session);
       set({ accessChecking: true });
       try {
         const status = await transport.status();
         if (!current()) return;
         if (!status.connected) { get().expireSession(owner); return; }
-        if (!status.session || sessionOwnerKey(status.session) !== sessionOwnerKey(owner)) {
+        if (!status.session || sessionOwnerKey(status.session) !== ownerKey) {
           set({ session: { ...get().session!, siteRole: undefined, groupCreation: { state: "unknown", reasonCode: "connection_changed", message: "Group creation permission is not verified for this connection." } }, error: "The Tableau connection changed while checking permissions. Check the current connection before continuing." });
           return;
         }
