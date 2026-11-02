@@ -55,7 +55,7 @@ export function subscribeDesktopLifecycle(
               callbacks.cancelClose();
               if (error instanceof DOMException && error.name === 'AbortError') {
                 try { await events.shutdown('cancel'); }
-                catch { callbacks.onUnavailable('The desktop could not cancel closing. Restart Pulse Metric Studio after saving your work.'); }
+                catch { callbacks.onUnavailable('The desktop could not cancel closing. Automatic persistence may still be pending. Keep Pulse Metric Studio open and try closing again.'); }
               }
               callbacks.onCloseError(error);
             }

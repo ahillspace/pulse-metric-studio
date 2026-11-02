@@ -101,21 +101,19 @@ main() {
 
     app_path="${install_dir%/}/${app_name}"
 
-    # Ask a running Pulse Metric Studio to quit (it owns the single-instance
-    # lock and its local backend), then force it if it does not exit in time.
+    # Normal quit waits for automatic persistence. A timeout or canceled close
+    # must leave the app running and prevent installation or removal.
     quit_running_app() {
         pgrep -x "$process_name" >/dev/null 2>&1 || return 0
         info 'Quitting the running Pulse Metric Studio...'
         osascript -e "tell application id \"${bundle_id}\" to quit" >/dev/null 2>&1 || true
         attempts=0
         while pgrep -x "$process_name" >/dev/null 2>&1; do
-            attempts=$((attempts + 1))
             if [ "$attempts" -ge 20 ]; then
-                pkill -x "$process_name" >/dev/null 2>&1 || true
-                sleep 1
-                break
+                fail 'Pulse Metric Studio could not finish closing. Automatic persistence may still be pending, or closing was canceled. The installed app was not changed. Let the app finish closing, then try again.'
             fi
             sleep 0.5
+            attempts=$((attempts + 1))
         done
     }
 
@@ -223,6 +221,8 @@ main() {
     [ -d "$install_dir" ] || mkdir -p "$install_dir" || fail "Could not create ${install_dir}."
     [ -w "$install_dir" ] || fail "${install_dir} is not writable. Re-run with --install-dir \"\$HOME/Applications\"."
 
+    quit_running_app
+
     # Copy the new app beside the old one first, so a failed copy (full disk,
     # interrupted download of the image) leaves the installed version working.
     staged_app="${install_dir}/.${app_name}.new.$$"
@@ -233,7 +233,6 @@ main() {
         fail "Could not copy Pulse Metric Studio to ${install_dir}. The installed version was not changed."
     fi
 
-    quit_running_app
     if [ -e "$app_path" ] && ! mv "$app_path" "$old_app"; then
         rm -rf "$staged_app"
         fail "Could not replace ${app_path}. The installed version was not changed."

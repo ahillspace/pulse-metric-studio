@@ -75,7 +75,11 @@ function Stop-PulseMetricStudio {
     Write-Host 'Quitting the running Pulse Metric Studio...'
     $running | ForEach-Object { $_.CloseMainWindow() | Out-Null }
     $running | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue
-    Get-Process -Name 'pulse-metric-studio' -ErrorAction SilentlyContinue | Stop-Process -Force
+    # Normal close waits for automatic persistence. Never override a delayed,
+    # failed, or canceled close with installation or removal.
+    if (Get-Process -Name 'pulse-metric-studio' -ErrorAction SilentlyContinue) {
+        Fail 'Pulse Metric Studio could not finish closing. Automatic persistence may still be pending, or closing was canceled. The installed app was not changed. Let the app finish closing, then try again.'
+    }
 }
 
 if ($Action -eq 'Uninstall') {
