@@ -110,21 +110,24 @@ export class HttpLlmProvider {
     if (this.profile.authMode === 'x-api-key') headers['x-api-key'] = token;
     if (protocol === 'anthropic-messages') headers['anthropic-version'] = headers['anthropic-version'] || '2023-06-01';
 
-    let response: Response;
+    let data: any;
     try {
       // The default client re-checks every resolved address when it connects.
       const send = this.fetchImpl ?? guardedFetch(this.profile.allowPrivateNetwork ?? false);
-      response = await send(url, {
+      const response = await send(url, {
         method: 'POST',
         headers,
-        body: JSON.stringify(requestBody(protocol, this.profile.model, opts)),
+        body: JSON.stringify(requestBody(this.profile, opts)),
         signal: opts.signal
           ? AbortSignal.any([opts.signal, AbortSignal.timeout(opts.timeoutMs ?? LLM_REQUEST_TIMEOUT_MS)])
           : AbortSignal.timeout(opts.timeoutMs ?? LLM_REQUEST_TIMEOUT_MS),
         redirect: 'error',
       });
+      if (!response.ok) throw httpProviderError(response, await readProviderErrorDetail(response, [token, ...Object.values(extraHeaders)]), this.id, this.profile.model, this.label);
+      data = await readJsonResponse(response, this.id, this.profile.model);
     } catch (error) {
       opts.signal?.throwIfAborted();
+      if (error instanceof LlmProviderError) throw error;
       if (error instanceof UnsafeLlmEndpointError) {
         throw new LlmProviderError({ code: 'provider_execution', message: error.message, provider: this.id, model: this.profile.model });
       }
@@ -138,8 +141,6 @@ export class HttpLlmProvider {
         cause: error,
       });
     }
-    if (!response.ok) throw httpProviderError(response, await readProviderErrorDetail(response, [token, ...Object.values(extraHeaders)]), this.id, this.profile.model, this.label);
-    const data = await readJsonResponse(response, this.id, this.profile.model);
     const text = responseText(protocol, data);
     if (!text) {
       throw new LlmProviderError({
@@ -165,7 +166,8 @@ export class AnthropicProvider extends HttpLlmProvider {
   }
 }
 
-function requestBody(protocol: StoredLlmProfile['protocol'], model: string, opts: CompleteOptions): Record<string, unknown> {
+function requestBody(profile: StoredLlmProfile, opts: CompleteOptions): Record<string, unknown> {
+  const { protocol, model } = profile;
   if (protocol === 'anthropic-messages') {
     return {
       model,
@@ -188,8 +190,14 @@ function requestBody(protocol: StoredLlmProfile['protocol'], model: string, opts
       ...(opts.system ? [{ role: 'system', content: opts.system }] : []),
       ...opts.messages.map(messageShape),
     ],
-    max_tokens: opts.maxTokens ?? 4096,
+    [chatTokenParameter(profile)]: opts.maxTokens ?? 4096,
   };
+}
+
+function chatTokenParameter(profile: StoredLlmProfile): 'max_completion_tokens' | 'max_tokens' {
+  const modern = profile.chatCompatibility === 'modern'
+    || (profile.chatCompatibility ?? 'auto') === 'auto' && new URL(profile.baseUrl).hostname === 'api.openai.com';
+  return modern ? 'max_completion_tokens' : 'max_tokens';
 }
 
 function messageShape(message: LlmMessage) {
@@ -241,18 +249,25 @@ function httpProviderError(response: Response, detail: string | undefined, provi
 async function readJsonResponse(response: Response, provider: string, model: string): Promise<any> {
   const maxBytes = 2_000_000;
   const reader = response.body?.getReader();
-  if (!reader) return response.json();
   const chunks: Uint8Array[] = [];
   let bytes = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    bytes += value.byteLength;
-    if (bytes > maxBytes) {
-      await reader.cancel();
-      throw new LlmProviderError({ code: 'invalid_provider_response', message: 'Provider response exceeded the 2 MB limit.', provider, model });
+  if (reader) {
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        bytes += value.byteLength;
+        if (bytes > maxBytes) {
+          throw new LlmProviderError({ code: 'invalid_provider_response', message: 'Provider response exceeded the 2 MB limit.', provider, model });
+        }
+        chunks.push(value);
+      }
+    } catch (error) {
+      await reader.cancel().catch(() => undefined);
+      throw error;
+    } finally {
+      reader.releaseLock();
     }
-    chunks.push(value);
   }
   try {
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));

@@ -196,6 +196,9 @@ const MIGRATIONS: string[] = [
     secret_enc TEXT NOT NULL
   );
   `,
+  // 006 - retain the selected Chat Completions request contract.
+  `ALTER TABLE llm_profiles ADD COLUMN chat_compatibility TEXT NOT NULL DEFAULT 'auto'
+    CHECK (chat_compatibility IN ('auto', 'modern', 'legacy'));`,
 ];
 
 export function getDb(): Db {

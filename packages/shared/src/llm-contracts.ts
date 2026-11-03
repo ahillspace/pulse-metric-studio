@@ -13,6 +13,7 @@ export const LLM_PROTOCOLS = [
 
 export type LlmProtocol = (typeof LLM_PROTOCOLS)[number];
 export type LlmAuthMode = 'none' | 'local-account' | 'bearer' | 'x-api-key' | 'aws';
+export type LlmChatCompatibility = 'auto' | 'modern' | 'legacy';
 export type LlmHealthReasonCode =
   | 'ready'
   | 'not_installed'
@@ -95,6 +96,7 @@ export const LlmProfileWriteSchema = z.object({
   headers: HeadersSchema.optional(),
   clearHeaders: z.boolean().optional().default(false),
   allowPrivateNetwork: z.boolean().optional().default(false),
+  chatCompatibility: z.enum(['auto', 'modern', 'legacy']).optional(),
   region: z.string().trim().max(80).optional().default(''),
   awsProfile: z.string().trim().max(120).optional().default(''),
   command: z.string().trim().max(1000).optional().default(''),
@@ -102,6 +104,9 @@ export const LlmProfileWriteSchema = z.object({
   credentialCommand: savedSecret(z.string().trim()).optional(),
   clearCredentialCommand: z.boolean().optional().default(false),
 }).superRefine((profile, ctx) => {
+  if (profile.protocol !== 'openai-chat' && profile.chatCompatibility && profile.chatCompatibility !== 'auto') {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['chatCompatibility'], message: 'Chat compatibility applies only to Chat Completions.' });
+  }
   const localAccount = profile.protocol === 'codex-cli' || profile.protocol === 'claude-code';
   if (localAccount) {
     if (profile.authMode !== 'local-account') ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['authMode'], message: 'This provider uses authentication managed by the local CLI.' });
@@ -186,6 +191,7 @@ export interface LlmProfilePublic {
   hasCredentialCommand: boolean;
   credentialCommandHint: string | null;
   allowPrivateNetwork: boolean;
+  chatCompatibility?: LlmChatCompatibility;
   source: 'environment' | 'saved';
 }
 

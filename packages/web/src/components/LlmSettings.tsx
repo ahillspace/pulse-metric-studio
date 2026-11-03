@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   SAVED_SECRET_PLACEHOLDER,
   type LlmAuthMode,
+  type LlmChatCompatibility,
   type LlmModelCatalogResponse,
   type LlmProfilePublic,
   type LlmProtocol,
@@ -36,13 +37,14 @@ type SetupStatus = Pick<LlmProviderStatus, 'installed' | 'configured' | 'healthy
 
 interface ProfileForm {
   id: string; label: string; protocol: LlmProtocol; baseUrl: string; model: string; authMode: LlmAuthMode;
+  chatCompatibility?: LlmChatCompatibility;
   secret: string; hasSecret: boolean; clearSecret: boolean; headersText: string; headersDirty: boolean; clearHeaders: boolean; region: string; awsProfile: string; command: string; credentialCommand: string; hasCredentialCommand: boolean; credentialCommandHint: string | null; clearCredentialCommand: boolean; allowPrivateNetwork: boolean; source: 'environment' | 'saved' | 'new';
 }
 
 const emptyForm: ProfileForm = { id: '', label: '', protocol: 'opencode', baseUrl: '', model: '', authMode: 'none', secret: '', hasSecret: false, clearSecret: false, headersText: '{}', headersDirty: false, clearHeaders: false, region: '', awsProfile: '', command: 'opencode', credentialCommand: '', hasCredentialCommand: false, credentialCommandHint: null, clearCredentialCommand: false, allowPrivateNetwork: false, source: 'new' };
 
 function formFromProfile(profile: LlmProfilePublic): ProfileForm {
-  return { id: profile.id, label: profile.label, protocol: profile.protocol, baseUrl: profile.baseUrl, model: profile.model, authMode: profile.authMode, secret: '', hasSecret: profile.hasSecret, clearSecret: false, headersText: JSON.stringify(profile.headers, null, 2), headersDirty: false, clearHeaders: false, region: profile.region, awsProfile: profile.awsProfile, command: profile.command, credentialCommand: '', hasCredentialCommand: profile.hasCredentialCommand, credentialCommandHint: profile.credentialCommandHint, clearCredentialCommand: false, allowPrivateNetwork: profile.allowPrivateNetwork, source: profile.source };
+  return { chatCompatibility: profile.chatCompatibility ?? 'auto', id: profile.id, label: profile.label, protocol: profile.protocol, baseUrl: profile.baseUrl, model: profile.model, authMode: profile.authMode, secret: '', hasSecret: profile.hasSecret, clearSecret: false, headersText: JSON.stringify(profile.headers, null, 2), headersDirty: false, clearHeaders: false, region: profile.region, awsProfile: profile.awsProfile, command: profile.command, credentialCommand: '', hasCredentialCommand: profile.hasCredentialCommand, credentialCommandHint: profile.credentialCommandHint, clearCredentialCommand: false, allowPrivateNetwork: profile.allowPrivateNetwork, source: profile.source };
 }
 
 /** Saved commands are never sent back to the UI: send one only when it is new or being cleared. */
@@ -73,6 +75,7 @@ export function changeProfileProtocol(form: ProfileForm, protocol: LlmProtocol, 
   const http = ['openai-chat', 'openai-responses', 'anthropic-messages'];
   return {
     ...form, protocol,
+    chatCompatibility: protocol === 'openai-chat' && form.protocol === 'openai-chat' ? form.chatCompatibility ?? 'auto' : 'auto',
     authMode: sameFamily ? form.authMode : choice.authMode,
     baseUrl: http.includes(form.protocol) && http.includes(protocol) ? form.baseUrl : choice.baseUrl,
     command: choice.command,
@@ -177,7 +180,7 @@ export function LlmBadge() {
       const headers = JSON.parse(straightenQuotes(form.headersText || '{}'));
       if (!headers || Array.isArray(headers) || typeof headers !== 'object') throw new Error('Custom headers must be a JSON object.');
       if (form.headersDirty && Object.values(headers).some((value) => value === '[configured]')) throw new Error('Replace every [configured] header placeholder with its value before saving header changes.');
-      const saved = await llmApi.save(form.id, { label: form.label, protocol: form.protocol, baseUrl: form.baseUrl, model: form.model, authMode: form.authMode, secret: form.secret || undefined, clearSecret: form.clearSecret, ...(form.headersDirty ? { headers } : {}), clearHeaders: form.clearHeaders, region: form.region, awsProfile: form.awsProfile, command: form.command, ...credentialCommandWrite(form), allowPrivateNetwork: form.allowPrivateNetwork });
+      const saved = await llmApi.save(form.id, { label: form.label, protocol: form.protocol, baseUrl: form.baseUrl, model: form.model, authMode: form.authMode, secret: form.secret || undefined, clearSecret: form.clearSecret, ...(form.headersDirty ? { headers } : {}), clearHeaders: form.clearHeaders, region: form.region, awsProfile: form.awsProfile, command: form.command, ...credentialCommandWrite(form), allowPrivateNetwork: form.allowPrivateNetwork, chatCompatibility: form.protocol === 'openai-chat' ? form.chatCompatibility ?? 'auto' : 'auto' });
       setForm(formFromProfile(saved)); setSetupStatus(null); setFormDirty(false); setEditingExisting(true); setFeedback({ tone: 'success', message: 'Provider profile saved securely.' }); await load();
     } catch (error) { setFeedback({ tone: 'error', message: error instanceof Error ? error.message : String(error) }); }
     finally { setBusy(false); }
@@ -381,6 +384,7 @@ export function ProfileEditor({
           <label>Profile ID<input value={form.id} disabled={existing} onChange={(event) => set('id', event.target.value)} placeholder="company-gateway" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" /></label>
           <label>Protocol<select value={form.protocol} onChange={(event) => setForm(changeProfileProtocol(form, event.target.value as LlmProtocol, existing))}><option value="codex-cli">Codex CLI account</option><option value="claude-code">Claude Code account</option><option value="opencode">OpenCode CLI</option><option value="openai-chat">OpenAI Chat Completions</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic-messages">Anthropic Messages</option><option value="bedrock-converse">Amazon Bedrock Converse</option></select></label>
           {(http || bedrock) && <>
+            {form.protocol === 'openai-chat' && <label className="full">Chat Completions compatibility<select value={form.chatCompatibility ?? 'auto'} onChange={(event) => set('chatCompatibility', event.target.value as LlmChatCompatibility)}><option value="auto">Automatic</option><option value="modern">Modern (max_completion_tokens)</option><option value="legacy">Legacy (max_tokens)</option></select><span className="section-hint">Automatic uses modern token limits for OpenAI and legacy limits for other endpoints. Choose the mode required by your gateway if it differs.</span></label>}
             <label>Authentication<select value={form.authMode} onChange={(event) => changeAuth(event.target.value as LlmAuthMode)}>{bedrock && <option value="aws">AWS credentials</option>}<option value="bearer">Bearer token</option>{http && <option value="x-api-key">API key header</option>}{http && <option value="none">No authentication</option>}</select></label>
             {authUsesSecret && <label className="full">Credential command (optional)<input value={form.credentialCommand} disabled={form.clearCredentialCommand && form.hasCredentialCommand} autoCorrect="off" autoCapitalize="off" spellCheck={false} onChange={(event) => setForm({ ...form, credentialCommand: event.target.value, clearCredentialCommand: false })} placeholder={form.hasCredentialCommand && existing ? `Saved (${form.credentialCommandHint ?? 'command'}) - leave blank to keep it` : 'e.g. a CLI that prints a fresh token'} /><span className="section-hint">Run for each request; its output is used as the key or token. Use this for gateways that mint short-lived tokens. Leave blank to use a static key. The first run of a new command asks for your approval.</span></label>}
             {authUsesSecret && existing && form.hasCredentialCommand && <label className="full llm-clear-secret"><input type="checkbox" checked={form.clearCredentialCommand} onChange={(event) => setForm({ ...form, clearCredentialCommand: event.target.checked, credentialCommand: event.target.checked ? '' : form.credentialCommand })} /> Clear the saved credential command</label>}

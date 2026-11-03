@@ -131,6 +131,8 @@ The connection API requires `explicitFallback=true` before accepting encrypted P
 Public connection responses omit secret values.
 
 The [AI profile store](../packages/core/src/llm/profiles.ts), `DbLlmProfileStore`, stores configuration in columns and secret references separately.
+Core migration 6 adds `llm_profiles.chat_compatibility`, with `auto` as the default for existing profiles.
+Its transaction preserves profile identities, credentials, selected providers, and other user data.
 API keys, custom header values, and credential commands pass through the [secret vault](../packages/core/src/secrets/vault.ts).
 `BrokerSecretVault` delegates to the desktop's native credential broker; `LocalSecretVault` stores encrypted values in `local_secrets`.
 Listing profiles reads references without resolving the secrets.
