@@ -7,7 +7,8 @@ import { createAuthorController, useAuthor } from "./controller";
 import { useConnection } from "../connections/controller";
 import { useRegistry } from "../registry/controller";
 import { useActivity } from "../activity/controller";
-import { catalog, draft, session } from "../testing/fixtures";
+import { pulseApi } from "../api/client";
+import { catalog, draft, inventory, session } from "../testing/fixtures";
 
 // The shell's assets have no behavior in this offline component renderer.
 const assets = NodeModule.registerHooks({
@@ -18,8 +19,6 @@ const assets = NodeModule.registerHooks({
       "/components/LlmSettings.tsx": "LlmBadge",
       "/connections/Connect.tsx": "ConnectCard",
       "/author/DigestSettings.tsx": "DigestSettings",
-      "/author/WorkingStateNotice.tsx": "WorkingStateNotice",
-      "/components/ExistingMetrics.tsx": "ExistingMetrics",
       "/activity/Activity.tsx": "Activity",
       "/components/DatasourcePicker.tsx": "DatasourcePicker",
       "/components/PublishSection.tsx": "PublishSection",
@@ -58,6 +57,10 @@ test("composer typing through the mounted shell does not rerender configuration 
   t.after(() => local.getState().dispose());
   await local.getState().openDraft(record.id);
   const entry = local.getState().entries[record.id];
+  let inventoryReads = 0;
+  const existing = inventory();
+  const definitions = existing.definitions;
+  Object.defineProperty(existing, "definitions", { get() { inventoryReads++; return definitions; }, enumerable: true });
   let editorRenders = 0;
   const fields = { ...entry.catalog! };
   // ConfigEditor reads warnings on every render. Observe that read without replacing
@@ -68,10 +71,13 @@ test("composer typing through the mounted shell does not rerender configuration 
   useAuthor.setState({ activeId: record.id, entries: { [record.id]: { ...entry, catalog: fields } },
     loadDrafts: async () => {}, refreshCatalog: async () => {} });
   useConnection.setState({ session, checked: true, init: async () => {} });
-  useRegistry.setState({ activateContext: async () => {} });
+  useRegistry.setState({ context: record.context, owner: session, inventory: existing, loading: false,
+    followLoading: false, followState: null, busy: null, activateContext: async () => {},
+    ensureLoaded: async () => {}, ensureFollowState: async () => {} });
   useActivity.setState({ load: async () => {} });
   await act(async () => { renderer = create(<PulseApp />); });
   const mountedRenders = editorRenders;
+  const mountedInventoryReads = inventoryReads;
   assert.ok(mountedRenders > 0, "the actual editor mounted and rendered its catalog");
   const measureTable = () => renderer!.root.findByProps({ "data-testid": "measure-list" });
   assert.ok(measureTable());
@@ -81,9 +87,11 @@ test("composer typing through the mounted shell does not rerender configuration 
     act(() => composer.props.onChange({ target: { value } }));
     assert.equal(renderer!.root.findByProps({ "aria-label": "Message metric assistant" }).props.value, value);
     assert.equal(editorRenders, mountedRenders, "typing updates the real composer without rendering its sibling tables");
+    assert.equal(inventoryReads, mountedInventoryReads, "typing does not reprocess retained inventory in the hidden Manager");
   }
   act(() => renderer!.update(<PulseApp />));
   assert.equal(editorRenders, mountedRenders, "an explicit parent render also skips the unchanged editor");
+  assert.equal(inventoryReads, mountedInventoryReads, "an explicit parent render skips the unchanged Manager");
 
   act(() => {
     const current = useAuthor.getState().entries[record.id];
@@ -92,4 +100,80 @@ test("composer typing through the mounted shell does not rerender configuration 
   });
   assert.equal(editorRenders, mountedRenders + 1, "configuration changes still render the memoized editor through its subscription");
   assert.ok(measureTable().findByProps({ value: "Net revenue" }));
+
+  act(() => renderer!.root.findByProps({ "aria-label": "Metric Manager" }).props.onClick());
+  const definitionRows = () => renderer!.root.findAllByProps({ className: "def-head pulse-definition-head" });
+  assert.equal(definitionRows().length, 1);
+  const search = renderer!.root.findByProps({ placeholder: "Search definitions..." });
+  act(() => search.props.onChange({ target: { value: "missing definition" } }));
+  assert.equal(definitionRows().length, 0);
+  act(() => search.props.onChange({ target: { value: "" } }));
+  assert.equal(definitionRows().length, 1);
+  act(() => renderer!.root.findByProps({ "aria-label": "Select displayed metrics in metric" }).props.onChange({ target: { checked: true } }));
+  assert.equal(renderer!.root.findByProps({ "aria-label": "Select displayed metrics in metric" }).props.checked, true);
+  act(() => renderer!.root.findByProps({ "aria-label": "Author" }).props.onClick());
+  act(() => renderer!.root.findByProps({ "aria-label": "Message metric assistant" }).props.onChange({ target: { value: "Another request" } }));
+  act(() => renderer!.root.findByProps({ "aria-label": "Metric Manager" }).props.onClick());
+  assert.equal(renderer!.root.findByProps({ "aria-label": "Select displayed metrics in metric" }).props.checked, true,
+    "visibility changes preserve Manager selection");
+  const newer = inventory("new metric");
+  act(() => useRegistry.setState({ inventory: newer }));
+  assert.ok(renderer!.root.findAll((node) => node.type === "button" && node.children.includes("new metric")).length > 0,
+    "new inventory still reaches the real visible Manager");
 });
+
+for (const area of ["Author", "Metric Manager"]) {
+  test(`failed datasource and draft navigation stays visible in ${area} with a saved draft open`, async (t) => {
+    const originalAuthor = useAuthor.getState(), originalConnection = useConnection.getState();
+    const originalRegistry = useRegistry.getState(), originalActivity = useActivity.getState();
+    const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+    let renderer: ReactTestRenderer | undefined;
+    t.after(() => {
+      act(() => renderer?.unmount());
+      useAuthor.setState(originalAuthor, true); useConnection.setState(originalConnection, true);
+      useRegistry.setState(originalRegistry, true); useActivity.setState(originalActivity, true);
+      if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
+      else Reflect.deleteProperty(globalThis, "window");
+    });
+    const browser = Object.assign(new EventTarget(), { matchMedia: () => Object.assign(new EventTarget(), { matches: false }) });
+    Object.defineProperty(globalThis, "window", { configurable: true, value: browser });
+    const record = draft();
+    const local = createAuthorController({ readDraft: async () => record } as any, async () => ({ catalog: catalog() }), () => session);
+    t.after(() => local.getState().dispose());
+    await local.getState().openDraft(record.id);
+    useAuthor.setState({ activeId: record.id, entries: local.getState().entries, error: null,
+      loadDrafts: async () => {}, refreshCatalog: async () => {} });
+    useConnection.setState({ session, checked: true, init: async () => {} });
+    useRegistry.setState({ activateContext: async () => {}, ensureLoaded: async () => {}, ensureFollowState: async () => {} });
+    useActivity.setState({ load: async () => {} });
+    t.mock.method(pulseApi, "createDraft", async () => { throw new Error("Cannot load selected datasource"); });
+    t.mock.method(pulseApi, "readDraft", async () => { throw new Error("Cannot load selected draft"); });
+    await act(async () => { renderer = create(<PulseApp />); });
+    act(() => renderer!.root.findByProps({ "aria-label": area }).props.onClick());
+    const visibleAlert = (message: string) => renderer!.root.findAll((node) => {
+      if (node.props.role !== "alert" || !node.children.includes(message)) return false;
+      for (let parent = node.parent; parent; parent = parent.parent) if (parent.props.hidden) return false;
+      return true;
+    });
+    await act(async () => { await useAuthor.getState().selectDatasource({ luid: "b", name: "B", projectName: "" }); });
+    assert.equal(useAuthor.getState().activeId, "a");
+    assert.equal(useAuthor.getState().entries.a.saveStatus, "saved");
+    assert.equal(visibleAlert("Cannot load selected datasource").length, 1);
+    await act(async () => { await useAuthor.getState().openDraft("missing"); });
+    assert.equal(visibleAlert("Cannot load selected draft").length, 1);
+    assert.equal(useAuthor.getState().activeId, "a");
+    const current = useAuthor.getState().entries.a;
+    act(() => useAuthor.setState({ entries: { ...useAuthor.getState().entries,
+      a: { ...current, saveStatus: "error", saveError: "Local storage unavailable" } } }));
+    if (area === "Author") {
+      assert.equal(visibleAlert("Cannot load selected draft").length, 1);
+      assert.ok(renderer!.root.findByProps({ className: "pulse-metric-list", "data-testid": "measure-list" }));
+      assert.ok(renderer!.root.findAll((node) => node.type === "button" && node.children.includes("Retry save")).length);
+    }
+    t.mock.method(pulseApi, "createDraft", async () => draft("b"));
+    await act(async () => { await useAuthor.getState().selectDatasource({ luid: "b", name: "B", projectName: "" }); });
+    assert.equal(useAuthor.getState().error, null);
+    assert.equal(useAuthor.getState().activeId, "b");
+    assert.equal(visibleAlert("Cannot load selected draft").length, 0);
+  });
+}

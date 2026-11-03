@@ -77,7 +77,12 @@ export function isTableCalcFormula(formula: string | null | undefined): boolean 
 }
 
 // ── requiresUserAgg detection: an aggregation call OUTSIDE any {} LOD block ──
-const userAggRe = /\b(?:SUM|AVG|MIN|MAX|COUNT|COUNTD|MEDIAN|ATTR|STDEV|STDEVP|VAR|VARP)\s*\(/i;
+const AGGREGATE_FUNCTIONS = new Set([
+  'ATTR', 'AVG', 'COLLECT', 'CORR', 'COUNT', 'COUNTD', 'COVAR', 'COVARP',
+  'MEDIAN', 'PERCENTILE', 'STDEV', 'STDEVP', 'SUM', 'VAR', 'VARP',
+  'RAWSQLAGG_BOOL', 'RAWSQLAGG_DATE', 'RAWSQLAGG_DATETIME',
+  'RAWSQLAGG_INT', 'RAWSQLAGG_REAL', 'RAWSQLAGG_STR',
+]);
 
 function stripCurlyBlocks(formula: string): string {
   let result = '';
@@ -99,7 +104,28 @@ function stripCurlyBlocks(formula: string): string {
 
 export function requiresUserAggFromFormula(formula: string | null | undefined): boolean {
   if (!formula) return false;
-  return userAggRe.test(stripCurlyBlocks(prepareFormulaForScan(formula, false)));
+  const source = stripCurlyBlocks(prepareFormulaForScan(formula, false));
+  const calls: Array<{ name: string; commas: number }> = [];
+  for (let i = 0; i < source.length; i++) {
+    if (source[i] === '(') {
+      let end = i;
+      while (end > 0 && /\s/.test(source[end - 1])) end--;
+      let start = end;
+      while (start > 0 && /[\w]/.test(source[start - 1])) start--;
+      calls.push({ name: source.slice(start, end).toUpperCase(), commas: 0 });
+    } else if (source[i] === ',') {
+      const call = calls.at(-1);
+      if (call) call.commas++;
+    } else if (source[i] === ')') {
+      const call = calls.pop();
+      if (!call) continue;
+      // MIN/MAX compare row values with two arguments and aggregate with one.
+      // Every nested call has its own frame, so its commas do not affect its parent.
+      if (AGGREGATE_FUNCTIONS.has(call.name) ||
+        ((call.name === 'MIN' || call.name === 'MAX') && call.commas === 0)) return true;
+    }
+  }
+  return false;
 }
 
 // Preserve references for dependency scanning; mask them for function scanning.
@@ -117,7 +143,7 @@ function prepareFormulaForScan(formula: string | null | undefined, preserveRefer
       result += preserveReferences ? formula.slice(start, i) : ' '.repeat(i - start);
       continue;
     }
-    if (ch === "'" || ch === '"') {
+    if (ch === "'" || ch === '"' || ch === '#') {
       i++;
       while (i < formula.length) {
         if (formula[i] === '\\') { i = Math.min(i + 2, formula.length); continue; }

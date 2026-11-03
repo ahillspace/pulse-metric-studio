@@ -79,6 +79,41 @@ test('requiresUserAgg ignores aggregations inside an LOD {} block', () => {
   assert.equal(requiresUserAggFromFormula('[Sales] * 2'), false);
 });
 
+for (const [formula, expected] of [
+  ['MIN([Sales], 0)', false],
+  ['MAX([Sales], 0)', false],
+  ['MIN(IFNULL([Sales], 0), MAX([Profit], 10))', false],
+  ['MIN([Sales])', true],
+  ['MAX(MIN([Sales], 0))', true],
+  ['MIN(SUM([Sales]), SUM([Profit]))', true],
+  ['MIN(IF [Label] = "a,b" THEN [Sales] ELSE 0 END, 10)', false],
+  ["MIN(IF [Label] = 'a,b' THEN [Sales] ELSE 0 END)", true],
+  ['MAX([Sales, (adjusted)], 0)', false],
+  ['MIN([Sales] /* , MAX([Profit]) */)', true],
+  ['MAX(#January 1, 2026#)', true],
+  ['MAX(#January 1, 2026#, #February 1, 2026#)', false],
+  ['MIN({ FIXED [Region] : SUM([Sales]) }, 0)', false],
+  ['MIN({ FIXED [Region] : SUM([Sales]) })', true],
+  ['{ FIXED [Region] : CORR([Sales], [Profit]) }', false],
+  ['// PERCENTILE([Sales], 0.9)\n[Sales] * 2', false],
+  ['IF [Label] = "COVAR([Sales], [Profit])" THEN [Sales] END', false],
+  ['[CORR(] + [Sales]', false],
+  ['RAWSQL_REAL("SUM(%1)", [Sales])', false],
+  ['MIN([Sales]', false],
+] as const) {
+  test(`aggregation calls respect arguments and lexical boundaries: ${formula}`, () => {
+    assert.equal(requiresUserAggFromFormula(formula), expected);
+  });
+}
+
+for (const name of ['ATTR', 'AVG', 'COLLECT', 'CORR', 'COUNT', 'COUNTD', 'COVAR', 'COVARP',
+  'MEDIAN', 'PERCENTILE', 'STDEV', 'STDEVP', 'SUM', 'VAR', 'VARP',
+  'RAWSQLAGG_BOOL', 'RAWSQLAGG_DATE', 'RAWSQLAGG_DATETIME', 'RAWSQLAGG_INT', 'RAWSQLAGG_REAL', 'RAWSQLAGG_STR']) {
+  test(`metadata recognizes the ${name} aggregate function`, () => {
+    assert.equal(requiresUserAggFromFormula(`${name}([Sales], [Profit])`), true);
+  });
+}
+
 test('function detection ignores comments, strings, and quoted field identifiers', () => {
   for (const formula of [
     '// WINDOW_SUM([Sales]) and SUM([Sales]) were removed\n[Sales] * 2',

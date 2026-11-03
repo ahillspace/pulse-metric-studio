@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
-import React, { type ReactElement, type ReactNode } from "react";
+import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { act, create } from "react-test-renderer";
 import type { PulseDeletePlan } from "@pulse-metric-studio/shared";
 import { ExistingMetrics } from "../components/ExistingMetrics";
 import { useAuthor, type DraftEditor } from "../author/controller";
 import { useConnection } from "../connections/controller";
 import { createRegistryController, useRegistry } from "./controller";
-import { RegistryResultsModal } from "./views";
 import { unavailableFollowState } from "../follow-state";
 import { draft, inventory, session } from "../testing/fixtures";
 
@@ -73,6 +73,16 @@ function reviewFixture(t: TestContext) {
 
 test("denied cached deletion leaves one usable results dialog without reopening review", async (t) => {
   reviewFixture(t);
+  const browserGlobals = ["window", "document", "HTMLElement"].map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const);
+  Object.defineProperty(globalThis, "document", { configurable: true, value: Object.assign(new EventTarget(), { activeElement: null }) });
+  Object.defineProperty(globalThis, "window", { configurable: true, value: { setTimeout } });
+  Object.defineProperty(globalThis, "HTMLElement", { configurable: true, value: class {} });
+  t.after(() => {
+    for (const [key, descriptor] of browserGlobals) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else Reflect.deleteProperty(globalThis, key);
+    }
+  });
   const cached = useRegistry.getState().inventory!;
   const context = draft().context;
   const calls: string[] = [];
@@ -95,22 +105,16 @@ test("denied cached deletion leaves one usable results dialog without reopening 
   await local.getState().previewDelete(["cached-month"], []);
   assert.deepEqual(calls, ["inventory", "counts", "cached-preview"]);
   await local.getState().executeDelete();
-  let tree: ReactElement | undefined;
-  const render = () => { function Capture() { tree = ExistingMetrics({}); return tree; } return renderToStaticMarkup(<Capture />); };
+  const render = () => renderToStaticMarkup(<ExistingMetrics />);
   const html = render();
   assert.equal((html.match(/role="dialog"/g) ?? []).length, 1);
   assert.doesNotMatch(html, /Review deletion/);
   assert.match(html, /Delete results/); assert.match(html, /This account cannot delete the selected metric/);
   assert.match(html, /<button class="btn primary" type="button">Done<\/button>/);
-  const findResults = (node: ReactNode): ReactElement<any> | undefined => {
-    if (!React.isValidElement(node)) return;
-    const element = node as ReactElement<any>; if (element.type === RegistryResultsModal) return element;
-    for (const child of React.Children.toArray(element.props.children)) { const found = findResults(child); if (found) return found; }
-  };
-  const result = findResults(tree); assert.ok(result);
-  const modal = RegistryResultsModal(result.props) as ReactElement<any>;
-  assert.equal(modal.props.actions.props.children, "Done");
-  modal.props.actions.props.onClick();
+  let view!: ReturnType<typeof create>;
+  act(() => { view = create(<ExistingMetrics visible={false} />); });
+  act(() => view.root.findAll((node) => node.type === "button" && node.children.includes("Done"))[0].props.onClick());
+  act(() => view.unmount());
   assert.doesNotMatch(render(), /role="dialog"|Review deletion|Delete results/);
   assert.deepEqual(calls, ["inventory", "counts", "cached-preview", "DELETE cached-month", "inventory", "counts"], "selected deletion and one final refresh only");
 });
