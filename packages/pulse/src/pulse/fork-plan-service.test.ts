@@ -20,6 +20,7 @@ type PulseForkPlanSummary
 } from './fork-plan-service.js';
 import { registerPulseRoutes } from './routes.js';
 import { PulseDimensionalForkService } from './dimensional-fork-service.js';
+import { getOrCreatePulseMetric, getPulseDefinition, getPulseMetric } from './pulse-client.js';
 
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pulse-fork-plan-'));
 config.dataDir = directory; config.dbPath = path.join(directory, 'test.db');
@@ -240,7 +241,7 @@ test('fork route waits for in-flight work after auth termination and preserves c
     assert.equal(summary.results.length, 8);
     assert.equal(summary.results.find((item) => item.sourceMetricId === 'a')?.metricId, 'fork-a');
     assert.equal(summary.results.find((item) => item.sourceMetricId === 'c')?.metricId, 'fork-c');
-    assert.equal(summary.results.find((item) => item.sourceMetricId === 'b')?.creationStatus, 'unknown');
+    assert.equal(summary.results.find((item) => item.sourceMetricId === 'b')?.creationStatus, 'failed');
     assert.equal(summary.results.find((item) => item.sourceMetricId === 'h')?.creationStatus, 'not_attempted');
   } finally {
     failAuth(); finishInflight(); await response; await app.close(); clearSession();
@@ -469,7 +470,8 @@ test('identical destinations from different sources are created and owned once',
   assert.equal(sends, 1);
   assert.equal(summary.attempted, 2);
   assert.equal(summary.created, 1);
-  assert.equal(summary.existing, 1);
+  assert.equal(summary.existing, 0);
+  assert.equal(summary.results[1]?.sharedWithSourceMetricId, 'source-a');
   assert.deepEqual(summary.results.map((result) => result.sourceMetricId), ['source-a', 'source-b']);
   assert.deepEqual(summary.results.map((result) => result.metricId), ['destination', 'destination']);
 });
@@ -621,4 +623,185 @@ test('fork clause identifiers retain long catalog IDs and reject blank or oversi
   assert.equal(canonicalizeForkPlanRequest(make(id)).clauses[0].fieldId, id);
   assert.throws(() => canonicalizeForkPlanRequest(make('  ')));
   assert.throws(() => canonicalizeForkPlanRequest(make('x'.repeat(1025))));
+});
+
+function forkGate() {
+  let resolve!: () => void;
+  const promise = new Promise<void>(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+test('variant groups wait for transport retries and visibility confirmation before sending the next five destinations', async () => {
+  const ids = Array.from({ length: 12 }, (_, index) => `source-${String(index).padStart(2, '0')}`);
+  const retry = forkGate();
+  const verification = new Map([ids[1]!, ids[5]!].map(id => [id, forkGate()]));
+  const retryStarted = forkGate();
+  const attempts = new Map<string, number>();
+  const originalFetch = globalThis.fetch;
+  const base = dependencies();
+  setSession(session, { connectionId: 'variant-groups', patSecret: '' });
+  globalThis.fetch = async (input, init) => {
+    assert.equal(new URL(String(input)).pathname, '/api/-/pulse/metrics:getOrCreate');
+    assert.equal(init?.method, 'POST');
+    const { definition_id: id } = JSON.parse(String(init.body));
+    const attempt = (attempts.get(id) ?? 0) + 1;
+    attempts.set(id, attempt);
+    if (id === ids[0]) {
+      if (attempt === 1) return new Response('{}', { status: 429, headers: { 'Retry-After': '0' } });
+      retryStarted.resolve();
+      await retry.promise;
+    }
+    return Response.json({ metric: { id: `destination-${id}` }, is_metric_created: true });
+  };
+  const service = new PulseForkPlanService(dependencies({
+    getMetric: async (owner, id) => ({ ...await base.getMetric(owner, id), definition_id: id }),
+    getDefinition: async (owner, id) => ({ ...await base.getDefinition(owner, id), metadata: { id } }),
+    getOrCreate: getOrCreatePulseMetric,
+    reconcile: async (owner, input) => {
+      await verification.get(input.definitionId)?.promise;
+      return base.reconcile(owner, input);
+    },
+  }));
+  const operation = service.forkMetrics(session, { version: 1, sourceMetricIds: ids, timeframe: { key: 'YEAR_TO_DATE' }, clauses: [] });
+  try {
+    await retryStarted.promise;
+    await new Promise<void>(done => setImmediate(done));
+    assert.equal(attempts.get(ids[0]!), 2);
+    assert.deepEqual([...attempts.keys()], ids.slice(0, 5));
+    retry.resolve();
+    await new Promise<void>(done => setImmediate(done));
+    assert.deepEqual([...attempts.keys()], ids.slice(0, 5), 'Visibility confirmation also belongs to the current group.');
+    verification.get(ids[1]!)!.resolve();
+    await new Promise<void>(done => setImmediate(done));
+    assert.deepEqual([...attempts.keys()], ids.slice(0, 10));
+    verification.get(ids[5]!)!.resolve();
+    const summary = await operation;
+    assert.deepEqual([...attempts.keys()], ids);
+    assert.equal(summary.created, ids.length);
+  } finally {
+    retry.resolve();
+    for (const gate of verification.values()) gate.resolve();
+    await operation;
+    globalThis.fetch = originalFetch;
+    clearSession();
+  }
+});
+
+for (const status of [400, 401, 403, 404, 409, 422, 429]) {
+  test(`an explicit HTTP ${status} creation rejection is failed rather than unknown`, async () => {
+    const summary = await new PulseForkPlanService(dependencies({
+      getOrCreate: async () => { throw new TableauError('Rejected.', status, '', status === 401 ? 'auth' : 'http'); },
+    })).forkMetrics(session, { version: 1, sourceMetricIds: ['source-a', 'source-b'], timeframe: { key: 'YEAR_TO_DATE' }, clauses: [] });
+    assert.ok(summary.results.every(result => result.creationStatus === 'failed'));
+    assert.equal(summary.results[1]?.sharedWithSourceMetricId, 'source-a');
+    assert.equal(summary.failed, 1, 'Aliases must not multiply failed destination counts.');
+    assert.equal(forkPlanHttpStatus(summary), 502, 'Aliases must not make complete provider rejection look partially successful.');
+  });
+}
+
+for (const error of [new TableauError('Timeout.', 408), new TableauError('Unavailable.', 503), new TableauError('Lost connection.', 0, '', 'network'), new Error('Unconfirmed.')]) {
+  test(`an ambiguous create outcome stays unknown: ${error.message}`, async () => {
+    const summary = await new PulseForkPlanService(dependencies({ getOrCreate: async () => { throw error; } }))
+      .forkMetrics(session, { version: 1, sourceMetricIds: ['source'], timeframe: { key: 'YEAR_TO_DATE' }, clauses: [] });
+    assert.equal(summary.results[0]?.creationStatus, 'unknown');
+  });
+}
+
+test('a final HTTP 429 retains bounded transport retries and reports one rejected destination with shared sources', async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: unknown[] = [];
+  setSession(session, { connectionId: 'variant-final-throttle', patSecret: '' });
+  globalThis.fetch = async (input, init) => {
+    assert.equal(new URL(String(input)).pathname, '/api/-/pulse/metrics:getOrCreate');
+    assert.equal(init?.method, 'POST');
+    requests.push(JSON.parse(String(init.body)));
+    return new Response('{}', { status: 429, headers: { 'Retry-After': '0' } });
+  };
+  try {
+    const summary = await new PulseForkPlanService(dependencies({ getOrCreate: getOrCreatePulseMetric }))
+      .forkMetrics(session, { version: 1, sourceMetricIds: ['source-a', 'source-b'], timeframe: { key: 'YEAR_TO_DATE' }, clauses: [] });
+    assert.equal(requests.length, 5);
+    assert.equal(new Set(requests.map(request => JSON.stringify(request))).size, 1);
+    assert.ok(summary.results.every(result => result.creationStatus === 'failed'));
+    assert.equal(summary.results[1]?.sharedWithSourceMetricId, 'source-a');
+    assert.equal(summary.failed, 1);
+    assert.equal(forkPlanHttpStatus(summary), 502);
+  } finally { globalThis.fetch = originalFetch; clearSession(); }
+});
+
+test('a get-or-create response without an identifier keeps the destination outcome unknown', async () => {
+  const summary = await new PulseForkPlanService(dependencies({ getOrCreate: async () => ({ metricId: null, created: true }) }))
+    .forkMetrics(session, { version: 1, sourceMetricIds: ['source'], timeframe: { key: 'YEAR_TO_DATE' }, clauses: [] });
+  assert.equal(summary.results[0]?.creationStatus, 'unknown');
+});
+
+for (const created of [true, false]) {
+  test(`visibility throttling retains confirmed ${created ? 'creation' : 'reuse'}`, async () => {
+    const summary = await new PulseForkPlanService(dependencies({
+      getOrCreate: async () => ({ metricId: 'destination', created }),
+      reconcile: async () => { throw new TableauError('Read throttled.', 429); },
+    })).forkMetrics(session, { version: 1, sourceMetricIds: ['source'], timeframe: { key: 'YEAR_TO_DATE' }, clauses: [] });
+    assert.equal(summary.results[0]?.creationStatus, created ? 'created' : 'existing');
+    assert.equal(summary.results[0]?.metricId, 'destination');
+    assert.equal(summary.results[0]?.reconciliationStatus, 'failed');
+  });
+}
+
+test('variant routes deduplicate final destinations while preserving different timeframes and untouched filters', async () => {
+  const originalFetch = globalThis.fetch;
+  const cases = [
+    { definitions: 5, timeframe: true, dimensional: false, splitRegion: false, splitSegment: false, sends: 5 },
+    { definitions: 1, timeframe: true, dimensional: false, splitRegion: true, splitSegment: false, sends: 2 },
+    { definitions: 1, timeframe: false, dimensional: true, splitRegion: true, splitSegment: false, sends: 4 },
+    { definitions: 1, timeframe: true, dimensional: true, splitRegion: true, splitSegment: false, sends: 1 },
+    { definitions: 1, timeframe: true, dimensional: true, splitRegion: true, splitSegment: true, sends: 2 },
+  ];
+  const categorical = (field: string, value: string) => ({ field, operator: 'OPERATOR_EQUAL', include_null: false, categorical_values: [{ string_value: value }] });
+  setSession(session, { connectionId: 'variant-destinations', patSecret: '' });
+  try {
+    for (const scenario of cases) {
+      const sources = new Map<string, any>();
+      for (let definition = 0; definition < scenario.definitions; definition++) {
+        for (let period = 0; period < 4; period++) {
+          const id = `source-${definition}-${period}`;
+          sources.set(id, { id, definition_id: `definition-${definition}`, specification: {
+            filters: [categorical('Region', scenario.splitRegion && period % 2 ? 'East' : 'West'), categorical('Segment', scenario.splitSegment && period % 2 ? 'Consumer' : 'Enterprise')],
+            measurement_period: { granularity: ['GRANULARITY_BY_DAY', 'GRANULARITY_BY_WEEK', 'GRANULARITY_BY_MONTH', 'GRANULARITY_BY_QUARTER'][period], range: 'RANGE_CURRENT_PARTIAL' },
+          } });
+        }
+      }
+      const creates: any[] = [];
+      globalThis.fetch = async (input, init) => {
+        const url = new URL(String(input));
+        assert.equal(url.origin, session.serverUrl);
+        if (init?.method === 'POST') {
+          assert.equal(url.pathname, '/api/-/pulse/metrics:getOrCreate');
+          creates.push(JSON.parse(String(init.body)));
+          return Response.json({ metric: { id: `destination-${creates.length}` }, is_metric_created: true });
+        }
+        const id = url.pathname.split('/').at(-1)!;
+        if (sources.has(id)) return Response.json({ metric: sources.get(id) });
+        assert.ok(id.startsWith('definition-'));
+        return Response.json({ definition: { metadata: { id }, specification: { datasource: { id: catalog.datasourceLuid } }, extension_options: { allowed_dimensions: ['Region', 'Segment'] } } });
+      };
+      const service = new PulseForkPlanService(dependencies({ getMetric: getPulseMetric, getDefinition: getPulseDefinition, getOrCreate: getOrCreatePulseMetric }));
+      const app = Fastify();
+      registerPulseRoutes(app, { forkPlanService: service });
+      try {
+        const response = await app.inject({ method: 'POST', url: '/api/pulse/metrics/fork', payload: {
+          context: { connectionId: 'variant-destinations', serverUrl: session.serverUrl, siteId: session.siteId, datasourceLuid: catalog.datasourceLuid },
+          version: 1, sourceMetricIds: [...sources.keys()],
+          ...(scenario.timeframe ? { timeframe: { key: 'YEAR_TO_DATE' } } : {}),
+          clauses: scenario.dimensional ? [{ fieldId: 'field-region', selection: { mode: 'VALUES', exclude: false, values: ['West'] } }] : [],
+        } });
+        assert.equal(response.statusCode, 200, response.body);
+        const summary = response.json<PulseForkPlanSummary>();
+        assert.equal(creates.length, scenario.sends);
+        assert.equal(summary.created, scenario.sends);
+        assert.equal(summary.existing, 0, 'A shared newly created destination did not already exist.');
+        assert.equal(summary.results.length, sources.size);
+        assert.equal(summary.results.filter(result => result.sharedWithSourceMetricId).length, sources.size - scenario.sends);
+      } finally { await app.close(); }
+    }
+  } finally { globalThis.fetch = originalFetch; clearSession(); }
 });

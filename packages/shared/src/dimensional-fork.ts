@@ -52,7 +52,7 @@ export interface DimensionalForkResult {
   fieldId: string;
   valueFingerprint: string;
   status: 'created' | 'existing' | 'failed';
-  creationStatus?: 'created' | 'existing' | 'unknown' | 'not_attempted';
+  creationStatus?: 'created' | 'existing' | 'failed' | 'unknown' | 'not_attempted';
   createdMetricId?: string;
   createdApiName?: string;
   requestedSpecification?: Record<string, unknown>;

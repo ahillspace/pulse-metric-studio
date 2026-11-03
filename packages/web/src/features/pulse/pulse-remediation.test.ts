@@ -694,6 +694,8 @@ test('fork registry results preserve creation, reconciliation, and requested spe
   assert.equal(item.requestedSpecification, requestedSpecification);
   assert.equal(registryActionLabel('fork', item), 'already exists; visibility pending');
   assert.deepEqual(forkRegistryActionCounts([item]), {
+    shared: 0,
+    creationFailed: 0,
     unknown: 0,
     notAttempted: 0,
     created: 0,
