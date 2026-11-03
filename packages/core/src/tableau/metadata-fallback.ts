@@ -205,7 +205,7 @@ export function canonicalPulseIdentifier(node: GraphqlNode): string {
   const fqn = String(node.fullyQualifiedName || '');
   const name = String(node.name || '');
   if (node.__typename === 'CalculatedField') {
-    const calcMatch = fqn.match(/^\[(Calculation_\d+)\]$/i);
+    const calcMatch = fqn.match(/^(?:\[[^\]]+\]\s*\.\s*)*\[(Calculation_\d+)\]$/i);
     if (calcMatch) return calcMatch[1];
     const single = fqn.match(/^\[([^\]]+)\]$/);
     if (single) return single[1];
@@ -386,7 +386,8 @@ async function fetchGraphqlNodes(
         (node.description != null && typeof node.description !== 'string') ||
         (node.formula != null && typeof node.formula !== 'string') ||
         (node.isHidden != null && typeof node.isHidden !== 'boolean') ||
-        !(node.name?.trim() || node.fullyQualifiedName?.trim()) || seenNodeIds.has(node.id))
+        !(node.name?.trim() || node.fullyQualifiedName?.trim()) || seenNodeIds.has(node.id) ||
+        !canonicalPulseIdentifier(node).trim())
         throw new TableauError('Field metadata response is incomplete.', 502);
       seenNodeIds.add(node.id);
       nodes.push(node as GraphqlNode);

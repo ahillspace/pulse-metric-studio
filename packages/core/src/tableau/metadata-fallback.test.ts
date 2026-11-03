@@ -355,3 +355,45 @@ test('valid future metadata field types retain optional nullable attributes', as
   const result = await fetchFieldsViaMetadataGraphql(session(), 'ds', { luid: 'ds', name: 'DS' });
   assert.equal(result.dimensions[0]?.id, 'Future');
 });
+
+test('metadata fallback retains qualified generated calculation IDs and caches the usable catalog', async () => {
+  const { getFieldCatalog, invalidateFieldsCache } = await import('./vds-fields.js');
+  invalidateFieldsCache(); let calls = 0;
+  globalThis.fetch = async (url) => {
+    if (!String(url).includes('/api/metadata/graphql')) return new Response('{}', { status: 500 });
+    calls++;
+    return Response.json({ data: { publishedDatasources: [{ fieldsConnection: { totalCount: 1, nodes: [
+      { id: 'calc-1', __typename: 'CalculatedField', name: null, fullyQualifiedName: '[Table].[Calculation_42]', role: 'MEASURE', dataType: 'REAL', formula: '[Sales]' },
+    ], pageInfo: { hasNextPage: false, endCursor: null } } }] } });
+  };
+  const owner = session();
+  const first = await getFieldCatalog(owner, 'ds-qualified', 'DS');
+  assert.equal(first.measures[0]?.id, 'Calculation_42');
+  assert.deepEqual(await getFieldCatalog(owner, 'ds-qualified', 'DS'), first);
+  assert.equal(calls, 1);
+  invalidateFieldsCache();
+});
+
+test('unresolvable qualified metadata cannot establish a complete cache entry', async () => {
+  const { getFieldCatalog, invalidateFieldsCache } = await import('./vds-fields.js');
+  invalidateFieldsCache(); let calls = 0;
+  globalThis.fetch = async (url) => {
+    if (!String(url).includes('/api/metadata/graphql')) return new Response('{}', { status: 500 });
+    calls++;
+    return Response.json({ data: { publishedDatasources: [{ fieldsConnection: { totalCount: 1, nodes: [
+      { id: 'node-1', __typename: 'CalculatedField', name: calls === 1 ? null : 'Recovered', fullyQualifiedName: '[Table].[Ambiguous]', role: 'MEASURE', dataType: 'REAL' },
+    ], pageInfo: { hasNextPage: false, endCursor: null } } }] } });
+  };
+  const owner = session();
+  await assert.rejects(getFieldCatalog(owner, 'ds-unknown', 'DS'), /incomplete/i);
+  assert.equal((await getFieldCatalog(owner, 'ds-unknown', 'DS')).measures[0]?.id, 'Recovered');
+  assert.equal(calls, 2);
+  invalidateFieldsCache();
+});
+
+test('qualified generated calculation extraction does not reinterpret literal or malformed identifiers', () => {
+  assert.equal(canonicalPulseIdentifier({ __typename: 'CalculatedField', name: 'Caption', fullyQualifiedName: '[Table].[Calculation_42]' }), 'Calculation_42');
+  assert.equal(canonicalPulseIdentifier({ __typename: 'CalculatedField', name: ' Literal.Name ', fullyQualifiedName: '[Table].[Literal.Name]' }), ' Literal.Name ');
+  assert.equal(canonicalPulseIdentifier({ __typename: 'CalculatedField', name: 'Original', fullyQualifiedName: '[Table].[Calculation_42]suffix' }), 'Original');
+  assert.equal(canonicalPulseIdentifier({ __typename: 'CalculatedField', name: null as any, fullyQualifiedName: '[Table].[Calculation_42]suffix' }), '');
+});
