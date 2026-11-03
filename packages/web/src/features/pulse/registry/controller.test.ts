@@ -1131,3 +1131,13 @@ test("unavailable initial counts do not prevent an explicit row identity read", 
   assert.deepEqual(details, [["metric"]]);
   assert.deepEqual(store.getState().followState?.userFollowerIdsByMetricId?.metric, ["person"]);
 });
+
+
+test("manual refresh passes explicit freshness without changing navigation requests", async () => {
+  const options: unknown[] = [];
+  const store = fixture({ inventory: async (_context, _owner, request) => { options.push(request); return inventory(); } });
+  store.getState().setContext(draft().context);
+  await store.getState().ensureLoaded();
+  await store.getState().refresh();
+  assert.deepEqual(options, [undefined, { refresh: true }]);
+});

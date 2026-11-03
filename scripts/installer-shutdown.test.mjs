@@ -11,8 +11,11 @@ const shellCandidates = process.platform === 'win32'
   ? [path.join(process.env.ProgramFiles ?? '', 'Git', 'bin', 'sh.exe')]
   : ['/bin/sh'];
 const shell = shellCandidates.find((candidate) => fs.existsSync(candidate));
-const powershell = process.platform === 'win32' ? 'powershell.exe' : 'pwsh';
-const hasPowerShell = !spawnSync(powershell, ['-NoProfile', '-Command', 'exit 0']).error;
+const powershell = 'powershell.exe';
+// These fixtures exercise real Windows path resolution and temporary files.
+// PowerShell on another OS cannot supply those filesystem semantics.
+const hasPowerShell = process.platform === 'win32'
+  && !spawnSync(powershell, ['-NoProfile', '-Command', 'exit 0']).error;
 
 const shellHarness = `
 waits=0
@@ -83,6 +86,17 @@ function Stop-Process {
     [CmdletBinding()] param([Parameter(ValueFromPipeline)]$InputObject, [switch]$Force)
     process { Record 'force-stop'; $global:running = $false }
 }
+function Get-ItemProperty {
+    param($LiteralPath, $ErrorAction)
+    if ($env:TEST_FAILURE -eq 'registry') { throw 'private registry detail' }
+    if ($env:TEST_REGISTERED -eq '1' -and $LiteralPath -like 'HKCU:*') { return [pscustomobject]@{ InstallLocation = $env:TEST_CUSTOM_DIR } }
+    return $null
+}
+function New-Item {
+    param($ItemType, $Path, [switch]$Force)
+    if ($env:TEST_FAILURE -eq 'filesystem' -and $Path -like '*pulse-metric-studio-install-*') { throw 'private file detail' }
+    Microsoft.PowerShell.Management\\New-Item -ItemType $ItemType -Path $Path -Force:$Force
+}
 function Invoke-WebRequest {
     param($Uri, $Method, [switch]$UseBasicParsing, $TimeoutSec, $OutFile)
     if ($Method -eq 'Head') {
@@ -94,29 +108,52 @@ function Invoke-WebRequest {
     } else { Set-Content -LiteralPath $OutFile -Value 'fixture' }
 }
 function Start-Process {
-    param($FilePath, $ArgumentList, [switch]$Wait, [switch]$PassThru)
+    param($FilePath, $ArgumentList, [switch]$Wait, [switch]$PassThru, $WindowStyle)
     if ($FilePath -like '*setup.exe' -or $FilePath -like '*uninstall.exe') {
+        if ($WindowStyle -ne 'Hidden') { throw 'Silent installer must use a hidden window.' }
         Record 'replace'
-        if ($env:TEST_ACTION -eq 'Uninstall') { Remove-Item -LiteralPath (Join-Path $env:LOCALAPPDATA 'Pulse Metric Studio/version') }
-        else { Set-Content -LiteralPath (Join-Path $env:LOCALAPPDATA 'Pulse Metric Studio/version') -Value 'new' }
-        if ($PassThru) { [pscustomobject]@{ ExitCode = 0 } }
-    } else { Record 'launch' }
+        if ($env:TEST_FAILURE -eq 'setup') { throw 'private setup detail' }
+        $install = if ($env:TEST_CUSTOM_DIR) { $env:TEST_CUSTOM_DIR } else { Join-Path $env:LOCALAPPDATA 'Pulse Metric Studio' }
+        if ($env:TEST_ACTION -eq 'Uninstall') {
+            if ($ArgumentList[-1] -ne "_?=$install") { throw 'Uninstaller was not bound to the target directory.' }
+            if ($env:TEST_UNINSTALL_RESULT -notin @('failed', 'incomplete')) {
+                Remove-Item -LiteralPath (Join-Path $install 'version')
+                Remove-Item -LiteralPath (Join-Path $install 'pulse-metric-studio.exe')
+                Remove-Item -LiteralPath (Join-Path $install 'uninstall.exe')
+            }
+        } else {
+            if ($ArgumentList[-1] -ne "/D=$install") { throw 'Installer was not bound to the target directory.' }
+            Set-Content -LiteralPath (Join-Path $install 'version') -Value 'new'
+        }
+        if ($PassThru) { [pscustomobject]@{ ExitCode = $(if ($env:TEST_UNINSTALL_RESULT -eq 'failed' -or $env:TEST_FAILURE -eq 'setup-exit') { 2 } else { 0 }) } }
+    } else {
+        Record 'launch'
+        if ($env:TEST_FAILURE -eq 'launch') { throw 'private launch detail' }
+        if ($env:TEST_CUSTOM_DIR -and $FilePath -eq (Join-Path $env:TEST_CUSTOM_DIR 'pulse-metric-studio.exe')) { Record 'launch-custom' }
+    }
 }
 try {
     $options = @{ Action = $env:TEST_ACTION; NoLaunch = $true }
     if ($env:TEST_UPDATE -eq '1') { $options.Update = $true }
-    & $env:TEST_INSTALLER @options
+    if ($env:TEST_CUSTOM_DIR -and $env:TEST_REGISTERED -ne '1') {
+        $options.InstallDir = if ($env:TEST_INVALID_DIR -eq '1') { Join-Path $env:TEST_CUSTOM_DIR 'missing' } else { $env:TEST_CUSTOM_DIR }
+    }
+    if ($env:TEST_INVOCATION -eq 'scriptblock') {
+        & ([scriptblock]::Create((Get-Content -LiteralPath $env:TEST_INSTALLER -Raw))) @options
+    } else {
+        & $env:TEST_INSTALLER @options
+    }
 } catch {
     Write-Output $_.Exception.Message
     exit 23
 }
 `;
 
-function runInstaller(platform, action, close, update = false) {
+function runInstaller(platform, action, close, update = false, custom = false, uninstallResult = '', registered = false, invalidDir = false, failure = '', invocation = 'file') {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'pulse-installer-shutdown-'));
   try {
     const mac = platform === 'macOS';
-    const app = mac ? path.join(temporary, 'apps', 'Pulse Metric Studio.app') : path.join(temporary, 'local', 'Pulse Metric Studio');
+    const app = mac ? path.join(temporary, 'apps', 'Pulse Metric Studio.app') : custom ? path.join(temporary, 'custom', 'Pulse Metric Studio') : path.join(temporary, 'local', 'Pulse Metric Studio');
     const data = mac ? path.join(temporary, 'Library', 'Application Support', 'com.ahillspace.pulsemetricstudio') : path.join(temporary, 'roaming', 'com.ahillspace.pulsemetricstudio');
     fs.mkdirSync(app, { recursive: true });
     fs.mkdirSync(data, { recursive: true });
@@ -136,7 +173,8 @@ function runInstaller(platform, action, close, update = false) {
         HOME: '.', TMPDIR: '.',
         LOCALAPPDATA: path.join(temporary, 'local'), APPDATA: path.join(temporary, 'roaming'),
         TEST_CLOSE: close, TEST_ACTION: action, TEST_UPDATE: update ? '1' : '0',
-        TEST_INSTALLER: path.join(root, 'scripts', mac ? 'install.sh' : 'install.ps1').replaceAll('\\', '/'),
+        TEST_CUSTOM_DIR: custom ? app : '', TEST_UNINSTALL_RESULT: uninstallResult, TEST_REGISTERED: registered ? '1' : '0', TEST_INVALID_DIR: invalidDir ? '1' : '0', TEST_FAILURE: failure,
+        TEST_INSTALLER: path.join(root, 'scripts', mac ? 'install.sh' : 'install.ps1').replaceAll('\\', '/'), TEST_INVOCATION: invocation,
       },
     });
     assert.ifError(result.error);
@@ -145,6 +183,7 @@ function runInstaller(platform, action, close, update = false) {
       status: result.status, output: result.stdout + result.stderr, events,
       version: fs.existsSync(path.join(app, 'version')) ? fs.readFileSync(path.join(app, 'version'), 'utf8').trim() : null,
       channel: fs.existsSync(path.join(data, 'update-channel')),
+      updateError: fs.existsSync(path.join(data, 'update-error')) ? fs.readFileSync(path.join(data, 'update-error'), 'utf8') : null,
       durable: fs.readFileSync(path.join(data, 'durable-state'), 'utf8'),
       staged: fs.readdirSync(path.dirname(app)).filter((name) => name.startsWith('.Pulse Metric Studio.app.')),
     };
@@ -152,6 +191,93 @@ function runInstaller(platform, action, close, update = false) {
     fs.rmSync(temporary, { recursive: true, force: true });
   }
 }
+
+for (const failure of ['setup', 'filesystem', 'launch']) {
+  test(`Windows update recovers from unexpected ${failure} failure`, { skip: !hasPowerShell }, () => {
+    const result = runInstaller('Windows', 'Install', 'closed', true, true, '', false, false, failure);
+    assert.notEqual(result.status, 0, result.output);
+    assert.equal(result.channel, true);
+    assert.match(result.updateError ?? '', /could not complete/i);
+    assert.doesNotMatch(result.updateError ?? '', /private/);
+    assert.ok(result.events.includes('launch'));
+  });
+}
+
+test('Windows update recovers when a normal close request throws', { skip: !hasPowerShell }, () => {
+  const result = runInstaller('Windows', 'Install', 'request-error', true, true);
+  assert.notEqual(result.status, 0, result.output);
+  assert.equal(result.channel, true);
+  assert.match(result.updateError ?? '', /could not complete/i);
+  assert.ok(result.events.includes('launch'));
+  assert.equal(result.events.includes('force-stop'), false);
+});
+
+for (const invocation of ['file', 'scriptblock']) {
+  test(`Windows ${invocation} update preserves the specific failure and runs recovery once`, { skip: !hasPowerShell }, () => {
+    const result = runInstaller('Windows', 'Install', 'closed', true, true, '', false, false, 'setup-exit', invocation);
+    assert.notEqual(result.status, 0, result.output);
+    assert.match(result.output, /exited with code 2/i);
+    assert.match(result.updateError ?? '', /exited with code 2/i);
+    assert.doesNotMatch(result.output, /could not complete the operation/i);
+    assert.equal(result.events.filter((event) => event === 'launch').length, 1);
+    assert.equal(result.channel, true);
+  });
+
+  for (const update of [false, true]) {
+    test(`Windows ${invocation} ${update ? 'update' : 'uninstall'} preserves the close diagnostic`, { skip: !hasPowerShell }, () => {
+      const result = runInstaller('Windows', update ? 'Install' : 'Uninstall', 'keep-open', update, true, '', false, false, '', invocation);
+      assert.notEqual(result.status, 0, result.output);
+      assert.match(result.output, /could not finish closing/i);
+      assert.doesNotMatch(result.output, /could not complete the operation/i);
+      assert.equal(result.events.filter((event) => event === 'launch').length, update ? 1 : 0);
+      if (update) assert.match(result.updateError ?? '', /could not finish closing/i);
+      else assert.equal(result.updateError, null);
+      assert.equal(result.events.includes('replace'), false);
+      assert.equal(result.version, 'old');
+      assert.equal(result.channel, true);
+    });
+  }
+}
+
+test('Windows latest version lookup ignores local installation registry failures', { skip: !hasPowerShell }, () => {
+  const result = runInstaller('Windows', 'LatestVersion', 'closed', false, false, '', false, false, 'registry');
+  assert.equal(result.status, 0, result.output);
+  assert.match(result.output, /1\.2\.3/);
+});
+
+test('Windows uninstall retains channel and reports failure when removal fails', { skip: !hasPowerShell }, () => {
+  for (const failure of ['failed', 'incomplete']) {
+    const result = runInstaller('Windows', 'Uninstall', 'closed', false, false, failure);
+    assert.notEqual(result.status, 0, result.output);
+    assert.equal(result.version, 'old');
+    assert.equal(result.channel, true);
+  }
+});
+
+test('Windows helper resolves an existing registered custom installation', { skip: !hasPowerShell }, () => {
+  const result = runInstaller('Windows', 'Uninstall', 'closed', false, true, '', true);
+  assert.equal(result.status, 0, result.output);
+  assert.equal(result.version, null);
+  assert.equal(result.channel, false);
+});
+
+test('Windows helper rejects an invalid explicit installation directory before removal', { skip: !hasPowerShell }, () => {
+  const result = runInstaller('Windows', 'Uninstall', 'closed', false, true, '', false, true);
+  assert.notEqual(result.status, 0, result.output);
+  assert.equal(result.version, 'old');
+  assert.equal(result.channel, true);
+  assert.equal(result.events.includes('replace'), false);
+});
+
+test('Windows custom installation can uninstall and update from its actual directory', { skip: !hasPowerShell }, () => {
+  const uninstall = runInstaller('Windows', 'Uninstall', 'closed', false, true);
+  assert.equal(uninstall.status, 0, uninstall.output);
+  assert.equal(uninstall.version, null);
+  const update = runInstaller('Windows', 'Install', 'closed', true, true);
+  assert.equal(update.status, 0, update.output);
+  assert.equal(update.version, 'new');
+  assert.ok(update.events.includes('launch-custom'));
+});
 
 for (const platform of ['macOS', 'Windows']) {
   const skip = platform === 'macOS' ? !shell : !hasPowerShell;

@@ -126,8 +126,8 @@ export class PulseDimensionalForkService {
     input: { sourceMetricIds: string[]; fieldId: string },
   ): Promise<DimensionMemberCount> {
     const sourceMetricIds = validateSourceMetricIds(input.sourceMetricIds);
-    const fieldId = String(input.fieldId ?? '').trim();
-    if (!fieldId)
+    const fieldId = String(input.fieldId ?? '');
+    if (!fieldId.trim())
       throw new PulseDimensionalForkError('fieldId is required.', 400);
     const context = await this.resolveContext(session, sourceMetricIds);
     const field = context.fieldsById.get(fieldId);
@@ -164,8 +164,8 @@ export class PulseDimensionalForkService {
     },
   ): Promise<DimensionValuePage> {
     const sourceMetricIds = validateSourceMetricIds(input.sourceMetricIds);
-    const fieldId = String(input.fieldId ?? '').trim();
-    if (!fieldId)
+    const fieldId = String(input.fieldId ?? '');
+    if (!fieldId.trim())
       throw new PulseDimensionalForkError('fieldId is required.', 400);
     const search = String(input.search ?? '').trim();
     if (search.length > DIMENSIONAL_FORK_LIMITS.valueCharacters) {

@@ -3,6 +3,7 @@ import { SAVED_SECRET_PLACEHOLDER } from "@pulse-metric-studio/shared";
 import { useConnection } from "./controller";
 import { useNotices } from "../shell/notifications";
 import { BusyLabel } from "../components/ui";
+import { replaceNativeCredential } from "./credential-replacement";
 import {
   canCompensateStagedCredential,
   deleteNativeCredential,
@@ -36,6 +37,9 @@ export function ConnectCard() {
   const [localError, setLocalError] = useState<string | null>(null);
   const [loadingConnections, setLoadingConnections] = useState(true);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [retirements, setRetirements] = useState<Array<{ ticket: string; connectionId: string }>>([]);
+  const [retirementCheckFailed, setRetirementCheckFailed] = useState(false);
+  const retirementGeneration = useRef(0);
 
   const selected = useMemo(
     () =>
@@ -47,6 +51,15 @@ export function ConnectCard() {
 
   useEffect(() => {
     let cancelled = false;
+    const retirementRequest = ++retirementGeneration.current;
+    void tableauConnectionsApi.listCredentialRetirements().then((pending) => {
+      if (!cancelled && retirementGeneration.current === retirementRequest) { setRetirements(pending); setRetirementCheckFailed(false); }
+    }).catch(() => {
+      if (!cancelled && retirementGeneration.current === retirementRequest) {
+        setRetirementCheckFailed(true);
+        useNotices.getState().show("warning", "Could not check previous credential cleanup. Open Connections to retry.");
+      }
+    });
     void Promise.all([tableauConnectionsApi.list(), getCredentialCapability()])
       .then(([savedConnections, credentialCapability]) => {
         if (cancelled) return;
@@ -102,8 +115,11 @@ export function ConnectCard() {
   async function finishConnection(
     session: TableauSessionInfo,
     connectionId: string,
+    revision: number,
   ): Promise<void> {
-    await useConnection.getState().connected(session, connectionId);
+    if (!await useConnection.getState().adoptCommittedSession(session, connectionId, revision)) {
+      throw new Error("A newer Tableau connection was observed. Check the current connection before continuing.");
+    }
     await reloadConnections(connectionId);
   }
 
@@ -118,10 +134,16 @@ export function ConnectCard() {
 
   async function finishCommittedMutation(
     response: Awaited<ReturnType<typeof tableauConnectionsApi.connect>>,
+    revision: number,
   ): Promise<void> {
     clearPatSecret();
+    if (response.superseded) {
+      await useConnection.getState().reconcileActiveSession(revision);
+      await reloadConnections();
+      throw new Error("A later connection change replaced this result. Check the current connection before continuing.");
+    }
     if (response.session) {
-      await finishConnection(response.session, response.connection.id);
+      await finishConnection(response.session, response.connection.id, revision);
       return;
     }
     await reloadConnections(response.connection.id);
@@ -132,12 +154,13 @@ export function ConnectCard() {
   }
 
   async function runConnectionAction(
-    action: () => Promise<void>,
+    action: (ownerRevision: number) => Promise<void>,
   ): Promise<void> {
     if (!useConnection.getState().startAction()) return;
+    const ownerRevision = useConnection.getState().captureOwnerRevision();
     setLocalError(null);
     try {
-      await action();
+      await action(ownerRevision);
     } catch (actionError) {
       setLocalError(errorMessage(actionError));
     } finally {
@@ -146,7 +169,7 @@ export function ConnectCard() {
   }
 
   async function connectNew(): Promise<void> {
-    await runConnectionAction(async () => {
+    await runConnectionAction(async (ownerRevision) => {
       if (storageKind === "os") {
         if (!capability?.available)
           throw new Error(
@@ -182,7 +205,7 @@ export function ConnectCard() {
           }
           throw connectError;
         }
-        await finishCommittedMutation(response);
+        await finishCommittedMutation(response, ownerRevision);
         return;
       }
 
@@ -199,71 +222,56 @@ export function ConnectCard() {
         storageKind: "encrypted",
         explicitFallback: true,
       });
-      await finishCommittedMutation(response);
+      await finishCommittedMutation(response, ownerRevision);
     });
   }
 
   async function activateSaved(): Promise<void> {
     if (!selected) return;
-    await runConnectionAction(async () => {
+    await runConnectionAction(async (ownerRevision) => {
       const response = await tableauConnectionsApi.activate(selected.id);
-      await finishConnection(response.session, selected.id);
+      await finishConnection(response.session, selected.id, ownerRevision);
     });
   }
 
   async function replaceCredential(): Promise<void> {
     if (!selected) return;
-    await runConnectionAction(async () => {
+    await runConnectionAction(async (ownerRevision) => {
       if (selected.storageKind === "os") {
         if (!capability?.available || !selected.credentialRef) {
           throw new Error(
             capability?.reason ?? "The saved OS credential cannot be replaced.",
           );
         }
-        const oldCredentialRef = selected.credentialRef;
         const secret = readPatSecret();
-        let newCredentialRef: string | null = null;
-        let response: Awaited<
-          ReturnType<typeof tableauConnectionsApi.replaceCredential>
-        >;
-        try {
-          newCredentialRef = await storeNativeCredential({
+        const { ticket, retirement } = await replaceNativeCredential({
+          store: () => storeNativeCredential({
             serverUrl: selected.serverUrl,
             siteContentUrl: selected.siteContentUrl,
             patName,
             patSecret: secret,
-          });
-          response = await tableauConnectionsApi.replaceCredential(
-            selected.id,
-            {
-              storageKind: "os",
-              credentialRef: newCredentialRef,
-              patName,
-            },
-          );
-        } catch (replaceError) {
-          if (newCredentialRef && canCompensateStagedCredential(replaceError)) {
-            try {
-              await deleteNativeCredential(newCredentialRef);
-            } catch {
-              throw new Error(
-                `${errorMessage(replaceError)} The new OS credential could not be cleaned up.`,
-              );
-            }
-          }
-          if (newCredentialRef && !canCompensateStagedCredential(replaceError))
-            clearPatSecret();
-          throw replaceError;
+          }),
+          replace: (credentialRef) => tableauConnectionsApi.replaceCredential(selected.id, { storageKind: "os", credentialRef, patName }),
+          discard: deleteNativeCredential,
+          clearSecret: clearPatSecret,
+          remember: (value, connectionId) => {
+            const request = ++retirementGeneration.current;
+            setRetirements((pending) => [...pending.filter((item) => item.ticket !== value), { ticket: value, connectionId }]);
+            void tableauConnectionsApi.listCredentialRetirements().then((pending) => {
+              if (retirementGeneration.current === request) { setRetirements(pending); setRetirementCheckFailed(false); }
+            }).catch(() => {
+              if (retirementGeneration.current === request) setRetirementCheckFailed(true);
+            });
+          },
+          adopt: (committed) => finishCommittedMutation(committed, ownerRevision),
+          retire: async (value) => (await tableauConnectionsApi.retireCredential(value)).status,
+        });
+        if (ticket && retirement === "removed") {
+          retirementGeneration.current++;
+          setRetirements((pending) => pending.filter((item) => item.ticket !== ticket));
+        } else if (ticket && retirement !== "none") {
+          useNotices.getState().show("warning", "The connection was updated, but the previous OS credential could not be removed. Open Connections to retry cleanup.");
         }
-        clearPatSecret();
-        try {
-          await deleteNativeCredential(oldCredentialRef);
-        } catch {
-          throw new Error(
-            "Credential replaced, but the previous OS credential could not be removed.",
-          );
-        }
-        await finishCommittedMutation(response);
         return;
       }
 
@@ -282,7 +290,26 @@ export function ConnectCard() {
         },
       );
       setFallbackConfirmed(false);
-      await finishCommittedMutation(response);
+      await finishCommittedMutation(response, ownerRevision);
+    });
+  }
+
+  async function retryCredentialCleanup(): Promise<void> {
+    await runConnectionAction(async () => {
+      const pendingTickets = retirementCheckFailed ? await tableauConnectionsApi.listCredentialRetirements() : retirements;
+      if (retirementCheckFailed) { retirementGeneration.current++; setRetirements(pendingTickets); setRetirementCheckFailed(false); }
+      let remaining = 0;
+      for (const item of pendingTickets) {
+        try {
+          const result = await tableauConnectionsApi.retireCredential(item.ticket);
+          if (result.status === "removed") {
+            retirementGeneration.current++;
+            setRetirements((pending) => pending.filter((entry) => entry.ticket !== item.ticket));
+          } else remaining++;
+        } catch { remaining++; }
+      }
+      if (remaining) throw new Error("Some previous OS credentials could not be removed. Retry cleanup later.");
+      useNotices.getState().show("success", "Previous OS credential cleanup completed.");
     });
   }
 
@@ -456,6 +483,11 @@ export function ConnectCard() {
               {error}
             </div>
           )}
+
+          {(retirementCheckFailed || retirements.length > 0) && <div className="connect-hint full" role="status">
+            {retirementCheckFailed ? "Previous credential cleanup could not be checked." : "A previous OS credential still needs cleanup."}
+            <button type="button" className="btn small" disabled={connecting} onClick={() => void retryCredentialCleanup()}>Retry credential cleanup</button>
+          </div>}
 
           {!selected && (
             <button

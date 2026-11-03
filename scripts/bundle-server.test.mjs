@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { bundleServer, copySqliteRuntime } from './bundle-server.mjs';
 import { copyNodeRuntime } from './copy-resources.mjs';
-import { verifyPackagedSqlite } from './node-runtime.mjs';
+import { inspectNodeTarget, verifyPackagedSqlite } from './node-runtime.mjs';
 import { linkNativeStageDependencies } from './native-stage-dependencies.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -37,7 +37,20 @@ function files(directory) {
     .sort();
 }
 
-test('SQLite resources include only runtime JavaScript, license, manifest, and resolver addons', (t) => {
+test('SQLite target comes from the supplied bundled runtime, including cross-platform targets', () => {
+  for (const target of [{ platform: 'win32', arch: 'x64', glibc: null }, { platform: 'darwin', arch: 'arm64', glibc: null }, { platform: 'linux', arch: 'x64', glibc: false }]) {
+    const result = inspectNodeTarget('fixture-node', (executable, args) => {
+      assert.equal(executable, 'fixture-node');
+      assert.equal(args[0], '--use-system-ca');
+      return { status: 0, stdout: JSON.stringify(target) };
+    });
+    assert.deepEqual(result, { platform: target.platform === 'linux' ? 'linuxmusl' : target.platform, arch: target.arch });
+  }
+  assert.throws(() => inspectNodeTarget('bad', () => ({ status: 0, stdout: '{"platform":"win32","arch":"ia32"}' })), /unsupported/);
+  assert.throws(() => inspectNodeTarget('bad', () => ({ status: 1, stdout: '' })), /Cannot inspect/);
+});
+
+test('SQLite resources prefer only the bundled runtime target prebuild', (t) => {
   const directory = temporary(t);
   const source = path.join(directory, 'source');
   const destination = path.join(directory, 'packaged');
@@ -56,16 +69,28 @@ test('SQLite resources include only runtime JavaScript, license, manifest, and r
   }
   write(destination, 'build/Release/stale.recipe');
 
-  copySqliteRuntime(source, destination);
+  copySqliteRuntime(source, destination, { platform: 'win32', arch: 'x64' });
 
-  assert.deepEqual(files(destination), runtime.sort());
+  const shared = runtime.filter(filename => !filename.startsWith('prebuilds/') && !filename.startsWith('build/'));
+  assert.deepEqual(files(destination), [...shared, 'prebuilds/win32-x64.node'].sort());
+  copySqliteRuntime(source, destination, { platform: 'darwin', arch: 'arm64' });
+  assert.deepEqual(files(destination), [...shared, 'prebuilds/darwin-arm64.node'].sort());
+});
+
+test('SQLite falls back to one compiled addon only when the target prebuild is absent', (t) => {
+  const directory = temporary(t);
+  const source = path.join(directory, 'source');
+  const destination = path.join(directory, 'packaged');
+  for (const filename of ['package.json', 'LICENSE', 'lib/index.js', 'build/Debug/better_sqlite3.node', 'build/Release/better_sqlite3.node', 'prebuilds/darwin-arm64.node']) write(source, filename);
+  copySqliteRuntime(source, destination, { platform: 'win32', arch: 'x64' });
+  assert.deepEqual(files(destination), ['LICENSE', 'build/Release/better_sqlite3.node', 'lib/index.js', 'package.json']);
 });
 
 test('SQLite resource composition rejects a package without a native addon', (t) => {
   const directory = temporary(t);
   const source = path.join(directory, 'source');
   for (const filename of ['package.json', 'LICENSE', 'lib/index.js']) write(source, filename);
-  assert.throws(() => copySqliteRuntime(source, path.join(directory, 'packaged')), /Missing better-sqlite3 native addon/);
+  assert.throws(() => copySqliteRuntime(source, path.join(directory, 'packaged'), { platform: 'win32', arch: 'x64' }), /Missing better-sqlite3 native addon/);
 });
 
 test('native-stage bundles preserve logical dependency paths without exposing the source checkout', (t) => {

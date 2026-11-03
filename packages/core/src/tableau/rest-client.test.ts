@@ -33,7 +33,7 @@ async function fixture() {
       signins++;
       if (holdSignin) { signinResponse = res; heldSignins.push({ response: res, token: `token-${signins}` }); }
       else res.end(JSON.stringify({ credentials: { token: `token-${signins}`, site: { id: 'site' }, user: { id: 'user' } } }));
-    } else if (path.endsWith('/users/current')) {
+    } else if (path.endsWith('/users/user')) {
       res.statusCode = req.headers['x-tableau-auth'] === `token-${signins}` ? 200 : 401;
       res.end('{}');
     }
@@ -112,7 +112,7 @@ test('status preserves a current session on temporary provider failures', async 
       assert.equal(sessions.getSession(), failure === 401 ? null : owner);
       if (failure !== 401) {
         assert.equal(response.reachable, false);
-        assert.match(response.availabilityError, /temporarily unavailable/);
+        assert.match(response.availabilityError, failure === 'timeout' ? /timed out/ : failure === 'network' ? /could not reach/ : new RegExp(`HTTP ${failure}`));
       }
     } finally { sessions.clearSession(); await app.close(); }
   }
@@ -393,4 +393,54 @@ test('disconnect validates its expected owner before changing the session', asyn
       assert.equal(sessions.getSession(), f.session);
     }
   } finally { await f.close(); }
+});
+
+
+test('late status rejection cannot invalidate a token refreshed by an ordinary request', async () => {
+  const f = await fixture();
+  let release!: (response: Response) => void;
+  let statusToken = '';
+  const app = Fastify();
+  await app.register(sensible);
+  registerTableauRoutes(app, { fetchImpl: async (_input, init) => {
+    statusToken = new Headers(init?.headers).get('X-Tableau-Auth') ?? '';
+    if (statusToken !== 'old') return Response.json({ user: { id: 'user', siteRole: 'Creator' } });
+    return new Promise<Response>((resolve) => { release = resolve; });
+  } });
+  try {
+    const status = app.inject('/api/tableau/status').then(response => response.json());
+    await until(() => !!release);
+    const request = tableauFetch(f.session, '/api/3.27/test');
+    await until(() => f.pending.length === 1);
+    reject(f.pending.shift()!);
+    assert.equal((await request).status, 200);
+    assert.equal(f.session.token, 'token-1');
+    release(new Response('{}', { status: 401 }));
+    const result = await status;
+    assert.equal(result.connected, true);
+    assert.equal(result.reachable, true);
+    assert.equal(statusToken, 'token-1');
+    assert.equal(sessions.getSession(), f.session);
+  } finally { await app.close(); await f.close(); }
+});
+
+test('queued request times out before a held capacity slot is released', async () => {
+  const owner = { serverUrl: 'https://gate.example.test', siteContentUrl: '', siteId: 'site', userId: 'user', token: 'token', apiVersion: '3.27' };
+  const original = globalThis.fetch;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let calls = 0;
+  globalThis.fetch = async () => { calls++; await held; return Response.json({}); };
+  const active = Array.from({ length: 8 }, () => tableauFetch(owner, '/api/3.27/hold', { timeoutMs: 3000 }));
+  try {
+    await until(() => calls === 8);
+    const ninth = tableauFetch(owner, '/api/3.27/wait', { timeoutMs: 30 }).then(() => 'resolved', () => 'timed out');
+    const next = tableauFetch(owner, '/api/3.27/next', { timeoutMs: 2000 });
+    const outcome = await Promise.race([ninth, new Promise<string>((resolve) => setTimeout(() => resolve('still waiting'), 300))]);
+    assert.equal(outcome, 'timed out');
+    assert.equal(calls, 8);
+    release();
+    assert.equal((await next).status, 200);
+    assert.equal(calls, 9);
+  } finally { release(); await Promise.all(active); globalThis.fetch = original; }
 });

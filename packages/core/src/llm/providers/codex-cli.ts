@@ -6,7 +6,7 @@ import type { StoredLlmProfile } from '../profiles.js';
 import type { CompleteOptions, CompleteResult, LlmProvider, LlmProviderHealth } from '../types.js';
 import { LLM_REQUEST_TIMEOUT_MS, LlmProviderError, timeoutDescription } from '../types.js';
 import { collectProcessOutput, OWN_PROCESS_GROUP, ProcessOutputError } from './process-tree.js';
-import { buildLocalAgentEnv, localAgentCwd, resolveLaunchCommand } from './local-agent-runtime.js';
+import { buildLocalAgentEnv, localAgentCwd, resolveLaunchWithinDeadline } from './local-agent-runtime.js';
 
 export interface CodexRuntime {
   resolve(command: string): Promise<{ file: string } | null>;
@@ -28,9 +28,17 @@ export class CodexCliProvider implements LlmProvider {
     if (setup.configured && !this.profile.model.trim()) return this.health(true, false, 'not_configured', 'Enter a model ID available to the configured Codex CLI.');
     return setup;
   }
+  async getSelectionHealth(signal?: AbortSignal): Promise<LlmProviderHealth> {
+    const setup = await this.setupHealth(signal, false);
+    if (setup.configured && !this.profile.model.trim()) return this.health(true, false, 'not_configured', 'Enter a model ID available to the configured Codex CLI.');
+    return setup;
+  }
   async getSetupHealth(signal?: AbortSignal): Promise<LlmProviderHealth> {
+    return this.setupHealth(signal, true);
+  }
+  private async setupHealth(signal: AbortSignal | undefined, checkCapabilities: boolean): Promise<LlmProviderHealth> {
     try {
-      await this.withContext(15_000, signal, async context => { await this.check(context); });
+      await this.withContext(15_000, signal, async context => { if (checkCapabilities) await this.check(context); });
       return this.health(true, true, 'not_tested', 'The Codex launch command is available. Test the connection to verify model access.');
     } catch (error) {
       if (!(error instanceof LlmProviderError)) throw error;
@@ -86,8 +94,12 @@ export class CodexCliProvider implements LlmProvider {
     signal?.throwIfAborted();
     const deadline = Date.now() + timeoutMs;
     let launch: { file: string; args: string[] } | null;
-    try { launch = await resolveLaunchCommand(this.profile.command || 'codex', command => this.runtime.resolve(command)); }
-    catch { throw this.error('provider_not_configured', 'Enter a valid Codex launch command with an executable and optional arguments.'); }
+    try { launch = await resolveLaunchWithinDeadline(this.profile.command || 'codex', command => this.runtime.resolve(command), deadline - Date.now(), signal); }
+    catch (error) {
+      if (signal?.aborted) signal.throwIfAborted();
+      if (error instanceof Error && error.name === 'TimeoutError') throw this.error('provider_timeout', `Codex did not respond within ${timeoutDescription(timeoutMs)}.`, true);
+      throw this.error('provider_not_configured', 'Enter a valid Codex launch command with an executable and optional arguments.');
+    }
     signal?.throwIfAborted();
     if (!launch) throw this.error('provider_not_installed', 'The Codex launch executable is not installed or cannot run directly. Use an explicit interpreter for script wrappers.');
     return work({ bin: launch.file, args: launch.args, cwd: localAgentCwd(), env: buildCodexChildEnv(this.runtime.env ?? process.env), deadline, timeoutMs, signal });

@@ -22,6 +22,11 @@ function machineKey(): Buffer {
   return cachedKey;
 }
 
+/** A keyed, domain-separated identity for retry comparison without retaining a secret. */
+export function credentialOperationFingerprint(plaintext: string): string {
+  return crypto.createHmac('sha256', machineKey()).update('tableau-credential-operation-v1\0').update(plaintext).digest('hex');
+}
+
 export function encryptSecret(plaintext: string): string {
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', machineKey(), iv);

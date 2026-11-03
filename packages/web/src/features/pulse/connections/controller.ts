@@ -28,6 +28,9 @@ interface ConnectionState {
   expireSession: (owner?: SessionOwner | null) => void;
   startAction: () => boolean;
   finishAction: () => void;
+  captureOwnerRevision: () => number;
+  adoptCommittedSession: (session: TableauSessionInfo, connectionId: string, revision: number) => Promise<boolean>;
+  reconcileActiveSession: (revision: number) => Promise<boolean>;
 }
 
 export function createConnectionController(
@@ -36,7 +39,9 @@ export function createConnectionController(
   let generation = 0;
   let sourceRequest = 0;
   let accessRequest = 0;
-  return create<ConnectionState>((set, get) => ({
+  let ownerRevision = 0;
+  let authenticationExpiry: { before: number; after: number } | null = null;
+  const store = create<ConnectionState>((set, get) => ({
     session: null,
     checked: false,
     reachable: true,
@@ -53,6 +58,7 @@ export function createConnectionController(
       try {
         const status = await transport.status();
         if (request !== generation) return;
+        authenticationExpiry = null;
         set({
           checked: true,
           session: status.connected ? (status.session ?? null) : null,
@@ -66,6 +72,8 @@ export function createConnectionController(
       }
     },
     async connected(session, connectionId) {
+      ownerRevision++;
+      authenticationExpiry = null;
       generation += 1;
       accessRequest++;
       sourceRequest += 1;
@@ -81,6 +89,10 @@ export function createConnectionController(
       await get().loadDatasources();
     },
     async disconnect() {
+      if (get().connecting) return;
+      // Explicit disconnect intent also fences recovery when old authentication already expired.
+      ownerRevision++;
+      authenticationExpiry = null;
       const owner = get().session;
       if (!owner || !get().startAction()) return;
       const request = generation;
@@ -155,6 +167,7 @@ export function createConnectionController(
     },
     expireSession(owner = get().session) {
       if (!owner || sessionOwnerKey(owner) !== sessionOwnerKey(get().session)) return;
+      const before = ownerRevision;
       generation += 1;
       accessRequest++;
       sourceRequest += 1;
@@ -166,6 +179,7 @@ export function createConnectionController(
         error:
           "Your Tableau session ended. Reconnect to continue Tableau actions. Local drafts and history are still available.",
       });
+      authenticationExpiry = { before, after: ownerRevision };
     },
     startAction() {
       if (get().connecting) return false;
@@ -173,7 +187,42 @@ export function createConnectionController(
       return true;
     },
     finishAction: () => set({ connecting: false }),
+    captureOwnerRevision: () => ownerRevision,
+    async adoptCommittedSession(session, connectionId, revision) {
+      if (revision !== ownerRevision) {
+        if (!authenticationExpiry || authenticationExpiry.before !== revision || authenticationExpiry.after !== ownerRevision) return false;
+        if (!await get().reconcileActiveSession(revision)) return false;
+        return sessionOwnerKey(get().session) === sessionOwnerKey({ ...session, connectionId });
+      }
+      await get().connected(session, connectionId);
+      return true;
+    },
+    async reconcileActiveSession(revision) {
+      const expired = authenticationExpiry;
+      if (revision !== ownerRevision && (!expired || expired.before !== revision || expired.after !== ownerRevision)) return false;
+      const observedRevision = ownerRevision;
+      const request = generation;
+      // Reconciliation observes the active backend session; it must never reactivate a saved profile.
+      const status = await transport.status({ restore: false });
+      if (request !== generation || observedRevision !== ownerRevision) return false;
+      authenticationExpiry = null;
+      generation++;
+      accessRequest++;
+      sourceRequest++;
+      const active = status.connected ? status.session ?? null : null;
+      set({ checked: true, session: active, reachable: status.reachable !== false,
+        error: status.availabilityError ?? (active ? null : get().error),
+        datasources: [], loadingDatasources: false, accessChecking: false });
+      if (active && get().reachable) await get().loadDatasources();
+      return active !== null;
+    },
   }));
+  let observedOwner = sessionOwnerKey(store.getState().session);
+  store.subscribe((state) => {
+    const next = sessionOwnerKey(state.session);
+    if (next !== observedOwner) { observedOwner = next; ownerRevision++; }
+  });
+  return store;
 }
 export const useConnection = createConnectionController();
 useConnection.subscribe((state) => setSessionOwner(state.session));

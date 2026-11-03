@@ -83,7 +83,7 @@ export function PublishSection({
           />
         )}
       </div>
-      {preview && (
+      {preview && visible && (
         <Modal
           title="Review publication"
           onClose={

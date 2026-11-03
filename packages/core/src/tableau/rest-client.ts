@@ -19,7 +19,7 @@ export interface TableauSession {
   token: string;
   /** REST API version discovered from /api/-/serverInfo at connect time. */
   apiVersion: string;
-  /** Current user's display name from `/users/current` (fullName ?? name); best-effort. */
+  /** Current user's display name from their user-ID profile (fullName ?? name); best-effort. */
   userName?: string;
   /** Verified site role from the authenticated user's own profile, when available. */
   siteRole?: string;
@@ -53,20 +53,10 @@ export function tableauProviderErrorInfo(error: TableauError, secrets: readonly 
   return { ...parsed, ...(safeTableauProviderCode(error.providerCode, secrets) ? { providerCode: safeTableauProviderCode(error.providerCode, secrets) } : {}) };
 }
 
-function extractJsonErrorCode(text: string): string | null {
-  try {
-    const parsed = JSON.parse(text) as { error?: { code?: string | number }; code?: string | number };
-    const c = parsed?.error?.code ?? parsed?.code;
-    return c != null ? String(c) : null;
-  } catch {
-    return null;
-  }
-}
-
-export function classifyStatus(status: number, bodyText: string): TableauError['kind'] {
+export function classifyStatus(status: number, bodyText: unknown): TableauError['kind'] {
   if (status === 401) return 'auth';
   if (status === 403) {
-    const code = extractJsonErrorCode(bodyText);
+    const code = parseTableauProviderError(bodyText).providerCode;
     if (code && AUTH_REJECTED_CODES.has(code)) return 'auth';
     return 'http';
   }
@@ -228,8 +218,19 @@ class RequestGate {
   private resumeAt = 0;
 
   async run<T>(task: () => Promise<T>, deadline: number): Promise<T> {
-    while (this.active >= MAX_CONCURRENT_TABLEAU_REQUESTS) await new Promise<void>((resolve) => this.waiting.push(resolve));
-    this.active++;
+    if (this.active >= MAX_CONCURRENT_TABLEAU_REQUESTS) {
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          const index = this.waiting.indexOf(wake);
+          if (index >= 0) this.waiting.splice(index, 1);
+          reject(new TableauError('Tableau request timed out while waiting for capacity.', 0, '', 'network'));
+        }, Math.max(0, deadline - Date.now()));
+        const wake = () => { clearTimeout(timeout); resolve(); };
+        this.waiting.push(wake);
+      });
+    } else {
+      this.active++;
+    }
     try {
       for (let wait = this.resumeAt - Date.now(); wait > 0; wait = this.resumeAt - Date.now()) {
         if (this.resumeAt >= deadline) throw new TableauError('Tableau is temporarily unavailable until its rate limit permits another request.', 429);
@@ -239,7 +240,8 @@ class RequestGate {
       return await task();
     } finally {
       this.active--;
-      this.waiting.shift()?.();
+      const next = this.waiting.shift();
+      if (next) { this.active++; next(); }
     }
   }
 
@@ -323,7 +325,7 @@ export async function getJson<T>(session: TableauSession, path: string, accept?:
       `GET ${path} failed (${resp.status})${validationDetail(resp)}`,
       resp.status,
       snippet,
-      classifyStatus(resp.status, snippet),
+      classifyStatus(resp.status, body),
       safeTableauProviderCode(resp.headers.get('validation_code'), [session.token]) ?? info.providerCode,
       info,
     );
@@ -355,7 +357,7 @@ export async function postJson<T>(
       `${opts.method ?? 'POST'} ${path} failed (${resp.status})${validationDetail(resp)}`,
       resp.status,
       snippet,
-      classifyStatus(resp.status, snippet),
+      classifyStatus(resp.status, respBody),
       safeTableauProviderCode(resp.headers.get('validation_code'), [session.token]) ?? info.providerCode,
       info,
     );

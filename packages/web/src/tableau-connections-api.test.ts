@@ -272,6 +272,33 @@ test('treats a rejected mutation as committed when reconciliation finds the cred
   assert.deepEqual(requests, ['/api/tableau/connect', '/api/tableau/connections/reconcile']);
 });
 
+test('retains a retirement ticket when a committed replacement is reconciled', async () => {
+  const api = createTableauConnectionsApi(async (input) => {
+    if (String(input) === '/api/tableau/connections/reconcile') return jsonResponse({
+      status: 'committed', superseded: true, retirement: { ticket: 'retirement-ticket' },
+      connection: { id: 'connection-1', label: 'Saved', serverUrl: 'https://example.test', siteContentUrl: '', patName: 'fixture', storageKind: 'os', credentialRef: 'new-ref' },
+    });
+    return jsonResponse({ message: 'Response lost.' }, 500);
+  }, () => OPERATION_ID);
+  const response = await api.replaceCredential('connection-1', { storageKind: 'os', credentialRef: 'new-ref' });
+  assert.deepEqual(response.retirement, { ticket: 'retirement-ticket' });
+  assert.equal(response.superseded, true);
+});
+
+test('pending credential cleanup survives reload and can be retried by ticket', async () => {
+  const requests: string[] = [];
+  const api = createTableauConnectionsApi(async (input, init) => {
+    requests.push(`${init?.method ?? 'GET'} ${String(input)}`);
+    if (String(input) === '/api/tableau/credential-retirements')
+      return jsonResponse({ retirements: [{ ticket: 'pending-ticket', connectionId: 'connection-1' }] });
+    return jsonResponse({ status: 'removed' });
+  });
+  const pending = await api.listCredentialRetirements();
+  assert.deepEqual(pending, [{ ticket: 'pending-ticket', connectionId: 'connection-1' }]);
+  assert.deepEqual(await api.retireCredential(pending[0].ticket), { status: 'removed' });
+  assert.deepEqual(requests, ['GET /api/tableau/credential-retirements', 'POST /api/tableau/credential-retirements/pending-ticket']);
+});
+
 test('retains the staged credential when reconciliation also loses its response', async () => {
   let attempts = 0;
   const api = createTableauConnectionsApi(async () => {

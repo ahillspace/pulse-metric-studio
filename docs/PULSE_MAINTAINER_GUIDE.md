@@ -141,9 +141,24 @@ The connection UI uses native credential commands to store or replace a secret a
 Browser development offers an explicitly selected encrypted local fallback.
 [`registerTableauRoutes`](../packages/core/src/tableau/routes.ts) resolves the chosen credential and verifies sign-in before committing connection changes.
 Credential mutations have operation identities so the frontend can reconcile a lost response before compensating a newly stored secret.
+Credential replacement records a durable retirement ticket with the new connection credential.
+The renderer adopts committed session state before requesting cleanup.
+Cleanup failures remain visible and retryable after restart.
+A backend critical section prevents retired references from being adopted during deletion.
+Retirement records contain references and outcomes, never secret values.
+Durable replacement outcomes preserve operation identity independently of the current credential.
+Replaying a superseded replacement cannot restore its historical credential or session.
+The renderer fences committed responses against newer observed owners while retaining their cleanup tickets.
+An old-owner authentication expiry permits a status check that reconciles the active backend session without activating saved credentials.
+A newer observed activation or deliberate disconnect cancels that reconciliation.
 Activation and disconnection use connection identity and session generation to protect a newer activation from an older request.
 Requests capture their authenticated owner before dispatch; late authentication errors and terminated receipts cannot expire a replacement session.
-Authentication and reachability are separate: temporary network, throttling, or server failures retain the session and report unavailability.
+Connection checks query the authenticated user's profile using the captured user ID.
+They also capture the request token before updating authentication or access facts.
+A changed token permits one fresh check; an obsolete rejection cannot clear the refreshed session.
+Profile permission denials and missing profiles do not block datasource loading; group creation remains unverified.
+Network, throttling, and server failures retain authentication and report the specific connection-check failure rather than claiming a Tableau outage.
+Status diagnostics report HTTP and provider codes or timeout and network categories without logging tokens or connection coordinates.
 First-party registry and dimension requests carry their captured expected owner for backend admission before provider work.
 A changed principal, activation generation, connection, server, or site returns a context error instead of running the queued request as another owner.
 Requests without that optional expectation retain the existing compatibility behavior.
@@ -157,8 +172,15 @@ See [`tableau-connections-api.ts`](../packages/web/src/tableau-connections-api.t
 
 Field discovery prefers VDS metadata and uses the Metadata API fallback where supported by the response.
 Raw provider field IDs remain the catalog identity used by authoring and serialization.
+Field identifiers retain exact values through prompts, validation, persistence, publication, and dimensional forks.
+JSON escaping protects prompt delimiters without rewriting field identities.
+Unknown proposal references produce explicit warnings instead of silently disappearing.
 Caches are partitioned by connection context; a failed or partial provider read cannot establish that Tableau contains no matching content.
 Catalog cache hits preserve the original VDS or Metadata API source; internal timestamps determine freshness separately.
+Primary Metadata API discovery requires a complete field connection, consistent counts, and progressing pagination.
+GraphQL errors and incomplete primary responses fail discovery and do not enter the complete-catalog cache.
+Caption enrichment remains optional.
+Only dependencies outside LOD expressions propagate outer aggregation requirements; references inside LOD expressions still participate in exclusion checks.
 Successful Metadata fallback retains bounded diagnostics for the unsuccessful VDS attempts.
 Ordinary fallback remains usable; an explicit dimensional fork reports the VDS cause when it requires VDS metadata.
 Datasource API access and group administration are separate capabilities.
@@ -169,6 +191,7 @@ Variant execution still refreshes and validates its captured source, catalog, an
 Read and mutation retries have different safety rules; an ambiguous write is not a confirmed rejection.
 Version negotiation makes forward progress and changes the session version only after a successful response.
 A provider's `Retry-After` minimum is respected; a deadline that cannot accommodate it returns an unavailable result without an early retry.
+Queued requests observe their original deadline and never dispatch after expiration.
 See [`getFieldCatalog`](../packages/core/src/tableau/vds-fields.ts) and [`metadata-fallback.ts`](../packages/core/src/tableau/metadata-fallback.ts).
 The [audit findings](ARCHITECTURE_AUDIT.md#findings-and-recommendations) identify response paths that bypass the common body-size limit and pagination limits that need further qualification.
 
@@ -187,6 +210,10 @@ The [audit findings](ARCHITECTURE_AUDIT.md#findings-and-recommendations) identif
 8. The backend records each confirmed remote ID before optional group and subscription work.
 9. Author displays a result dialog with creation counts, diagnostics, and actions.
    Activity retains the complete receipt while disconnected.
+
+Author mounts publication review only while visible and retains hidden previews in controller state.
+The dimension editor mounts rows on expansion and pages them independently from measures.
+Composer-only edits do not replace the selected table inputs.
 
 Publication verifies the initial metric's month-to-date timeframe through Tableau reads before resolving it for follow subscriptions.
 An unexpected timeframe retains the confirmed definition and records a resolution diagnostic.
@@ -262,6 +289,9 @@ Metric pagination retains useful records and marks incomplete, failed, repeated,
 Complete list records supply validated ownership and specifications without redundant exact metric reads; incomplete records use the exact-read fallback.
 Initial loads and navigation share the current inventory and follower request.
 The Manager's **Refresh metrics** button starts replacement inventory immediately, even while earlier follower data remains pending, and discards late results from the earlier request.
+Explicit refresh also bypasses the backend definition cache and replaces its contents.
+Concurrent fresh requests share their read; superseded cache fills cannot replace newer evidence.
+Normal navigation retains its cache and pending-request sharing.
 Bounded caches and pending reads include connection, principal, session generation, and datasource ownership.
 Returning to a datasource in the same session joins its pending read; another session cannot reuse its snapshots or follower state.
 Relationship reads share pending work per owned metric, including overlapping expanded selections.
@@ -392,6 +422,9 @@ No external renderer-compromise path was demonstrated in the [audit reassessment
 Only an explicit connection test or authoring request submits a prompt.
 Model catalogs are optional provider capabilities.
 Codex and Claude Code accept explicit model identifiers; OpenCode discovers its configured catalog.
+Provider selection checks local launcher and model configuration without duplicating the capability subprocess.
+Each completion resolves current launch settings and owns its capability preflight.
+Explicit setup and health checks still inspect capabilities.
 Opening an existing provider editor can discover models using its original saved launch definition.
 Editing a launch command only invalidates its catalog; new or edited definitions require explicit **Reload models**, and stale results cannot validate the changed definition.
 Native API-key, OAuth, account, and configured cloud-provider authentication remain available through the CLI.
@@ -490,6 +523,9 @@ Activity records publication history.
 Share only the minimum receipt and log excerpt needed for diagnosis.
 Datasource names, field names, and user instructions can be sensitive even when they contain no credentials.
 Assistant requests disclose a size-limited prompt containing datasource field metadata, the current metric and slicer configuration, audience settings, conversation and prior proposal context, and new authoring instructions to the configured model provider.
+Saved conversation remains complete.
+Outgoing authoring requests include at most 64 KiB of prior conversation and proposal context, favoring recent entries.
+An omission marker identifies dropped context; current configuration and the new request remain unchanged.
 The app does not add Tableau row data or stored Tableau credentials to the authoring prompt.
 Local agents can retrieve additional data through their tools and include it in model requests.
 The authoring prompt treats pasted or retrieved content as supporting data and keeps the supplied catalog authoritative for proposed field references.
@@ -505,6 +541,9 @@ Artifacts are copied to `native-artifacts/` by default.
 Build evidence captures the Git revision, dirty state, and normalized source-content identity before copying, then verifies that identity after copying.
 The native stage rebuilds workspace outputs from its captured sources and resolves workspace imports inside that stage.
 Shared external dependencies do not link workspace imports back to compiled outputs in the original checkout.
+Resource composition inspects the bundled Node runtime's platform, architecture, and Linux C library when selecting SQLite binaries.
+A matching prebuild takes precedence over local build artifacts.
+The packaged runtime must still pass the SQLite round trip.
 Sanitized public release evidence carries relative artifact hashes without local paths or arbitrary private diagnostics.
 Release staging requires matching source evidence and rejects conflicts before promoting a complete output directory.
 The native host serves bundled assets and forwards permitted API requests through a restricted native command.

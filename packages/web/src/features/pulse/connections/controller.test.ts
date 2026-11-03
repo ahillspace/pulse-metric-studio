@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createConnectionController } from "./controller";
 import { deferred, session } from "../testing/fixtures";
+import { replaceNativeCredential } from "./credential-replacement";
 
 test("an old datasource lookup cannot replace a new connection", async () => {
   const first = deferred<{
@@ -358,4 +359,174 @@ test("a retired datasource completion cannot clear a subsequent load indicator",
   await initializing;
   assert.equal(store.getState().loadingDatasources, false);
   assert.equal(store.getState().datasources[0]?.luid, "new");
+});
+
+test("late committed replacement cannot overwrite a newer observed owner", async () => {
+  const held = deferred<any>();
+  const replacementStarted = deferred<void>();
+  let currentSession = session;
+  const store = createConnectionController({ status: async () => ({ connected: true, session: currentSession }), disconnect: async () => ({ ok: true }), datasources: async () => ({ datasources: [] }) });
+  await store.getState().connected(session, session.connectionId);
+  const revision = store.getState().captureOwnerRevision();
+  const result = replaceNativeCredential({ store: async () => "staged", replace: () => { replacementStarted.resolve(); return held.promise; }, discard: async () => { throw new Error("must retain committed secret"); }, clearSecret: () => {}, remember: () => {},
+    adopt: async (response) => { if (!await store.getState().adoptCommittedSession(response.session!, response.connection.id, revision)) throw new Error("newer owner observed"); },
+    retire: async () => "removed" });
+  await replacementStarted.promise;
+  currentSession = { ...session, userId: "new-owner", sessionGeneration: 2 };
+  await store.getState().init();
+  held.resolve({ ok: true, connection: { id: session.connectionId }, session: { ...session, userId: "old-owner", sessionGeneration: 3 }, retirement: { ticket: "ticket" } });
+  await assert.rejects(result, /newer owner observed/);
+  assert.equal(store.getState().session?.userId, "new-owner");
+});
+
+test("metadata-only refresh preserves admission of a legitimate committed session", async () => {
+  const store = createConnectionController({ status: async () => ({ connected: true, session: { ...session, siteRole: "Creator" } }), disconnect: async () => ({ ok: true }), datasources: async () => ({ datasources: [] }) });
+  await store.getState().connected(session, session.connectionId);
+  const revision = store.getState().captureOwnerRevision();
+  await store.getState().refreshAccess();
+  assert.equal(await store.getState().adoptCommittedSession({ ...session, sessionGeneration: 2 }, session.connectionId, revision), true);
+  assert.equal(store.getState().session?.sessionGeneration, 2);
+});
+
+test("owner revision rejects an old response even if the same owner is later observed again", async () => {
+  const store = createConnectionController({ status: async () => ({ connected: true, session }), disconnect: async () => ({ ok: true }), datasources: async () => ({ datasources: [] }) });
+  await store.getState().connected(session, session.connectionId);
+  const revision = store.getState().captureOwnerRevision();
+  store.getState().expireSession();
+  await store.getState().connected(session, session.connectionId);
+  assert.equal(await store.getState().adoptCommittedSession({ ...session, sessionGeneration: 2 }, session.connectionId, revision), false);
+  assert.equal(store.getState().session?.sessionGeneration, session.sessionGeneration);
+});
+
+test("startup loads datasources when profile access is unknown but Tableau is reachable", async () => {
+  let sourceCalls = 0;
+  const unknown = { state: "unknown" as const, reasonCode: "profile_unavailable", message: "Group creation permission is not verified." };
+  const store = createConnectionController({
+    status: async () => ({ connected: true, reachable: true, session: { ...session, groupCreation: unknown } }),
+    disconnect: async () => ({ ok: true }),
+    datasources: async () => { sourceCalls++; return { datasources: [{ luid: "one", name: "One", projectName: "Project" }] }; },
+  });
+  await store.getState().init();
+  assert.equal(sourceCalls, 1);
+  assert.equal(store.getState().session?.userId, session.userId);
+  assert.deepEqual(store.getState().session?.groupCreation, unknown);
+  assert.equal(store.getState().reachable, true);
+  assert.equal(store.getState().error, null);
+  assert.equal(store.getState().datasources[0]?.luid, "one");
+  assert.equal(store.getState().loadingDatasources, false);
+});
+
+test("a committed replacement recovers after an old-owner authentication expiry before its response arrives", async () => {
+  const response = deferred<any>();
+  const replacing = deferred<void>();
+  const replacement = { ...session, sessionGeneration: 3 };
+  const statusOptions: unknown[] = [];
+  let retired = false;
+  let discarded = false;
+  const store = createConnectionController({
+    status: async (options) => { statusOptions.push(options); return { connected: true, session: replacement }; },
+    disconnect: async () => ({ ok: true }),
+    datasources: async () => ({ datasources: [] }),
+  });
+  await store.getState().connected(session, session.connectionId);
+  assert.equal(store.getState().startAction(), true);
+  const revision = store.getState().captureOwnerRevision();
+  const pending = replaceNativeCredential({
+    store: async () => "new-reference",
+    replace: () => { replacing.resolve(); return response.promise; },
+    discard: async () => { discarded = true; }, clearSecret: () => {}, remember: () => {},
+    adopt: async (committed) => {
+      if (!await store.getState().adoptCommittedSession(committed.session!, committed.connection.id, revision)) throw Error("newer owner observed");
+    },
+    retire: async () => { retired = true; assert.equal(store.getState().session?.sessionGeneration, 3); return "removed"; },
+  }).finally(() => store.getState().finishAction());
+  await replacing.promise;
+  assert.equal(store.getState().connecting, true);
+  store.getState().expireSession(session);
+  assert.equal(store.getState().session, null);
+  response.resolve({ ok: true, connection: { id: session.connectionId }, session: replacement, retirement: { ticket: "ticket" } });
+  assert.deepEqual(await pending, { ticket: "ticket", retirement: "removed" });
+  assert.deepEqual(statusOptions, [{ restore: false }]);
+  assert.equal(store.getState().session?.sessionGeneration, 3);
+  assert.equal(store.getState().error, null);
+  assert.equal(store.getState().connecting, false);
+  assert.equal(retired, true);
+  assert.equal(discarded, false);
+});
+
+for (const newer of ["activation", "disconnect", "disconnected status"] as const) {
+  test(`expired replacement reconciliation preserves a newer ${newer}`, async () => {
+    const status = deferred<any>();
+    const checking = deferred<void>();
+    const replacement = { ...session, sessionGeneration: 3 };
+    const store = createConnectionController({
+      status: async (options) => { assert.deepEqual(options, { restore: false }); checking.resolve(); return status.promise; },
+      disconnect: async () => ({ ok: true }), datasources: async () => ({ datasources: [] }),
+    });
+    await store.getState().connected(session, session.connectionId);
+    const revision = store.getState().captureOwnerRevision();
+    store.getState().expireSession(session);
+    const adoption = store.getState().adoptCommittedSession(replacement, replacement.connectionId, revision);
+    await checking.promise;
+    if (newer === "activation") await store.getState().connected({ ...session, userId: "new-owner", sessionGeneration: 4 }, "new-connection");
+    else if (newer === "disconnect") await store.getState().disconnect();
+    status.resolve(newer === "disconnected status" ? { connected: false } : { connected: true, session: replacement });
+    assert.equal(await adoption, false);
+    if (newer === "activation") assert.equal(store.getState().session?.userId, "new-owner");
+    else assert.equal(store.getState().session, null);
+  });
+}
+
+test("disconnect intent before a late committed response prevents reconciliation entirely", async () => {
+  let statusRequests = 0;
+  const store = createConnectionController({
+    status: async () => { statusRequests++; return { connected: true, session: { ...session, sessionGeneration: 3 } }; },
+    disconnect: async () => ({ ok: true }), datasources: async () => ({ datasources: [] }),
+  });
+  await store.getState().connected(session, session.connectionId);
+  const revision = store.getState().captureOwnerRevision();
+  store.getState().expireSession(session);
+  await store.getState().disconnect();
+  assert.equal(await store.getState().adoptCommittedSession({ ...session, sessionGeneration: 3 }, session.connectionId, revision), false);
+  assert.equal(await store.getState().reconcileActiveSession(revision), false, "superseded responses use the same disconnect fence");
+  assert.equal(store.getState().session, null);
+  assert.equal(statusRequests, 0);
+});
+
+test("expired replacement reconciliation observes a newer backend owner without adopting its stale response", async () => {
+  const replacement = { ...session, sessionGeneration: 3 };
+  const newer = { ...session, connectionId: "other-connection", userId: "other-user", sessionGeneration: 4 };
+  const store = createConnectionController({
+    status: async () => ({ connected: true, session: newer }),
+    disconnect: async () => ({ ok: true }), datasources: async () => ({ datasources: [] }),
+  });
+  await store.getState().connected(session, session.connectionId);
+  const revision = store.getState().captureOwnerRevision();
+  store.getState().expireSession(session);
+  assert.equal(await store.getState().adoptCommittedSession(replacement, replacement.connectionId, revision), false);
+  assert.equal(store.getState().session?.userId, newer.userId);
+  assert.equal(store.getState().session?.sessionGeneration, 4);
+});
+
+test("a failed non-restoring reconciliation retains the cleanup ticket without retiring credentials", async () => {
+  let ticket: string | undefined;
+  let retired = false;
+  const store = createConnectionController({
+    status: async () => { throw Error("Status temporarily unavailable"); },
+    disconnect: async () => ({ ok: true }), datasources: async () => ({ datasources: [] }),
+  });
+  await store.getState().connected(session, session.connectionId);
+  const revision = store.getState().captureOwnerRevision();
+  store.getState().expireSession(session);
+  await assert.rejects(() => replaceNativeCredential({
+    store: async () => "new-reference",
+    replace: async () => ({ ok: true, connection: { id: session.connectionId }, session: { ...session, sessionGeneration: 3 }, retirement: { ticket: "ticket" } }) as any,
+    discard: async () => { throw Error("must retain committed credential"); },
+    clearSecret: () => {}, remember: (value) => { ticket = value; },
+    adopt: async (response) => { await store.getState().adoptCommittedSession(response.session!, response.connection.id, revision); },
+    retire: async () => { retired = true; return "removed"; },
+  }), /Status temporarily unavailable/);
+  assert.equal(ticket, "ticket");
+  assert.equal(retired, false);
+  assert.equal(store.getState().session, null);
 });

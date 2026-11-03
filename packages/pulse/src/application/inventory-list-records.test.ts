@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, test } from 'node:test';
+import Fastify from 'fastify';
+import sensible from '@fastify/sensible';
+import { registerPulseRoutes } from '../pulse/routes.js';
 import { clearSession, setSession, type TableauSession } from '@pulse-metric-studio/core';
-import { clearInventoryCache, getExistingMetrics } from './inventory.js';
+import { cachedDefinitionInventory, clearInventoryCache, getExistingMetrics } from './inventory.js';
+import type { InventoryDependencies } from './registry-dependencies.js';
 import { getFollowState } from './subscriptions.js';
 import { loadPulseInventory } from './inventory-snapshots.js';
 import { PulseDeletionService } from './deletion.js';
@@ -96,4 +100,68 @@ test('20 definitions and 200 complete metrics need 22 initial count-summary requ
   assert.equal(ids.length, 200);
   await getFollowState(session, session.userId, [], ids, { detail: false });
   assert.deepEqual(counts, { definitions: 1, lists: 20, exact: 0, identities: 0, membership: 0, counts: 1 });
+});
+
+
+test('explicit inventory refresh bypasses cached definitions and creates a new snapshot', async () => {
+  let calls = 0;
+  let ids = ['first'];
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith('/definitions')) {
+      calls++;
+      return Response.json({ definitions: ids.map(id => ({ metadata: { id, name: id }, specification: { datasource: { id: 'datasource' } } })) });
+    }
+    if (url.pathname.endsWith('/metrics')) return Response.json({ metrics: [] });
+    throw new Error('Unexpected provider request');
+  };
+  const first = await loadPulseInventory(session, 'datasource');
+  ids = ['first', 'second'];
+  const fresh = await loadPulseInventory(session, 'datasource', { refresh: true });
+  assert.equal(calls, 2);
+  assert.equal(first.definitions.length, 1);
+  assert.equal(fresh.definitions.length, 2);
+  assert.notEqual(first.snapshotId, fresh.snapshotId);
+});
+
+
+test('fresh definition read supersedes older pending work and is shared without stale cache overwrite', async () => {
+  let releaseOld!: (value: { definitions: never[]; truncated: boolean }) => void;
+  let calls = 0;
+  const dependencies = { listDefinitions: async () => {
+    calls++;
+    if (calls === 1) return new Promise<{ definitions: never[]; truncated: boolean }>((resolve) => { releaseOld = resolve; });
+    return { definitions: [{ metadata: { id: 'fresh' } }], truncated: false };
+  } } as unknown as InventoryDependencies;
+  const old = cachedDefinitionInventory(session, dependencies);
+  const fresh = await cachedDefinitionInventory(session, dependencies, { refresh: true });
+  releaseOld({ definitions: [], truncated: false });
+  await old;
+  const cached = await cachedDefinitionInventory(session, dependencies);
+  assert.equal(calls, 2);
+  assert.equal(fresh.definitions[0]?.metadata?.id, 'fresh');
+  assert.equal(cached.definitions[0]?.metadata?.id, 'fresh');
+});
+
+
+test('inventory route propagates manual refresh while ordinary reads reuse definitions', async () => {
+  let calls = 0;
+  let ids = ['first'];
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith('/definitions')) { calls++; return Response.json({ definitions: ids.map(id => ({ metadata: { id, name: id }, specification: { datasource: { id: 'datasource' } } })) }); }
+    if (url.pathname.endsWith('/metrics')) return Response.json({ metrics: [] });
+    throw new Error('Unexpected provider request');
+  };
+  const app = Fastify();
+  await app.register(sensible);
+  registerPulseRoutes(app);
+  try {
+    const read = async (suffix = '') => (await app.inject(`/api/pulse/existing-metrics?datasourceLuid=datasource${suffix}`)).json();
+    assert.equal((await read()).definitions.length, 1);
+    ids = ['first', 'second'];
+    assert.equal((await read()).definitions.length, 1);
+    assert.equal((await read('&refresh=true')).definitions.length, 2);
+    assert.equal(calls, 2);
+  } finally { await app.close(); }
 });

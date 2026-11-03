@@ -49,7 +49,8 @@ interface RegistryState {
     owner?: SessionOwner | null,
   ) => void;
   activateContext: (context: PulseDraftContext | null, datasourceName?: string, owner?: SessionOwner | null) => Promise<void>;
-  load: () => Promise<void>;
+  load: (options?: { refresh?: boolean }) => Promise<void>;
+  refresh: () => Promise<void>;
   ensureLoaded: () => Promise<void>;
   invalidate: (context?: PulseDraftContext | null, owner?: SessionOwner | null) => Promise<void>;
   fork: (
@@ -299,7 +300,15 @@ export function createRegistryController(
         detailScopes.delete(cacheKey);
         if (cacheKey === activeKey()) await get().load();
       },
-      async load() {
+      async refresh() {
+        const scope = capture();
+        if (!scope.context) return;
+        cache.delete(scope.key);
+        pending.delete(scope.key);
+        detailScopes.delete(scope.key);
+        await get().load({ refresh: true });
+      },
+      async load(options) {
         const scope = capture();
         if (!scope.context) return;
         const request = ++inventoryRequest;
@@ -314,7 +323,7 @@ export function createRegistryController(
           operation = { identity: { detailScope }, promise: undefined!, details: new Map(), detailScope };
           const read = operation;
           read.promise = (async (): Promise<CachedInventory> => {
-            const inventory = await transport.inventory(scope.context!, scope.owner);
+            const inventory = await transport.inventory(scope.context!, scope.owner, options);
             const result = (followState: FollowState | null): CachedInventory => ({ inventory, followState, loadedAt: Date.now(), operation: read.identity });
             if (sessionOwnerKey(scope.owner) !== sessionOwnerKey(get().owner)) return result(null);
             read.inventory = inventory;

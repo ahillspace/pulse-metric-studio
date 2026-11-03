@@ -505,7 +505,7 @@ export function canonicalizeForkPlanRequest(
   for (const [index, candidate] of input.clauses.entries()) {
     if (!isRecord(candidate))
       throw invalidRequest(`clauses[${index}] must be an object.`);
-    const fieldId = identifier(candidate.fieldId, `clauses[${index}].fieldId`);
+    const fieldId = opaqueFieldIdentifier(candidate.fieldId, `clauses[${index}].fieldId`);
     if (
       !isRecord(candidate.selection) ||
       candidate.selection.mode !== 'VALUES'
@@ -765,6 +765,12 @@ function identifier(value: unknown, label: string): string {
     throw invalidRequest(`${label} must contain between 1 and 256 characters.`);
   }
   return normalized;
+}
+
+function opaqueFieldIdentifier(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !value.trim() || value.length > 1024)
+    throw invalidRequest(`${label} must be a non-blank field identifier of at most 1024 characters.`);
+  return value;
 }
 
 function clauseExclude(value: unknown, label: string): boolean {

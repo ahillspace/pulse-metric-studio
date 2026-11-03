@@ -359,8 +359,8 @@ function classifyField(
   nameCounts: Map<string, number>,
   provenance: FieldProvenance,
 ): Classified | null {
-  const name = raw.name?.trim();
-  if (!name) return null;
+  const name = raw.name;
+  if (!name || !name.trim()) return null;
 
   const formula = raw.formula ?? null;
 

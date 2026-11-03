@@ -2,6 +2,16 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { api, extractErrorMessage } from './client.js';
 
+test('reconciliation requests non-restoring status while normal initialization still restores', async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; });
+  const paths: unknown[] = [];
+  globalThis.fetch = async (url) => { paths.push(url); return Response.json({ connected: false }); };
+  await api.status({ restore: false });
+  await api.status();
+  assert.deepEqual(paths, ['/api/tableau/status?restore=false', '/api/tableau/status']);
+});
+
 test('disconnect binds its request to the captured backend session', async (t) => {
   const original = globalThis.fetch;
   t.after(() => { globalThis.fetch = original; });

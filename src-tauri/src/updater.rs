@@ -269,6 +269,14 @@ fn installer_command(channel: &Channel, action: InstallerAction) -> Command {
         .arg("-Repo")
         .arg(&channel.repository)
         .creation_flags(CREATE_NO_WINDOW);
+    if matches!(action, InstallerAction::Update) {
+        // Pass the running copy's location instead of assuming the default NSIS directory.
+        let install_dir = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(Path::to_path_buf))
+            .unwrap_or_default();
+        command.arg("-InstallDir").arg(install_dir);
+    }
     command
 }
 
@@ -353,6 +361,26 @@ pub fn pulse_update_apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_update_targets_the_running_executable_directory() {
+        let channel = Channel {
+            repository: "example/repository".into(),
+            installer: PathBuf::from("installer.ps1"),
+            data_dir: PathBuf::new(),
+            log_path: PathBuf::new(),
+        };
+        let command = installer_command(&channel, InstallerAction::Update);
+        let args: Vec<_> = command.get_args().collect();
+        let index = args.iter().position(|arg| *arg == "-InstallDir").unwrap();
+        assert_eq!(
+            Path::new(args[index + 1]),
+            std::env::current_exe().unwrap().parent().unwrap()
+        );
+        let check = installer_command(&channel, InstallerAction::LatestVersion);
+        assert!(!check.get_args().any(|arg| arg == "-InstallDir"));
+    }
 
     #[test]
     fn versions_compare_numerically() {

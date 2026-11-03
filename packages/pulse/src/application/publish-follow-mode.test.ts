@@ -120,7 +120,7 @@ test('a delayed older allowed status cannot replace a newer denial and admit gro
   const oldReadStarted = new Promise<void>((resolve) => { started = resolve; });
   const status = Fastify();
   registerTableauRoutes(status, { fetchImpl: async (input) => {
-    assert.ok(String(input).endsWith('/users/current'));
+    assert.ok(String(input).endsWith(`/users/${encodeURIComponent(owner.userId)}`));
     reads++;
     if (reads === 2) { started(); return new Promise<Response>((resolve) => { release = resolve; }); }
     return Response.json({ user: { id: owner.userId, siteRole: reads === 1 ? 'SiteAdministratorCreator' : 'Creator' } });

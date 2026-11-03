@@ -587,3 +587,38 @@ test('draft and proposal routes preserve prototype-named fields through validate
     assert.equal(rejected.json().code, 'FST_ERR_CTP_INVALID_JSON_BODY');
   } finally { clearSession(); await app.close(); }
 });
+
+test('dimension routes and fork plan preserve opaque field ID while using provider field name', async () => {
+  const id = ' field | Region ';
+  const queries: string[] = [];
+  const sent: any[] = [];
+  const fixtureCatalog = { ...catalog, dimensions: [field(id, 'Region')] };
+  const base = dependencies({
+    getCatalog: async () => fixtureCatalog,
+    queryValues: async (_owner, input) => { queries.push(input.fieldName); return [['West']]; },
+    getOrCreate: async (_owner, input) => { sent.push(input); return { metricId: 'fork', created: true }; },
+  });
+  const app = Fastify();
+  registerPulseRoutes(app, { dimensionalForkService: new PulseDimensionalForkService({ ...base, queryCount: async (_owner, input) => { queries.push(input.fieldName); return 1; } }) });
+  setSession(session, { connectionId: 'fixture', patSecret: 'fixture' });
+  try {
+    for (const url of ['/api/pulse/dimensions/count', '/api/pulse/dimensions/values']) {
+      const response = await app.inject({ method: 'POST', url, payload: { sourceMetricIds: ['metric'], fieldId: id } });
+      assert.equal(response.statusCode, 200, response.body);
+      assert.equal(response.json().fieldId, id);
+    }
+    const request = { version: 1 as const, sourceMetricIds: ['metric'], clauses: [{ fieldId: id, selection: { mode: 'VALUES' as const, values: ['West'] } }] };
+    assert.equal(canonicalizeForkPlanRequest(request).clauses[0].fieldId, id);
+    await new PulseForkPlanService(base).forkMetrics(session, request);
+    assert.ok(sent.length > 0);
+    assert.ok(queries.every((name) => name === 'Region'));
+  } finally { clearSession(); await app.close(); }
+});
+
+test('fork clause identifiers retain long catalog IDs and reject blank or oversized IDs', () => {
+  const id = ` [Region].${'x'.repeat(600)} `;
+  const make = (fieldId: string) => ({ version: 1, sourceMetricIds: ['metric'], clauses: [{ fieldId, selection: { mode: 'VALUES', values: ['West'] } }] });
+  assert.equal(canonicalizeForkPlanRequest(make(id)).clauses[0].fieldId, id);
+  assert.throws(() => canonicalizeForkPlanRequest(make('  ')));
+  assert.throws(() => canonicalizeForkPlanRequest(make('x'.repeat(1025))));
+});

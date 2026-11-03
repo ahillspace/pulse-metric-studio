@@ -62,7 +62,7 @@ export async function composeResources(rootDir = root) {
   const runtime = copyNodeRuntime(resourcesDir);
   console.log(`copied Node runtime -> ${path.relative(rootDir, runtime)}`);
 
-  await bundleServer(rootDir);
+  await bundleServer(rootDir, resourcesDir, runtime);
   verifyPackagedSqlite(runtime, path.join(resourcesDir, 'server', 'dist'));
   console.log('resources composed for Pulse Metric Studio');
 }

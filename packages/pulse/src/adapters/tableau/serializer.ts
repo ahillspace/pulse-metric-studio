@@ -90,83 +90,22 @@ const INSIGHTS_SETTINGS = [
 
 // -- canonical identifiers ----------------------------------------------------
 
-/** Strip a single layer of outer brackets: "[foo]" -> "foo". */
-function stripOuterBrackets(s: string): string {
-  const m = String(s || '').trim().match(/^\[([^\]]+)\]$/);
-  return m ? m[1] : String(s || '').trim();
+/** Resolve only a catalog-proven legacy display qualifier to its provider name. */
+function catalogFieldReference(field: CatalogField): string {
+  const qualifier = field.table ?? 'calc';
+  return field.name && field.id === `${field.name} (${qualifier})` ? field.name : field.id;
 }
 
-/**
- * Calculated fields: "[Calculation_123]" -> "Calculation_123".
- * Legacy behavior preserved verbatim.
- */
-function normalizeCalculatedFieldIdentifier(fullyQualifiedName: string, fallbackName: string): string {
-  const fqn = String(fullyQualifiedName || '').trim();
-  const match = fqn.match(/^\[(Calculation_\d+)\]$/i);
-  return match ? match[1] : fallbackName;
-}
-
-/**
- * The set of parentheticals Tableau (or our own catalog dedup) may append to a
- * field name purely to disambiguate duplicate names across logical tables:
- * every logical-table caption in the datasource, plus the `calc` fallback our
- * label builder uses for datasource-level calcs. Compared case-insensitively.
- *
- * This is the deterministic signal that separates an auto-added uniquifier
- * ("cogs (genres.csv)" when a table is captioned "genres.csv") from a
- * parenthetical the user made part of the real field name ("Deal Cycle Length
- * (Days)", "Quota Remaining ($)"). Only an exact table-caption match is stripped.
- */
-export function tableQualifierSet(catalog: Pick<DatasourceCatalog, 'measures' | 'dimensions' | 'timeDimensions'>): Set<string> {
-  const qualifiers = new Set<string>();
-  for (const bucket of [catalog.measures, catalog.dimensions, catalog.timeDimensions]) {
-    for (const candidate of bucket) {
-      const table = candidate.table?.trim();
-      if (table) qualifiers.add(table.toLocaleLowerCase());
-    }
-  }
-  qualifiers.add('calc');
-  return qualifiers;
-}
-
-/**
- * Canonical identifier Pulse accepts for a catalog field. Our VDS catalog has
- * no GraphQL FQNs, so we operate on the ids it gives us:
- *   - bracketed FQNs are reduced one layer ("[cogs]" -> "cogs")
- *   - a trailing table-caption uniquifier ("cogs (genres.csv)") is stripped back
- *     to the bare column name ONLY when the parenthetical exactly matches a known
- *     logical-table caption — pods know columns by their plain names. A user
- *     parenthetical that is not a table caption ("(Days)", "($)") is preserved.
- *   - Calculation_NN stays bracket-stripped
- */
-function canonicalCatalogIdentifier(field: Pick<CatalogField, 'id'>, tableQualifiers: ReadonlySet<string>): string {
-  let id = String(field?.id ?? '').trim();
-  id = stripOuterBrackets(id);
-  const uniquified = id.match(/^(.*\S)\s+\(([^()]+)\)$/);
-  if (uniquified && tableQualifiers.has(uniquified[2].trim().toLocaleLowerCase())) {
-    id = uniquified[1].trim();
-  }
-  return id.length > 0 ? id : String(field?.id ?? '').trim();
-}
-
-/**
- * The reference Pulse's metric-query-service accepts for a field.
- *
- * Both calculated and physical fields emit their RAW canonical id: calc fields
- * emit their internal `Calculation_NNN` id and physical columns emit their raw
- * field name. MQS resolves calc references by id/name, NOT by caption — emitting
- * a caption instead makes publish fail with validation 404904.
- */
-function pulseFieldReference(rawId: string, tableQualifiers: ReadonlySet<string>): string {
-  return canonicalCatalogIdentifier({ id: rawId }, tableQualifiers);
+function pulseFieldReference(id: string, catalog: DatasourceCatalog): string {
+  const field = currentCatalogField(catalog, id);
+  return field ? catalogFieldReference(field) : id;
 }
 
 function referenceIssues(input: BuildPayloadsInput): ValidationError[] {
   const issues: ValidationError[] = [];
-  const qualifiers = tableQualifierSet(input.catalog);
   const wireReferences = new Map<string, Set<string>>();
   for (const field of [...input.catalog.measures, ...input.catalog.dimensions, ...input.catalog.timeDimensions]) {
-    const wire = pulseFieldReference(field.id, qualifiers);
+    const wire = catalogFieldReference(field);
     const ids = wireReferences.get(wire) ?? new Set<string>();
     ids.add(field.id);
     wireReferences.set(wire, ids);
@@ -175,7 +114,7 @@ function referenceIssues(input: BuildPayloadsInput): ValidationError[] {
   const checkReference = (id: string, label: string) => {
     if (checked.has(id)) return;
     checked.add(id);
-    const collisions = wireReferences.get(pulseFieldReference(id, qualifiers));
+    const collisions = wireReferences.get(pulseFieldReference(id, input.catalog));
     if (collisions && collisions.size > 1) {
       issues.push({ field: id, message: `"${label}" has an ambiguous Pulse field reference shared by ${[...collisions].join(', ')}. Rename the conflicting datasource fields before publishing.` });
     }
@@ -234,9 +173,8 @@ function buildOne(
   timeField: string,
   slicers: string[],
   sel: MetricSelection,
-  tableQualifiers: ReadonlySet<string>,
 ): Record<string, unknown> & { name: string } {
-  const field = String(sel.fieldId ?? '').trim();
+  const field = String(sel.fieldId ?? '');
   const displayName = String(sel.name ?? sel.fieldLabel ?? '').trim();
   const current = reconcileMetricWithCatalog(catalog, sel);
   const aggEnum = current.requiresUserAgg ? 'AGGREGATION_USER' : mapAggregation(current.aggregation);
@@ -249,11 +187,9 @@ function buildOne(
   };
   if (sel.format === 'CURRENCY') rep.currency_code = 'CURRENCY_CODE_USD';
 
-  const measureField = pulseFieldReference(field, tableQualifiers);
+  const measureField = pulseFieldReference(field, catalog);
 
-  const timeDimField =
-    pulseFieldReference(timeField, tableQualifiers) ||
-    normalizeCalculatedFieldIdentifier(timeField, stripOuterBrackets(timeField));
+  const timeDimField = pulseFieldReference(timeField, catalog);
 
   const resolvedSlicers = [...new Set(
     slicers
@@ -261,7 +197,7 @@ function buildOne(
       // measure/time dimension: a calculated dimension slicer emits its
       // internal Calculation_NNN id, physical columns emit their raw name.
       // MQS resolves these by id/name, not caption.
-      .map((s) => pulseFieldReference(s, tableQualifiers))
+      .map((s) => pulseFieldReference(s, catalog))
       .filter(Boolean),
   )];
 
@@ -309,13 +245,12 @@ export function buildCreatePayloads(input: BuildPayloadsInput): Array<Record<str
   const payloads: Array<Record<string, unknown> & { name: string }> = [];
 
   const selectedSlicers = Object.values(input.slicers).filter((s) => s.active).map((s) => s.fieldId);
-  const tableQualifiers = tableQualifierSet(input.catalog);
 
   for (const sel of Object.values(input.metrics)) {
     if (!sel.active) continue;
     const timeField = validateTimeDimensionId(input.catalog, sel.timeDimensionFieldId);
     if (!timeField.eligible) continue;
-    payloads.push(buildOne(input.catalog, input.catalog.datasourceLuid, timeField.field.id, selectedSlicers, sel, tableQualifiers));
+    payloads.push(buildOne(input.catalog, input.catalog.datasourceLuid, timeField.field.id, selectedSlicers, sel));
   }
   return payloads;
 }

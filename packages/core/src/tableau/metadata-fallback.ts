@@ -83,6 +83,13 @@ function stripCurlyBlocks(formula: string): string {
   let result = '';
   let depth = 0;
   for (let i = 0; i < formula.length; i++) {
+    if (formula[i] === '[') {
+      const end = formula.indexOf(']', i + 1);
+      const last = end < 0 ? formula.length - 1 : end;
+      result += depth === 0 ? formula.slice(i, last + 1) : ' '.repeat(last - i + 1);
+      i = last;
+      continue;
+    }
     if (formula[i] === '{') { depth++; continue; }
     if (formula[i] === '}') { if (depth > 0) depth--; continue; }
     result += depth === 0 ? formula[i] : ' ';
@@ -195,10 +202,10 @@ function getInternalFieldReason(node: GraphqlNode): string | null {
  * inner value; otherwise the friendly name.
  */
 export function canonicalPulseIdentifier(node: GraphqlNode): string {
-  const fqn = String(node.fullyQualifiedName || '').trim();
-  const name = String(node.name || '').trim();
+  const fqn = String(node.fullyQualifiedName || '');
+  const name = String(node.name || '');
   if (node.__typename === 'CalculatedField') {
-    const calcMatch = fqn.match(/^\[(Calculation_\d+)\]$/i);
+    const calcMatch = fqn.match(/^(?:\[[^\]]+\]\s*\.\s*)*\[(Calculation_\d+)\]$/i);
     if (calcMatch) return calcMatch[1];
     const single = fqn.match(/^\[([^\]]+)\]$/);
     if (single) return single[1];
@@ -221,6 +228,7 @@ interface Analysis {
   isBlendedCalc: boolean;
   directRequiresUserAgg: boolean;
   referencedNames: Set<string>;
+  aggregateReferencedNames: Set<string>;
   disallowed: boolean;
   disallowReason: FieldExclusionReason | null;
   requiresUserAgg: boolean;
@@ -239,13 +247,14 @@ export function classifyGraphqlNodes(nodes: GraphqlNode[]): VdsField[] {
       const internalReason = getInternalFieldReason(node);
       return {
         node,
-        graphName: String(node.name ?? '').trim(),
+        graphName: String(node.name ?? ''),
         isCalc,
         internalReason,
         isTableCalc: isTableCalcFormula(node.formula),
         isBlendedCalc: isCalc && detectBlendedRef(prepped),
         directRequiresUserAgg: requiresUserAggFromFormula(node.formula),
         referencedNames: isCalc ? listReferencedFieldNames(prepped) : new Set<string>(),
+        aggregateReferencedNames: isCalc ? listReferencedFieldNames(stripCurlyBlocks(prepped)) : new Set<string>(),
         disallowed: false,
         disallowReason: null as FieldExclusionReason | null,
         requiresUserAgg: false,
@@ -298,7 +307,7 @@ export function classifyGraphqlNodes(nodes: GraphqlNode[]): VdsField[] {
     let changed = false;
     for (const entry of analysis) {
       if (entry.disallowed || !entry.isCalc || entry.requiresUserAgg) continue;
-      for (const refName of entry.referencedNames) {
+      for (const refName of entry.aggregateReferencedNames) {
         const candidates = nameToEntries.get(refName);
         if (!candidates) continue;
         if (candidates.some((c) => !c.disallowed && c.requiresUserAgg)) {
@@ -336,9 +345,11 @@ async function fetchGraphqlNodes(
 ): Promise<{ name?: string; nodes: GraphqlNode[] } | null> {
   const nodes: GraphqlNode[] = [];
   const seenCursors = new Set<string>();
+  const seenNodeIds = new Set<string>();
   let hasNextPage = true;
   let after: string | null = null;
   let dsName: string | undefined;
+  let totalCount: number | undefined;
 
   while (hasNextPage) {
     const data = (await postJson<any>(
@@ -351,13 +362,38 @@ async function fetchGraphqlNodes(
       return null;
     })) as any;
 
+    if (data?.errors != null && (!Array.isArray(data.errors) || data.errors.length > 0))
+      throw new TableauError('Field metadata response is incomplete.', 502);
     const pub = data?.data?.publishedDatasources?.[0];
     if (!pub) return null;
     dsName = pub.name ?? dsName;
-    const conn = pub.fieldsConnection ?? {};
-    for (const node of (conn.nodes ?? []) as GraphqlNode[]) nodes.push(node);
-    const pageInfo = conn.pageInfo ?? {};
-    hasNextPage = pageInfo.hasNextPage === true;
+    const conn = pub.fieldsConnection;
+    if (!conn || !Array.isArray(conn.nodes) || conn.nodes.some((node: unknown) => !node || typeof node !== 'object') ||
+      !conn.pageInfo || typeof conn.pageInfo.hasNextPage !== 'boolean' ||
+      (conn.pageInfo.endCursor !== null && typeof conn.pageInfo.endCursor !== 'string') ||
+      !Number.isSafeInteger(conn.totalCount) || conn.totalCount < 0 ||
+      (totalCount !== undefined && conn.totalCount !== totalCount))
+      throw new TableauError('Field metadata response is incomplete.', 502);
+    totalCount = conn.totalCount;
+    for (const node of conn.nodes) {
+      if (Array.isArray(node) || typeof node.id !== 'string' || !node.id.trim() ||
+        typeof node.__typename !== 'string' || !node.__typename.trim() ||
+        (node.name != null && typeof node.name !== 'string') ||
+        (node.fullyQualifiedName != null && typeof node.fullyQualifiedName !== 'string') ||
+        (node.role != null && typeof node.role !== 'string') ||
+        (node.dataType != null && typeof node.dataType !== 'string') ||
+        (node.aggregation != null && typeof node.aggregation !== 'string') ||
+        (node.description != null && typeof node.description !== 'string') ||
+        (node.formula != null && typeof node.formula !== 'string') ||
+        (node.isHidden != null && typeof node.isHidden !== 'boolean') ||
+        !(node.name?.trim() || node.fullyQualifiedName?.trim()) || seenNodeIds.has(node.id) ||
+        !canonicalPulseIdentifier(node).trim())
+        throw new TableauError('Field metadata response is incomplete.', 502);
+      seenNodeIds.add(node.id);
+      nodes.push(node as GraphqlNode);
+    }
+    const pageInfo = conn.pageInfo;
+    hasNextPage = pageInfo.hasNextPage;
     const next = pageInfo.endCursor;
     if (hasNextPage && (typeof next !== 'string' || !next || seenCursors.has(next))) {
       throw new TableauError('Field metadata pagination is incomplete.', 502);
@@ -366,6 +402,7 @@ async function fetchGraphqlNodes(
     after = next ?? null;
   }
 
+  if (nodes.length !== totalCount) throw new TableauError('Field metadata response is incomplete.', 502);
   return { name: dsName, nodes };
 }
 

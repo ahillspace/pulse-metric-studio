@@ -2,14 +2,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import esbuild from 'esbuild';
+import { inspectNodeTarget } from './node-runtime.mjs';
 
 const scriptPath = fileURLToPath(import.meta.url);
 const root = path.dirname(path.dirname(scriptPath));
 
-export function copySqliteRuntime(source, destination) {
+export function copySqliteRuntime(source, destination, target) {
   if (!fs.existsSync(source)) {
     throw new Error(`Missing ${source}. Run npm install before packaging.`);
   }
+  if (!target || !['darwin', 'win32', 'linux', 'linuxmusl'].includes(target.platform) || !['arm64', 'x64'].includes(target.arch))
+    throw new Error('A supported bundled Node runtime target is required.');
   fs.rmSync(destination, { recursive: true, force: true });
   fs.mkdirSync(destination, { recursive: true });
   for (const filename of ['package.json', 'LICENSE']) {
@@ -20,26 +23,17 @@ export function copySqliteRuntime(source, destination) {
     filter: (filename) => fs.statSync(filename).isDirectory() || filename.endsWith('.js'),
   });
 
-  // Keep the native resolver's layouts without copying node-gyp build metadata.
-  const addons = ['build/Debug/better_sqlite3.node', 'build/Release/better_sqlite3.node'];
-  for (const platform of ['darwin', 'win32', 'linux', 'linuxmusl']) {
-    for (const architecture of ['arm64', 'x64']) {
-      addons.push(`prebuilds/${platform}-${architecture}.node`);
-    }
-  }
-  let copiedAddons = 0;
-  for (const filename of addons) {
-    const original = path.join(source, filename);
-    if (!fs.existsSync(original)) continue;
-    const target = path.join(destination, filename);
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.copyFileSync(original, target);
-    copiedAddons++;
-  }
-  if (copiedAddons === 0) throw new Error('Missing better-sqlite3 native addon. Reinstall dependencies before packaging.');
+  // Keep the resolver layout, preferring the target prebuild over any local build.
+  const addon = [`prebuilds/${target.platform}-${target.arch}.node`,
+    'build/Release/better_sqlite3.node', 'build/Debug/better_sqlite3.node']
+    .find((filename) => fs.existsSync(path.join(source, filename)));
+  if (!addon) throw new Error('Missing better-sqlite3 native addon. Reinstall dependencies before packaging.');
+  const targetPath = path.join(destination, addon);
+  fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+  fs.copyFileSync(path.join(source, addon), targetPath);
 }
 
-export async function bundleServer(rootDir = root, resourcesDir = path.join(rootDir, 'src-tauri', 'resources')) {
+export async function bundleServer(rootDir = root, resourcesDir = path.join(rootDir, 'src-tauri', 'resources'), nodeExecutable = process.execPath) {
   const serverDist = path.join(resourcesDir, 'server', 'dist');
   fs.mkdirSync(serverDist, { recursive: true });
   await esbuild.build({
@@ -62,7 +56,7 @@ export async function bundleServer(rootDir = root, resourcesDir = path.join(root
 
   const source = path.join(rootDir, 'node_modules', 'better-sqlite3');
   const destination = path.join(serverDist, 'node_modules', 'better-sqlite3');
-  copySqliteRuntime(source, destination);
+  copySqliteRuntime(source, destination, inspectNodeTarget(nodeExecutable));
   console.log('bundled Pulse Metric Studio server -> resources/server/dist/index.mjs');
 }
 

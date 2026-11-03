@@ -60,6 +60,8 @@ export interface CredentialMutationResponse {
   ok: true;
   connection: SavedConnection;
   session: TableauSessionInfo | null;
+  superseded?: boolean;
+  retirement?: { ticket: string };
   activationError?: {
     code: 'activation_unavailable';
     message: string;
@@ -183,6 +185,16 @@ export function createTableauConnectionsApi(
       );
     },
 
+    async listCredentialRetirements() {
+      const result = await request<{ retirements: Array<{ ticket: string; connectionId: string }> }>(fetchImpl, '/api/tableau/credential-retirements');
+      return result.retirements;
+    },
+
+    retireCredential(ticket: string) {
+      return request<{ status: 'removed' | 'in_use' | 'cleanup_failed' }>(fetchImpl,
+        `/api/tableau/credential-retirements/${encodeURIComponent(ticket)}`, 'POST');
+    },
+
     delete(id: string, credentialDisposition: 'removed' | 'retained' | 'database') {
       const query = new URLSearchParams({ credentialDisposition });
       return request<{ ok: true; credentialDisposition: string }>(
@@ -257,7 +269,7 @@ type CredentialReconciliationRequest = {
 };
 
 type CredentialReconciliationResponse =
-  | { status: 'committed'; connection: SavedConnection }
+  | { status: 'committed'; connection: SavedConnection; superseded?: boolean; retirement?: { ticket: string } }
   | { status: 'not_committed' | 'pending' };
 
 function credentialReconciliationRequest(
@@ -294,6 +306,8 @@ async function reconcileRejectedCredentialMutation(
         ok: true,
         connection: result.connection,
         session: null,
+        ...(result.superseded ? { superseded: true } : {}),
+        ...(result.retirement ? { retirement: result.retirement } : {}),
         activationError: {
           code: 'activation_unavailable',
           message: 'The connection was saved, but Tableau activation could not be confirmed. Use the saved connection to retry.',
@@ -329,6 +343,7 @@ function isCredentialMutationResponse(value: unknown): value is CredentialMutati
   const result = value as Partial<CredentialMutationResponse>;
   return result.ok === true
     && Boolean(result.connection && typeof result.connection.id === 'string')
+    && (result.retirement === undefined || Boolean(result.retirement && typeof result.retirement.ticket === 'string' && result.retirement.ticket))
     && (result.session === null || Boolean(result.session && typeof result.session.siteId === 'string'));
 }
 
