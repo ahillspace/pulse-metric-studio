@@ -8,7 +8,9 @@ import { createAuthorController, useAuthor } from "./controller";
 import { useConnection } from "../connections/controller";
 import { PublicationResult } from "./PublicationResult";
 import { PublishSection } from "../components/PublishSection";
-import { catalog, draft, receipt, session } from "../testing/fixtures";
+import { ConfigEditor, DimensionMetricRows, selectConfigEditor } from "../components/ConfigEditor";
+import { shallow } from "zustand/shallow";
+import { catalog, draft, field, receipt, session } from "../testing/fixtures";
 
 // The production receipt imports its stylesheet; this offline renderer needs no CSS loader.
 const css = (NodeModule as any).registerHooks({ load(url: string, context: unknown, nextLoad: (url: string, context: unknown) => unknown) {
@@ -136,7 +138,12 @@ for (const mode of ["self", "group", "none"] as const) {
       metrics: [{ ...receipt().items[0].summary, name: "Revenue", description: "" }], digestAudience: "Saved audience", followMode: mode,
       ...(mode === "self" ? { selfRecipient: { id: "publisher-id", name: "Captured publisher" } } : {}), issues: [],
     } } } });
-    const html = renderToStaticMarkup(<PublishSection visible={false} onActivity={() => {}} />);
+    const hidden = renderToStaticMarkup(<PublishSection visible={false} onActivity={() => {}} />);
+    assert.doesNotMatch(hidden, /aria-label="Publish reviewed draft"/);
+    assert.ok(useAuthor.getState().entries.a.preview, "navigation retains the reviewed preview");
+    Object.defineProperty(globalThis, "document", { value: { getElementById: () => null }, configurable: true });
+    t.after(() => { Reflect.deleteProperty(globalThis, "document"); });
+    const html = renderToStaticMarkup(<PublishSection visible onActivity={() => {}} />);
     const submit = html.match(/<button[^>]*aria-label="Publish reviewed draft"[^>]*>/)?.[0];
     assert.ok(submit);
     assert.equal(submit.includes('disabled=""'), mode === "group", "unverified group permission cannot block personal or unfollowed publication");
@@ -145,6 +152,37 @@ for (const mode of ["self", "group", "none"] as const) {
     if (mode === "none") assert.match(html, /Publish these metrics without following them/);
   });
 }
+
+test("closed dimension settings do not build metric rows for a large catalog", async (t) => {
+  await setup(t, "self");
+  const entry = useAuthor.getState().entries.a;
+  const dimensions = Array.from({ length: 1000 }, (_, index) => field(`dimension-${index}`, "STRING"));
+  useAuthor.setState({ entries: { a: { ...entry, catalog: { ...entry.catalog!, dimensions } } } });
+  const html = renderToStaticMarkup(<ConfigEditor />);
+  const details = html.slice(html.indexOf('<details class="pulse-dimension-group"'));
+  assert.doesNotMatch(details, /dimension-0/);
+  assert.match(details, /Dimensions <span>1000<\/span>/);
+});
+
+test("composer changes do not invalidate the configuration editor selection", async (t) => {
+  await setup(t, "self");
+  const before = selectConfigEditor(useAuthor.getState());
+  useAuthor.getState().setComposer("A new request");
+  const after = selectConfigEditor(useAuthor.getState());
+  assert.ok(shallow(before, after));
+  const entry = useAuthor.getState().entries.a;
+  useAuthor.setState({ entries: { a: { ...entry, document: { ...entry.document, digestAudience: "Changed" } } } });
+  assert.equal(shallow(after, selectConfigEditor(useAuthor.getState())), false);
+});
+
+test("expanded dimension settings render only the selected page", () => {
+  const fields = Array.from({ length: 120 }, (_, index) => ({ id: `dimension-${index}`, label: `dimension-${index}`, dimension: true, field: field(`dimension-${index}`, "STRING") }));
+  const html = renderToStaticMarkup(<DimensionMetricRows fields={fields} page={1} onPageChange={() => {}} metrics={{}} catalog={catalog()} onToggle={() => {}} onChange={() => {}} />);
+  assert.match(html, /dimension-50/);
+  assert.match(html, /dimension-99/);
+  assert.doesNotMatch(html, /dimension-100/);
+  assert.match(html, /51-100 of 120 dimensions/);
+});
 
 test("publication and Activity retain actionable messages with optional backend diagnostic detail", () => {
   const result = receipt();

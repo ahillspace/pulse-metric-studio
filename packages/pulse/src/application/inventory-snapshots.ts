@@ -4,6 +4,7 @@ import type { PulseDraftContext, PulseInventoryResponse } from '@pulse-metric-st
 import { requirePulseOwner } from './context.js';
 import { PulseApplicationError } from './errors.js';
 import { getExistingMetrics } from './inventory.js';
+import { defaultDependencies } from './registry-dependencies.js';
 
 const MAX_SNAPSHOTS_PER_SESSION = 32;
 interface InventorySnapshot {
@@ -18,6 +19,7 @@ const snapshots = new WeakMap<TableauSession, Map<string, InventorySnapshot>>();
 export async function loadPulseInventory(
   session: TableauSession,
   datasourceLuid: string,
+  options: { refresh?: boolean } = {},
 ): Promise<PulseInventoryResponse> {
   const sessionContext = getSessionContext(session);
   const owner: PulseDraftContext = {
@@ -28,7 +30,7 @@ export async function loadPulseInventory(
   };
   requirePulseOwner(owner, session);
   const userId = session.userId;
-  const result = await getExistingMetrics(session, datasourceLuid);
+  const result = await getExistingMetrics(session, datasourceLuid, defaultDependencies, options);
   requirePulseOwner(owner, session);
   if (getSessionContext(session) !== sessionContext || session.userId !== userId)
     throw refreshRequired();

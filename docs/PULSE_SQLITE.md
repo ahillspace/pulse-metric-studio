@@ -14,7 +14,7 @@ See the [maintainer guide](PULSE_MAINTAINER_GUIDE.md) for operation flows and tr
 | `pulse_workspaces`, `pulse_publish_runs`, `pulse_publish_items` | Pulse repository; durable authoring and publication evidence |
 | `connections` | Core Tableau session store; durable connection metadata and credential location |
 | `llm_profiles` | Core AI profile store; durable provider configuration and secret references |
-| `settings` | Core settings helpers; active connection, active provider, and provider readiness records |
+| `settings` | Core settings helpers; active connection, active provider, provider readiness, and credential retirement records |
 | `local_secrets` | Local secret vault; encrypted fallback values addressed by opaque references |
 | `_migrations` | Shared migration infrastructure and saved-secrets migration; applied migration keys |
 | `runs`, `run_metrics` | Retained historical publication archives; migration reads these records |
@@ -35,6 +35,20 @@ The [session module](../packages/core/src/tableau/session.ts), `setSession` and 
 Session generations prevent a delayed sign-in or refresh from replacing a newer session.
 Disconnect clears local session state; it does not call Tableau's sign-out endpoint.
 The active connection setting remains available for later restoration.
+
+## Credential retirement
+
+The core Tableau session store owns `tableauCredentialRetirement:` records in `settings`.
+Each record contains a ticket, operation ID, connection ID, old and replacement credential references, and pending or removed state.
+It contains no secret values.
+Credential replacement and its pending retirement record commit in the same SQLite transaction.
+Active session invalidation follows that commit.
+Pending tickets survive restart and remain available for cleanup retries.
+Removed records preserve retry idempotency.
+A backend critical section checks all saved references before deleting a retired OS credential.
+New reference adoption revalidates the OS credential under that same critical section before committing.
+Failed cleanup retains the committed connection and the pending record.
+These records use the existing settings schema and require no SQL migration.
 
 ## Active Pulse tables
 

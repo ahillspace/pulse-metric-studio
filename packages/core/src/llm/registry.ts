@@ -244,7 +244,7 @@ export class ProviderRegistry {
       throw new LlmProviderError({ code: 'provider_not_configured', message: `LLM provider profile "${requested}" does not exist.`, provider: requested });
     }
     const profile = this.staticProviders ? undefined : this.profiles().find((entry) => entry.id === requested);
-    const health = await this.checkedProviderHealth(provider, profile, true);
+    const health = await this.checkedProviderHealth(provider, profile, true, true);
     const fingerprint = this.profileFingerprint(requested, profile);
     if (health.installed === false || !health.configured || health.healthy === false) {
       this.recordResult(requested, fingerprint, 'failure', health.reasonCode, health.reason);
@@ -412,8 +412,8 @@ export class ProviderRegistry {
     return resolveLlmProfile({ id: `${protocol}-setup`, label: protocol, protocol, model: '', command: command?.trim() || commands[protocol], authMode: protocol === 'opencode' ? 'none' : 'local-account' });
   }
 
-  private async checkedProviderHealth(provider: LlmProvider, profile?: StoredLlmProfile, refreshCatalog = false): Promise<LlmProviderHealth> {
-    const health = await this.runOperation(signal => providerHealth(provider, signal));
+  private async checkedProviderHealth(provider: LlmProvider, profile?: StoredLlmProfile, refreshCatalog = false, selection = false): Promise<LlmProviderHealth> {
+    const health = await this.runOperation(signal => selection && provider.getSelectionHealth ? provider.getSelectionHealth(signal) : providerHealth(provider, signal));
     if (!profile || !provider.listModels || !health.installed || !health.configured || health.healthy === false) return health;
     try {
       await this.assertCurrentModel(profile, provider, refreshCatalog);

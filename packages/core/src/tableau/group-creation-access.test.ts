@@ -345,3 +345,43 @@ test('unsafe XML profile error bodies cannot assert authentication rejection', a
     assert.equal(sessions.getSession(), owner);
   } finally { await app.close(); }
 });
+
+
+test('obsolete profile success and failure recheck the current token without applying old access', async () => {
+  for (const oldStatus of [200, 503]) {
+    const owner = actor();
+    sessions.setSession(owner, { connectionId: 'fixture-connection', patSecret: 'fixture-pat' });
+    let release!: (response: Response) => void;
+    let reads = 0;
+    const app = await fixture(async () => {
+      reads++;
+      if (reads === 1) return new Promise<Response>(resolve => { release = resolve; });
+      return Response.json({ user: { id: owner.userId, siteRole: 'Creator' } });
+    });
+    try {
+      const pending = app.inject('/api/tableau/status').then(response => response.json());
+      while (!release) await new Promise(resolve => setTimeout(resolve, 1));
+      owner.token = 'refreshed-token';
+      release(Response.json({ user: { id: owner.userId, siteRole: 'SiteAdministratorCreator' } }, { status: oldStatus }));
+      const result = await pending;
+      assert.equal(result.connected, true);
+      assert.equal(result.reachable, true);
+      assert.equal(result.session.siteRole, 'Creator');
+      assert.equal(result.session.groupCreation.state, 'denied');
+      assert.equal(reads, 2);
+    } finally { await app.close(); sessions.clearSession(); }
+  }
+});
+
+test('repeated token rotation bounds profile rechecks and preserves session', async () => {
+  const owner = actor();
+  sessions.setSession(owner, { connectionId: 'fixture-connection', patSecret: 'fixture-pat' });
+  let reads = 0;
+  const app = await fixture(async () => { owner.token = `new-token-${++reads}`; return new Response('{}', { status: 401 }); });
+  try {
+    const result = (await app.inject('/api/tableau/status')).json();
+    assert.equal(result.connected, true);
+    assert.equal(sessions.getSession(), owner);
+    assert.equal(reads, 2);
+  } finally { await app.close(); }
+});

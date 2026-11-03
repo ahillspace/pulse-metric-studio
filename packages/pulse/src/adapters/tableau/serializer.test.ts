@@ -233,3 +233,43 @@ test('direct payload building rejects stale metric and slicer references', () =>
   assert.throws(() => buildCreatePayloads({ catalog: current, metrics: { gone: metric({ fieldId: 'gone', timeDimensionFieldId: 'Date' }) }, slicers: {} }), /unavailable or excluded/);
   assert.throws(() => buildCreatePayloads({ catalog: current, metrics: { Sales: metric({ fieldId: 'Sales', timeDimensionFieldId: 'Date' }) }, slicers: { gone: { fieldId: 'gone', fieldLabel: 'Gone slicer', active: true } } }), /unavailable or excluded slicer/);
 });
+
+test('serializer preserves opaque field ID whitespace through time and measure references', () => {
+  const measure = field({ id: ' Revenue | Net ', role: 'MEASURE' });
+  const time = field({ id: ' Order Date ', role: 'DIMENSION', dataType: 'DATE', timeType: 'DATE' });
+  const current = catalog({ measures: [measure], timeDimensions: [time] });
+  const result = buildCreatePayloads({ catalog: current, slicers: {}, metrics: { revenue: metric({ fieldId: measure.id, timeDimensionFieldId: time.id }) } });
+  assert.equal(result.length, 1);
+  assert.equal(spec(result[0]).measure.field, measure.id);
+  assert.equal(spec(result[0]).time_dimension.field, time.id);
+});
+
+test('serializer keeps literal brackets, dots, pipes and long IDs from the catalog', () => {
+  const ids = ['[literal.name] | sales', ` Long.${'x'.repeat(600)} `];
+  for (const id of ids) {
+    const measure = field({ id, role: 'MEASURE' });
+    const date = field({ id: ' [date.field] ', role: 'DIMENSION', dataType: 'DATE', timeType: 'DATE' });
+    const dimension = field({ id: ' [Region].Name | West ', role: 'DIMENSION', dataType: 'STRING' });
+    const current = catalog({ measures: [measure], timeDimensions: [date], dimensions: [dimension] });
+    const result = buildCreatePayloads({ catalog: current, metrics: { m: metric({ fieldId: id, timeDimensionFieldId: date.id }) }, slicers: { s: { active: true, fieldId: dimension.id, fieldLabel: 'Region' } } });
+    assert.equal(spec(result[0]).measure.field, id);
+    assert.equal(spec(result[0]).time_dimension.field, date.id);
+    assert.deepEqual(allowedDimensions(result[0]), [dimension.id]);
+  }
+});
+
+test('LOD aggregate dependencies retain equivalent serializer aggregation for referenced and inline formulas', async () => {
+  const { classifyGraphqlNodes, normalizeVdsToCatalog } = await import('@pulse-metric-studio/core');
+  const rows = classifyGraphqlNodes([
+    { name: 'Aggregate Sales', formula: 'SUM([Sales])', role: 'MEASURE', dataType: 'REAL' },
+    { name: 'Regional Sales', formula: '{ FIXED [Region] : [Aggregate Sales] }', role: 'MEASURE', dataType: 'REAL' },
+    { name: 'Inline Sales', formula: '{ FIXED [Region] : SUM([Sales]) }', role: 'MEASURE', dataType: 'REAL' },
+    { name: 'Order Date', role: 'DIMENSION', dataType: 'DATE' },
+  ]);
+  const current = normalizeVdsToCatalog({ fieldGroups: [{ logicalTableId: null, fields: rows }] }, { luid: 'ds', name: 'Fixture' }, 'metadata');
+  for (const id of ['Regional Sales', 'Inline Sales']) {
+    const result = buildCreatePayloads({ catalog: current, slicers: {}, metrics: { [id]: metric({ fieldId: id, timeDimensionFieldId: 'Order Date', aggregation: 'SUM' }) } });
+    const specification = result[0].specification as { basic_specification: { measure: { aggregation: string } } };
+    assert.equal(specification.basic_specification.measure.aggregation, 'AGGREGATION_SUM');
+  }
+});

@@ -326,7 +326,7 @@ export async function resolveConnectionSecret(
   return decryptStoredSecret(connection.patSecretEnc);
 }
 
-export function replaceConnectionCredential(
+function updateConnectionCredential(
   id: string,
   input: ReplaceConnectionCredentialInput,
 ): ConnectionProfile | null {
@@ -341,9 +341,52 @@ export function replaceConnectionCredential(
      SET pat_name = ?, pat_secret_enc = ?, credential_ref = ?, storage_kind = ?
      WHERE id = ?`,
   ).run(input.patName?.trim() || existing.patName, patSecretEnc, credentialRef, input.storageKind, id);
+  return publicProfile(getStoredConnection(id)!);
+}
+
+function invalidateReplacedCredential(id: string): void {
   if (activeSession && getSessionContext(activeSession)?.connectionId === id) clearSession();
   else if (activeCredential?.connectionId === id) activeCredential = null;
-  return publicProfile(getStoredConnection(id)!);
+}
+
+export function replaceConnectionCredential(id: string, input: ReplaceConnectionCredentialInput): ConnectionProfile | null {
+  const profile = updateConnectionCredential(id, input);
+  if (profile) invalidateReplacedCredential(id);
+  return profile;
+}
+
+type CredentialRetirement = { ticket: string; operationId: string; connectionId: string; oldRef: string; newRef: string | null; state: 'pending' | 'removed' };
+const RETIREMENT_PREFIX = 'tableauCredentialRetirement:';
+
+export function credentialRetirements(): CredentialRetirement[] {
+  const rows = db().prepare('SELECT value FROM settings WHERE key LIKE ?').all(`${RETIREMENT_PREFIX}%`) as Array<{ value: string }>;
+  return rows.map(row => JSON.parse(row.value) as CredentialRetirement);
+}
+
+export function credentialRetirement(ticket: string): CredentialRetirement | undefined {
+  const value = getSetting(db(), RETIREMENT_PREFIX + ticket);
+  return value ? JSON.parse(value) as CredentialRetirement : undefined;
+}
+
+export function markCredentialRetired(record: CredentialRetirement): void {
+  setSetting(db(), RETIREMENT_PREFIX + record.ticket, JSON.stringify({ ...record, state: 'removed' }));
+}
+
+export function replaceCredentialWithRetirement(id: string, input: ReplaceConnectionCredentialInput, operationId: string): { profile: ConnectionProfile; retirement?: { ticket: string } } | null {
+  const result = db().transaction(() => {
+    const previous = getStoredConnection(id);
+    if (!previous) return null;
+    const profile = updateConnectionCredential(id, input);
+    if (!profile) return null;
+    const oldRef = previous.storageKind === 'os' ? previous.credentialRef : null;
+    if (!oldRef || oldRef === profile.credentialRef) return { profile };
+    const ticket = crypto.randomUUID();
+    const record: CredentialRetirement = { ticket, operationId, connectionId: id, oldRef, newRef: profile.credentialRef, state: 'pending' };
+    setSetting(db(), RETIREMENT_PREFIX + ticket, JSON.stringify(record));
+    return { profile, retirement: { ticket } };
+  })();
+  if (result) invalidateReplacedCredential(id);
+  return result;
 }
 
 export function setActiveConnection(id: string): boolean {

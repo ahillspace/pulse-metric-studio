@@ -90,22 +90,6 @@ const INSIGHTS_SETTINGS = [
 
 // -- canonical identifiers ----------------------------------------------------
 
-/** Strip a single layer of outer brackets: "[foo]" -> "foo". */
-function stripOuterBrackets(s: string): string {
-  const m = String(s || '').trim().match(/^\[([^\]]+)\]$/);
-  return m ? m[1] : String(s || '').trim();
-}
-
-/**
- * Calculated fields: "[Calculation_123]" -> "Calculation_123".
- * Legacy behavior preserved verbatim.
- */
-function normalizeCalculatedFieldIdentifier(fullyQualifiedName: string, fallbackName: string): string {
-  const fqn = String(fullyQualifiedName || '').trim();
-  const match = fqn.match(/^\[(Calculation_\d+)\]$/i);
-  return match ? match[1] : fallbackName;
-}
-
 /**
  * The set of parentheticals Tableau (or our own catalog dedup) may append to a
  * field name purely to disambiguate duplicate names across logical tables:
@@ -132,21 +116,19 @@ export function tableQualifierSet(catalog: Pick<DatasourceCatalog, 'measures' | 
 /**
  * Canonical identifier Pulse accepts for a catalog field. Our VDS catalog has
  * no GraphQL FQNs, so we operate on the ids it gives us:
- *   - bracketed FQNs are reduced one layer ("[cogs]" -> "cogs")
+ *   - catalog ids are already canonical; literal brackets and whitespace are preserved
  *   - a trailing table-caption uniquifier ("cogs (genres.csv)") is stripped back
  *     to the bare column name ONLY when the parenthetical exactly matches a known
  *     logical-table caption — pods know columns by their plain names. A user
  *     parenthetical that is not a table caption ("(Days)", "($)") is preserved.
- *   - Calculation_NN stays bracket-stripped
  */
 function canonicalCatalogIdentifier(field: Pick<CatalogField, 'id'>, tableQualifiers: ReadonlySet<string>): string {
-  let id = String(field?.id ?? '').trim();
-  id = stripOuterBrackets(id);
+  let id = String(field?.id ?? '');
   const uniquified = id.match(/^(.*\S)\s+\(([^()]+)\)$/);
   if (uniquified && tableQualifiers.has(uniquified[2].trim().toLocaleLowerCase())) {
-    id = uniquified[1].trim();
+    id = uniquified[1];
   }
-  return id.length > 0 ? id : String(field?.id ?? '').trim();
+  return id.length > 0 ? id : String(field?.id ?? '');
 }
 
 /**
@@ -236,7 +218,7 @@ function buildOne(
   sel: MetricSelection,
   tableQualifiers: ReadonlySet<string>,
 ): Record<string, unknown> & { name: string } {
-  const field = String(sel.fieldId ?? '').trim();
+  const field = String(sel.fieldId ?? '');
   const displayName = String(sel.name ?? sel.fieldLabel ?? '').trim();
   const current = reconcileMetricWithCatalog(catalog, sel);
   const aggEnum = current.requiresUserAgg ? 'AGGREGATION_USER' : mapAggregation(current.aggregation);
@@ -251,9 +233,7 @@ function buildOne(
 
   const measureField = pulseFieldReference(field, tableQualifiers);
 
-  const timeDimField =
-    pulseFieldReference(timeField, tableQualifiers) ||
-    normalizeCalculatedFieldIdentifier(timeField, stripOuterBrackets(timeField));
+  const timeDimField = pulseFieldReference(timeField, tableQualifiers);
 
   const resolvedSlicers = [...new Set(
     slicers

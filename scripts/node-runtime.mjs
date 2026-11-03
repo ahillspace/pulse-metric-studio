@@ -21,6 +21,19 @@ export function validateNodeExecutable(executable, run = spawnSync) {
   assertSupportedNode(result.stdout);
 }
 
+/** Inspect the runtime that will actually be bundled, rather than the packaging host. */
+export function inspectNodeTarget(executable, run = spawnSync) {
+  const result = run(executable, ['--use-system-ca', '-p',
+    `JSON.stringify({platform:process.platform,arch:process.arch,glibc:process.platform==='linux' ? Boolean(process.report.getReport().header.glibcVersionRuntime) : null})`],
+  { encoding: 'utf8', windowsHide: true, timeout: 10000 });
+  if (result.error || result.status !== 0) throw new Error('Cannot inspect the bundled Node runtime target.');
+  let target;
+  try { target = JSON.parse(result.stdout); } catch { throw new Error('Bundled Node runtime returned an invalid target.'); }
+  if (!target || !['win32', 'darwin', 'linux'].includes(target.platform) || !['x64', 'arm64'].includes(target.arch)
+    || (target.platform === 'linux' && typeof target.glibc !== 'boolean')) throw new Error('Bundled Node runtime target is unsupported.');
+  return { platform: target.platform === 'linux' && !target.glibc ? 'linuxmusl' : target.platform, arch: target.arch };
+}
+
 export function verifyPackagedSqlite(executable, serverDist, run = spawnSync) {
   validateNodeExecutable(executable, run);
   const source = `

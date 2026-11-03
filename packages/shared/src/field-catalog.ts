@@ -111,7 +111,7 @@ export function validateTimeDimensionId(
   catalog: Pick<DatasourceCatalog, 'timeDimensions'>,
   selectedId: string | null | undefined,
 ): TimeDimensionIdValidation {
-  const id = selectedId?.trim();
+  const id = selectedId;
   if (!id) return { eligible: false, reason: 'missing' };
   const field = catalog.timeDimensions.find((candidate) => candidate.id === id);
   return field ? { eligible: true, field } : { eligible: false, reason: 'not_time_dimension' };

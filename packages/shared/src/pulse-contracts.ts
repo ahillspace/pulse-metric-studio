@@ -4,6 +4,7 @@ import { z } from 'zod';
 export const PULSE_TEXT_LIMITS = { name: 32768, description: 262144, audience: 32768, conversation: 1048576 } as const;
 
 const id = z.string().trim().min(1).max(1024);
+const fieldId = z.string().min(1).max(1024).refine((value) => value.trim().length > 0, 'Field identifier must not be blank.');
 export const PulseOwnerSchema = z.object({
   connectionId: id,
   serverUrl: z.string().url(),
@@ -16,7 +17,7 @@ export type PulseOwner = z.infer<typeof PulseOwnerSchema>;
 export type PulseDraftContext = z.infer<typeof PulseDraftContextSchema>;
 export const PulseMetricDraftSchema = z.object({
   active: z.boolean(),
-  fieldId: id,
+  fieldId,
   fieldLabel: z.string(),
   aggregation: z.enum([
     'SUM',
@@ -39,7 +40,7 @@ export const PulseMetricDraftSchema = z.object({
 });
 export const PulseSlicerDraftSchema = z.object({
   active: z.boolean(),
-  fieldId: id,
+  fieldId,
   fieldLabel: z.string(),
 });
 export const PulseFollowModeSchema = z.enum(['none', 'self', 'group']);
@@ -302,7 +303,7 @@ export const PulseVariantRequestV1Schema = z.object({
     .optional(),
   clauses: z.array(
     z.object({
-      fieldId: id,
+      fieldId,
       selection: z.object({
         mode: z.literal('VALUES'),
         exclude: z.boolean(),

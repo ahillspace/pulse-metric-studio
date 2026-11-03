@@ -15,10 +15,10 @@ import { extractErrorMessage } from "../../../api/client";
 import { PulseApiError, pulseRequest } from "./client";
 
 export const registryApi = {
-  inventory: async (context: PulseDraftContext, owner = captureSessionOwner()) =>
+  inventory: async (context: PulseDraftContext, owner = captureSessionOwner(), options?: { refresh?: boolean }) =>
     PulseInventoryResponseSchema.parse(
       await pulseRequest(
-        ownedPulseUrl(`/api/pulse/existing-metrics?datasourceLuid=${encodeURIComponent(context.datasourceLuid)}`, owner),
+        ownedPulseUrl(`/api/pulse/existing-metrics?datasourceLuid=${encodeURIComponent(context.datasourceLuid)}${options?.refresh ? "&refresh=true" : ""}`, owner),
       ),
     ),
   followState: async (metricIds: string[], detail = true, owner = captureSessionOwner()) =>

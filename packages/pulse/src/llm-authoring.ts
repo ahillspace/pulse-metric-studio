@@ -1,6 +1,6 @@
 import type { LlmMessage,LlmProvider } from '@pulse-metric-studio/core';
 import { extractJsonBlock,LLM_REQUEST_TIMEOUT_MS,LlmProviderError,timeoutDescription } from '@pulse-metric-studio/core';
-import type { CatalogField,DatasourceCatalog } from '@pulse-metric-studio/shared';
+import type { CatalogField,DatasourceCatalog, Op } from '@pulse-metric-studio/shared';
 import { OpsSchema, PULSE_PROPOSAL_WARNING_LIMITS } from '@pulse-metric-studio/shared';
 /**
  * Pulse metric authoring: prompt construction + structured ops validation +
@@ -124,6 +124,7 @@ interface AuthorInput { catalog: DatasourceCatalog; chat: unknown[]; userMessage
 
 const MAX_METADATA_NAME = 200;
 const MAX_METADATA_FORMULA = 300;
+const MAX_HISTORY_BYTES = 64 * 1024;
 const METADATA_CLOSE = /<\/?\s*datasource_metadata\s*>/gi;
 
 /**
@@ -150,7 +151,7 @@ function buildUserPrompt(input: AuthorInput): string {
     // Compact pipe format keeps large catalogs inside argv limits for CLI providers.
     // `id` is the raw name Pulse resolves (e.g. `Calculation_NNN`); copy it verbatim
     // into fieldId. `name` is the human caption for reasoning/labels only.
-    lines.push('CATALOG (id | name | role | type | flags) - copy `id` verbatim into fieldId; use `name` for reasoning and labels only:');
+    lines.push('CATALOG (id | name | role | type | flags) - id is a JSON string; use its decoded exact value as fieldId; use name for reasoning and labels only:');
     const fmt = (f: CatalogField) => {
         // The friendly caption is what lets the model reason about and name a field.
         // A calc field with no author caption has caption === raw name (Calculation_NNN);
@@ -158,7 +159,7 @@ function buildUserPrompt(input: AuthorInput): string {
         const hasCaption = Boolean(f.caption) && f.caption !== f.name;
         const label = untrustedMetadata(f.label);
         const human = hasCaption ? label : (f.formula ? `${label} [=${untrustedMetadata(f.formula, MAX_METADATA_FORMULA)}]` : label);
-        return `${untrustedMetadata(f.id, 512)} | ${human} | ${f.role} | ${f.dataType}${f.requiresUserAgg ? ' | USER_AGG' : ''}`;
+        return `${JSON.stringify(f.id).replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029')} | ${human} | ${f.role} | ${f.dataType}${f.requiresUserAgg ? ' | USER_AGG' : ''}`;
     };
     const cap = (arr: CatalogField[], n: number, kind: string) => {
         if (arr.length > n) {
@@ -189,10 +190,27 @@ function buildUserPrompt(input: AuthorInput): string {
     if (input.chat.length > 0) {
         lines.push('');
         lines.push('RECENT CHAT:');
-        for (const msg of input.chat as Array<{ role: string; content: string; proposalContext?: string }>) {
-            lines.push(`${msg.role}: ${msg.content}`);
-            if (msg.proposalContext) lines.push(`Previous proposed changes (not necessarily accepted): ${msg.proposalContext}`);
+        const history = input.chat as Array<{ role: string; content: string; proposalContext?: string }>;
+        const recent: string[] = [];
+        let bytes = 0;
+        let omitted = false;
+        for (let i = history.length - 1; i >= 0; i--) {
+            const msg = history[i];
+            const content = `${msg.role}: ${msg.content}`;
+            const contentBytes = Buffer.byteLength(content, 'utf8') + 1;
+            if (bytes + contentBytes > MAX_HISTORY_BYTES) { omitted = true; continue; }
+            bytes += contentBytes;
+            let entry = content;
+            if (msg.proposalContext) {
+                const proposal = `Previous proposed changes (not necessarily accepted): ${msg.proposalContext}`;
+                const proposalBytes = Buffer.byteLength(proposal, 'utf8') + 1;
+                if (bytes + proposalBytes <= MAX_HISTORY_BYTES) { entry += `\n${proposal}`; bytes += proposalBytes; }
+                else omitted = true;
+            }
+            recent.unshift(entry);
         }
+        if (omitted) lines.push('Some conversation or proposal context omitted to fit the history budget.');
+        lines.push(...recent);
     }
     lines.push('');
     lines.push(`REQUEST: ${input.userMessage}`);
@@ -246,6 +264,19 @@ async function authorWithinDeadline(provider: LlmProvider, input: AuthorInput, d
         throw new LlmProviderError({ code: 'invalid_model_output', message, provider: provider.id });
     }
     const parsed = attempt.parsed;
+    const fields = new Set([...input.catalog.measures, ...input.catalog.dimensions, ...input.catalog.timeDimensions].map((field) => field.id));
+    const times = new Set(input.catalog.timeDimensions.map((field) => field.id));
+    const dimensions = new Set(input.catalog.dimensions.map((field) => field.id));
+    const referenceWarnings: string[] = [];
+    parsed.ops = (parsed.ops as Op[]).filter((op) => {
+        if (op.op === 'SET_DIGEST_AUDIENCE') return true;
+        const missing = !fields.has(op.fieldId) || (op.op === 'ADD_SLICER' && !dimensions.has(op.fieldId)) ? op.fieldId :
+            ('timeDimensionFieldId' in op && op.timeDimensionFieldId && !times.has(op.timeDimensionFieldId) ? op.timeDimensionFieldId : null);
+        if (missing === null) return true;
+        referenceWarnings.push(`Dropped ${op.op}: field reference ${JSON.stringify(missing)} is not in the current catalog.`);
+        return false;
+    });
+    attempt.warnings.push(...referenceWarnings);
     provider.tracking?.commitSuccess();
     return {
         assistantMessage: attempt.warnings.length

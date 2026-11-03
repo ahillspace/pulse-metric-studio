@@ -29,3 +29,22 @@ export async function resolveLaunchCommand(
 function directlyExecutable(file: string): boolean {
   return !/\.(?:cmd|bat|ps1)$/i.test(file);
 }
+
+/** Bound executable resolution by the same deadline and cancellation as the operation. */
+export async function resolveLaunchWithinDeadline(
+  command: string,
+  resolver: (file: string) => Promise<{ file: string } | null>,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<LocalLaunchCommand | null> {
+  const timeout = AbortSignal.timeout(Math.max(0, Math.ceil(timeoutMs)));
+  const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+  combined.throwIfAborted();
+  let abort: (() => void) | undefined;
+  const stopped = new Promise<never>((_resolve, reject) => {
+    abort = () => reject(combined.reason);
+    combined.addEventListener('abort', abort, { once: true });
+  });
+  try { return await Promise.race([resolveLaunchCommand(command, resolver), stopped]); }
+  finally { if (abort) combined.removeEventListener('abort', abort); }
+}

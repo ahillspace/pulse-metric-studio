@@ -44,7 +44,7 @@ const DimensionSourcesSchema = z.object({
   sourceMetricIds: z.array(z.string().trim().min(1).max(512)).min(1),
 }).strict();
 const DimensionFieldSchema = DimensionSourcesSchema.extend({
-  fieldId: z.string().trim().min(1).max(512),
+  fieldId: z.string().min(1).max(1024).refine((value) => value.trim().length > 0),
 });
 const DimensionValuesSchema = DimensionFieldSchema.extend({
   search: z.string().max(256).optional(),
@@ -108,12 +108,12 @@ export function registerPulseRoutes(
 
   app.get("/api/pulse/existing-metrics", async (req) => {
     const session = requireSession(req);
-    const { datasourceLuid } = req.query as { datasourceLuid?: string };
+    const { datasourceLuid, refresh } = req.query as { datasourceLuid?: string; refresh?: string };
     if (!datasourceLuid)
       throw app.httpErrors.badRequest(
         "datasourceLuid query parameter is required",
       );
-    return loadPulseInventory(session, datasourceLuid);
+    return loadPulseInventory(session, datasourceLuid, { refresh: refresh === "true" });
   });
 
   app.post("/api/pulse/dimensions", async (req) => {

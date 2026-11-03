@@ -23,7 +23,10 @@ import {
   isTableauUserAccessCheckCurrent,
   listConnections,
   normalizeServerUrl,
-  replaceConnectionCredential,
+  replaceCredentialWithRetirement,
+  credentialRetirements,
+  credentialRetirement,
+  markCredentialRetired,
   resolveConnectionSecret,
   saveConnection,
   setActiveConnection,
@@ -36,7 +39,7 @@ import {
 } from './session.js';
 
 export interface TableauRouteDependencies {
-  credentialBroker?: CredentialBrokerClient;
+  credentialBroker?: CredentialBrokerClient & { delete?: (credentialRef: string) => Promise<boolean> };
   discoverRestApiVersion?: typeof discoverRestApiVersion;
   patSignin?: typeof patSignin;
   fetchImpl?: typeof fetch;
@@ -60,6 +63,21 @@ const latestStatusChecks = new WeakMap<TableauSession, {
   check: TableauUserAccessCheck;
   result: Promise<TableauStatusResult>;
 }>();
+
+let credentialMutationLock: Promise<void> = Promise.resolve();
+async function withCredentialMutationLock<T>(work: () => Promise<T>): Promise<T> {
+  const previous = credentialMutationLock;
+  let release!: () => void;
+  credentialMutationLock = new Promise<void>(resolve => { release = resolve; });
+  await previous;
+  try { return await work(); } finally { release(); }
+}
+
+async function verifyCredentialForCommit(credential: { storageKind: CredentialStorageKind; credentialRef?: string; patSecret: string }, broker: CredentialBrokerClient): Promise<void> {
+  if (credential.storageKind === 'os' && (!credential.credentialRef || await broker.resolve(credential.credentialRef) !== credential.patSecret)) {
+    throw new Error('The staged OS credential changed before the connection was saved.');
+  }
+}
 
 type CredentialInput = {
   storageKind?: CredentialStorageKind;
@@ -132,29 +150,32 @@ export function registerTableauRoutes(
 
       const credential = await parseCredentialInput(app, body, broker);
       const session = await createTableauSession(coordinates, credential.patSecret, discoverVersion, signIn, fetchImpl);
-      assertSessionGeneration(generation);
-      let profile: ConnectionProfile;
-      try {
-        profile = saveConnection({
-          id: operationId,
-          label: body.label?.trim() || connectionLabel(coordinates.serverUrl, coordinates.siteContentUrl),
-          ...coordinates,
-          ...(credential.storageKind === 'os'
-            ? { storageKind: 'os' as const, credentialRef: credential.credentialRef }
-            : { storageKind: 'encrypted' as const, patSecret: credential.patSecret }),
-        });
-      } catch (saveError) {
-        const committed = getStoredConnection(operationId);
-        if (!committed || !connectionMatchesCreateAttempt(committed, body, coordinates)) throw saveError;
-        profile = publicConnection(operationId)!;
-      }
-      setSession(session, { connectionId: profile.id, patSecret: credential.patSecret });
+      return withCredentialMutationLock(async () => {
+        await verifyCredentialForCommit(credential, broker);
+        assertSessionGeneration(generation);
+        let profile: ConnectionProfile;
+        try {
+          profile = saveConnection({
+            id: operationId,
+            label: body.label?.trim() || connectionLabel(coordinates.serverUrl, coordinates.siteContentUrl),
+            ...coordinates,
+            ...(credential.storageKind === 'os'
+              ? { storageKind: 'os' as const, credentialRef: credential.credentialRef }
+              : { storageKind: 'encrypted' as const, patSecret: credential.patSecret }),
+          });
+        } catch (saveError) {
+          const committed = getStoredConnection(operationId);
+          if (!committed || !connectionMatchesCreateAttempt(committed, body, coordinates)) throw saveError;
+          profile = publicConnection(operationId)!;
+        }
+        setSession(session, { connectionId: profile.id, patSecret: credential.patSecret });
 
-      return {
-        ok: true as const,
-        connection: profile,
-        session: publicSession(session),
-      };
+        return {
+          ok: true as const,
+          connection: profile,
+          session: publicSession(session),
+        };
+      });
     });
   });
 
@@ -202,27 +223,34 @@ export function registerTableauRoutes(
     return latest && latest.check !== check ? latest.result : currentStatusAfterSwitch();
   }
 
-  async function checkCurrentSessionStatus(session: TableauSession, check: TableauUserAccessCheck): Promise<TableauStatusResult> {
+  async function checkCurrentSessionStatus(session: TableauSession, check: TableauUserAccessCheck, retried = false): Promise<TableauStatusResult> {
+    const checkedToken = session.token;
     try {
       const response = await fetchImpl(
         `${session.serverUrl}${apiPath(session, `/sites/${encodeURIComponent(session.siteId)}/users/${encodeURIComponent(session.userId)}`)}`,
         {
-          headers: { 'X-Tableau-Auth': session.token, Accept: 'application/json' },
+          headers: { 'X-Tableau-Auth': checkedToken, Accept: 'application/json' },
           redirect: 'error',
           signal: AbortSignal.timeout(10_000),
         },
       );
       if (!response.ok) {
         const body = await readBoundedBody(response, DEFAULT_MAX_RESPONSE_BYTES, 10_000).catch(() => '');
-        const info = parseTableauProviderError(body, [session.token, session.userId, session.siteId, session.serverUrl]);
+        const info = parseTableauProviderError(body, [checkedToken, session.token, session.userId, session.siteId, session.serverUrl]);
         throw new TableauError('Tableau profile check failed.', response.status, '', classifyStatus(response.status, body), info.providerCode, info);
       }
       const payload = await readBoundedBody(response, DEFAULT_MAX_RESPONSE_BYTES, 10_000).then(text => JSON.parse(text)).catch(() => null);
       if (!isTableauUserAccessCheckCurrent(session, check)) return supersededStatus(session, check);
+      if (session.token !== checkedToken) return retried
+        ? { connected: true, reachable: true, restored: false, session: publicSession(session) }
+        : checkCurrentSessionStatus(session, check, true);
       captureCurrentUserName(session, payload);
       return { connected: true, reachable: true, restored: false, session: publicSession(session) };
     } catch (error) {
       if (!isTableauUserAccessCheckCurrent(session, check)) return supersededStatus(session, check);
+      if (session.token !== checkedToken) return retried
+        ? { connected: true, reachable: true, restored: false, session: publicSession(session) }
+        : checkCurrentSessionStatus(session, check, true);
       if (error instanceof TableauError && error.kind === 'auth') {
         clearSession();
         return { connected: false, hasStoredProfile: getStoredConnection() != null };
@@ -245,6 +273,24 @@ export function registerTableauRoutes(
   }
 
   app.get('/api/tableau/connections', async () => ({ connections: listConnections() }));
+  app.get('/api/tableau/credential-retirements', async () => ({
+    retirements: credentialRetirements().filter(item => item.state === 'pending').map(({ ticket, connectionId }) => ({ ticket, connectionId })),
+  }));
+  app.post('/api/tableau/credential-retirements/:ticket', async (req) => {
+    const { ticket } = req.params as { ticket: string };
+    return withCredentialMutationLock(async () => {
+      const record = credentialRetirement(ticket);
+      if (!record) throw app.httpErrors.notFound('Credential retirement not found.');
+      if (record.state === 'removed') return { status: 'removed' as const };
+      if (listConnections().some(connection => connection.storageKind === 'os' && connection.credentialRef === record.oldRef)) return { status: 'in_use' as const };
+      try {
+        if (!('delete' in broker) || typeof broker.delete !== 'function') return { status: 'cleanup_failed' as const };
+        await broker.delete(record.oldRef);
+        markCredentialRetired(record);
+        return { status: 'removed' as const };
+      } catch { return { status: 'cleanup_failed' as const }; }
+    });
+  });
 
   app.post('/api/tableau/connections/reconcile', async (req) => {
     const body = req.body as CredentialReconciliationInput;
@@ -262,7 +308,8 @@ export function registerTableauRoutes(
       if (!connectionId) throw app.httpErrors.badRequest('connectionId is required for replacement reconciliation.');
       const connection = publicConnection(connectionId);
       if (connection?.storageKind === 'os' && connection.credentialRef === credentialRef) {
-        return { status: 'committed' as const, connection };
+        const saved = credentialRetirements().find(item => item.operationId === operationId && item.connectionId === connectionId && item.newRef === credentialRef);
+        return { status: 'committed' as const, connection, ...(saved ? { retirement: { ticket: saved.ticket } } : {}) };
       }
     } else {
       throw app.httpErrors.badRequest('kind must be connect or replace.');
@@ -303,36 +350,36 @@ export function registerTableauRoutes(
       const current = getStoredConnection(id);
       if (!current) throw app.httpErrors.notFound('Saved Tableau connection not found.');
       if (connectionUsesRequestedOsCredential(current, body, patName)) {
-        return resumeCommittedCredentialMutation(
-          app,
-          publicConnection(id)!,
-          body,
-          coordinates,
-          broker,
-          discoverVersion,
-          signIn,
-          fetchImpl,
+        const resumed = await resumeCommittedCredentialMutation(
+          app, publicConnection(id)!, body, coordinates, broker, discoverVersion, signIn, fetchImpl,
         );
+        const saved = credentialRetirements().find(item => item.operationId === operationId && item.connectionId === id && item.newRef === body.credentialRef);
+        return { ...resumed, ...(saved ? { retirement: { ticket: saved.ticket } } : {}) };
       }
 
       const credential = await parseCredentialInput(app, body, broker);
       const session = await createTableauSession(coordinates, credential.patSecret, discoverVersion, signIn, fetchImpl);
-      assertSessionGeneration(generation);
-      const profile = replaceConnectionCredential(id, {
-        patName,
-        ...(credential.storageKind === 'os'
-          ? { storageKind: 'os' as const, credentialRef: credential.credentialRef }
-          : { storageKind: 'encrypted' as const, patSecret: credential.patSecret }),
+      return withCredentialMutationLock(async () => {
+        await verifyCredentialForCommit(credential, broker);
+        assertSessionGeneration(generation);
+        const replaced = replaceCredentialWithRetirement(id, {
+          patName,
+          ...(credential.storageKind === 'os'
+            ? { storageKind: 'os' as const, credentialRef: credential.credentialRef }
+            : { storageKind: 'encrypted' as const, patSecret: credential.patSecret }),
+        }, operationId);
+        if (!replaced) throw app.httpErrors.notFound('Saved Tableau connection not found.');
+        const { profile, retirement } = replaced;
+        const activated = setActiveConnection(id);
+        if (activated) setSession(session, { connectionId: id, patSecret: credential.patSecret });
+        return {
+          ok: true as const,
+          connection: profile,
+          session: activated ? publicSession(session) : null,
+          ...(!activated ? { activationError: activationUnavailable() } : {}),
+          ...(retirement ? { retirement } : {}),
+        };
       });
-      if (!profile) throw app.httpErrors.notFound('Saved Tableau connection not found.');
-      const activated = setActiveConnection(id);
-      if (activated) setSession(session, { connectionId: id, patSecret: credential.patSecret });
-      return {
-        ok: true as const,
-        connection: profile,
-        session: activated ? publicSession(session) : null,
-        ...(!activated ? { activationError: activationUnavailable() } : {}),
-      };
     });
   });
 
@@ -401,6 +448,7 @@ type CredentialMutationResponse = {
   connection: ConnectionProfile;
   session: ReturnType<typeof publicSession> | null;
   activationError?: ReturnType<typeof activationUnavailable>;
+  retirement?: { ticket: string };
 };
 
 type PendingCredentialMutation = {
@@ -507,12 +555,15 @@ async function resumeCommittedCredentialMutation(
   try {
     const credential = await parseCredentialInput(app, body, broker);
     const session = await createTableauSession(coordinates, credential.patSecret, discoverVersion, signIn, fetchImpl);
-    assertSessionGeneration(generation);
-    if (!setActiveConnection(connection.id)) {
-      return { ok: true, connection, session: null, activationError: activationUnavailable() };
-    }
-    setSession(session, { connectionId: connection.id, patSecret: credential.patSecret });
-    return { ok: true, connection, session: publicSession(session) };
+    return await withCredentialMutationLock(async () => {
+      await verifyCredentialForCommit(credential, broker);
+      assertSessionGeneration(generation);
+      const current = getStoredConnection(connection.id);
+      if (!current || current.storageKind !== connection.storageKind || current.credentialRef !== connection.credentialRef || current.patName !== connection.patName) throw new Error('Connection changed during activation.');
+      if (!setActiveConnection(connection.id)) return { ok: true as const, connection, session: null, activationError: activationUnavailable() };
+      setSession(session, { connectionId: connection.id, patSecret: credential.patSecret });
+      return { ok: true as const, connection, session: publicSession(session) };
+    });
   } catch {
     return { ok: true, connection, session: null, activationError: activationUnavailable() };
   }
@@ -594,10 +645,15 @@ async function activateStoredConnection(
   const generation = getSessionGeneration();
   const patSecret = await resolveConnectionSecret(stored, broker);
   const session = await createTableauSession(stored, patSecret, discoverVersion, signIn, fetchImpl);
-  assertSessionGeneration(generation);
-  if (!setActiveConnection(stored.id)) throw new Error('Saved Tableau connection disappeared during activation.');
-  setSession(session, { connectionId: stored.id, patSecret });
-  return session;
+  return withCredentialMutationLock(async () => {
+    if (stored.storageKind === 'os' && (!stored.credentialRef || await broker.resolve(stored.credentialRef) !== patSecret)) throw new Error('Saved OS credential changed during activation.');
+    assertSessionGeneration(generation);
+    const current = getStoredConnection(stored.id);
+    if (!current || current.storageKind !== stored.storageKind || current.credentialRef !== stored.credentialRef || current.patName !== stored.patName || current.patSecretEnc !== stored.patSecretEnc) throw new Error('Saved Tableau connection changed during activation.');
+    if (!setActiveConnection(stored.id)) throw new Error('Saved Tableau connection disappeared during activation.');
+    setSession(session, { connectionId: stored.id, patSecret });
+    return session;
+  });
 }
 
 function assertSessionGeneration(generation: number): void {

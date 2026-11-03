@@ -45,15 +45,16 @@ interface DefinitionCacheEntry {
 }
 
 const definitionCache = new Map<string, DefinitionCacheEntry>();
-const definitionRequests = new Map<string, Promise<PulseDefinitionInventory>>();
+const definitionRequests = new Map<string, { promise: Promise<PulseDefinitionInventory>; fresh: boolean }>();
 export async function getExistingMetrics(
   session: TableauSession,
   datasourceLuid: string,
   dependencies: InventoryDependencies = defaultDependencies,
+  options: { refresh?: boolean } = {},
 ): Promise<ExistingMetricsResult> {
   const inventory =
     dependencies === defaultDependencies
-      ? await cachedDefinitionInventory(session, dependencies)
+      ? await cachedDefinitionInventory(session, dependencies, options)
       : await dependencies.listDefinitions(session);
   const failures: InventoryFailure[] = [];
   let metricsTruncated = false;
@@ -309,20 +310,22 @@ function exactMetricVariant(
 export async function cachedDefinitionInventory(
   session: TableauSession,
   dependencies: InventoryDependencies,
+  options: { refresh?: boolean } = {},
 ): Promise<PulseDefinitionInventory> {
   const now = Date.now();
   const key = definitionCacheKey(session);
   const cached = definitionCache.get(key);
-  if (cached && cached.expiresAt > now) {
+  if (!options.refresh && cached && cached.expiresAt > now) {
     touch(definitionCache, key, cached);
     return structuredClone(cached.inventory);
   }
   const existing = definitionRequests.get(key);
-  if (existing) return structuredClone(await existing);
-  const request = dependencies.listDefinitions(session);
+  if (existing && (!options.refresh || existing.fresh)) return structuredClone(await existing.promise);
+  if (options.refresh) definitionCache.delete(key);
+  const request = { promise: dependencies.listDefinitions(session), fresh: !!options.refresh };
   definitionRequests.set(key, request);
   try {
-    const inventory = await request;
+    const inventory = await request.promise;
     // A mutation may invalidate an older read while its provider request is pending.
     if (definitionRequests.get(key) === request) {
       definitionCache.set(key, {

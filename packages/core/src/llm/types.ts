@@ -59,6 +59,8 @@ export interface LlmProvider {
   label: string;
   isConfigured(): Promise<boolean>;
   getHealth?(signal?: AbortSignal): Promise<LlmProviderHealth>;
+  /** Passive admission before completion; the completion owns capability checks. */
+  getSelectionHealth?(signal?: AbortSignal): Promise<LlmProviderHealth>;
   /** Passive installation/account checks before a model has been selected. */
   getSetupHealth?(signal?: AbortSignal): Promise<LlmProviderHealth>;
   /** Omit when the provider requires a manually entered model ID. */

@@ -256,3 +256,95 @@ for (const spec of cases) {
     assert.equal(calls.length, 0);
   });
 }
+
+for (const spec of cases) {
+  test(`${spec.name} selection and completion run one capability preflight`, async () => {
+    const { ProviderRegistry } = await import('../registry.js');
+    const replies: Array<{ stdout: string }> = [];
+    const { runtime, calls } = fixture(replies);
+    const spawnFixture = runtime.spawn;
+    runtime.spawn = (file, args, options) => { replies.push({ stdout: args.includes('--help') ? spec.help : spec.output }); return spawnFixture(file, args, options); };
+    const adapter = spec.create(profile(spec.protocol), runtime);
+    const stateStore = { getActive: () => spec.protocol, setActive: () => {}, getReadiness: () => null, setReadiness: () => {}, deleteReadiness: () => {} };
+    const registry = new ProviderRegistry({ providers: [adapter], stateStore });
+    try {
+      const selected = await registry.pick(spec.protocol);
+      await selected.complete({ messages: [] });
+      assert.equal(calls.filter((call) => call.args.includes('--help')).length, 1);
+      assert.equal(calls.length, 2);
+    } finally { await registry.close(); }
+  });
+}
+
+for (const spec of cases) {
+  test(`${spec.name} explicit health and changed launcher are checked independently`, async () => {
+    const { ProviderRegistry } = await import('../registry.js');
+    const replies: Array<{ stdout: string }> = [];
+    const { runtime, calls, resolutions } = fixture(replies);
+    const spawnFixture = runtime.spawn;
+    runtime.spawn = (file, args, options) => { replies.push({ stdout: args.includes('--help') ? spec.help : spec.output }); return spawnFixture(file, args, options); };
+    const current = profile(spec.protocol, `${spec.executable} --config before`);
+    const adapter = spec.create(current, runtime);
+    assert.equal((await adapter.getHealth()).configured, true);
+    assert.equal(calls.filter((call) => call.args.includes('--help')).length, 1);
+    const stateStore = { getActive: () => spec.protocol, setActive: () => {}, getReadiness: () => null, setReadiness: () => {}, deleteReadiness: () => {} };
+    const registry = new ProviderRegistry({ providers: [adapter], stateStore });
+    try {
+      const selected = await registry.pick(spec.protocol);
+      current.command = 'new-launcher --config after';
+      current.model = 'different-model';
+      runtime.env!.CUSTOM_TOOL_TOKEN = 'changed-token';
+      await selected.complete({ messages: [] });
+      assert.equal(calls.filter((call) => call.args.includes('--help')).length, 2);
+      assert.ok(resolutions.includes('new-launcher'));
+      assert.equal(calls.at(-1)!.file, 'new-launcher');
+      assert.deepEqual(calls.at(-1)!.args.slice(0, 2), ['--config', 'after']);
+      assert.ok(calls.at(-1)!.args.includes('different-model'));
+      assert.equal(calls.at(-1)!.options.env?.CUSTOM_TOOL_TOKEN, 'changed-token');
+    } finally { await registry.close(); }
+  });
+
+  test(`${spec.name} direct completion and selection cannot bypass unsupported capability`, async () => {
+    const { ProviderRegistry } = await import('../registry.js');
+    const { runtime, calls } = fixture([{ stdout: 'unsupported' }, { stdout: 'unsupported' }]);
+    const adapter = spec.create(profile(spec.protocol), runtime);
+    await assert.rejects(adapter.complete({ messages: [] }), (error: any) => error.code === 'provider_execution');
+    const stateStore = { getActive: () => spec.protocol, setActive: () => {}, getReadiness: () => null, setReadiness: () => {}, deleteReadiness: () => {} };
+    const registry = new ProviderRegistry({ providers: [adapter], stateStore });
+    try {
+      const selected = await registry.pick(spec.protocol);
+      await assert.rejects(selected.complete({ messages: [] }), (error: any) => error.code === 'provider_execution');
+      assert.equal(calls.length, 2);
+      assert.ok(calls.every((call) => call.args.includes('--help')));
+    } finally { await registry.close(); }
+  });
+}
+
+for (const spec of cases) {
+  test(`${spec.name} cancelled selection does not wait for a stalled executable resolver`, async () => {
+    const { ProviderRegistry } = await import('../registry.js');
+    const { runtime } = fixture([]);
+    runtime.resolve = async () => new Promise(() => {});
+    const adapter = spec.create(profile(spec.protocol), runtime);
+    const stateStore = { getActive: () => spec.protocol, setActive: () => {}, getReadiness: () => null, setReadiness: () => {}, deleteReadiness: () => {} };
+    const registry = new ProviderRegistry({ providers: [adapter], stateStore });
+    const picking = registry.pick(spec.protocol);
+    const guarded = picking.catch((error) => error);
+    await Promise.resolve();
+    const completed = await Promise.race([registry.close().then(() => true), new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 300))]);
+    assert.equal(completed, true);
+    assert.equal((await guarded).name, 'AbortError');
+  });
+}
+
+for (const spec of cases) {
+  test(`${spec.name} completion deadline bounds stalled executable resolution`, async () => {
+    const { runtime, calls } = fixture([]);
+    runtime.resolve = async () => new Promise(() => {});
+    const timeoutGuard = setTimeout(() => {}, 250);
+    try {
+      await assert.rejects(spec.create(profile(spec.protocol), runtime).complete({ messages: [], timeoutMs: 15 }), (error: any) => error.code === 'provider_timeout');
+      assert.equal(calls.length, 0);
+    } finally { clearTimeout(timeoutGuard); }
+  });
+}

@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ComponentProps } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { validatePulseDocument } from "@pulse-metric-studio/shared";
 import {
   MetricTable,
@@ -11,16 +12,39 @@ import { Modal } from "./ui";
 
 const PAGE_SIZE = 50;
 
+export function DimensionMetricRows({ fields, page, onPageChange, ...table }: ComponentProps<typeof MetricTable> & {
+  page: number;
+  onPageChange: (page: number) => void;
+}) {
+  const currentPage = Math.min(page, Math.max(0, Math.ceil(fields.length / PAGE_SIZE) - 1));
+  return <>
+    <MetricTable {...table} fields={fields.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE)} />
+    {fields.length > PAGE_SIZE && <Pagination page={currentPage} size={PAGE_SIZE} count={fields.length} label="Dimensions" onChange={onPageChange} />}
+  </>;
+}
+
+export function selectConfigEditor(state: Parameters<typeof activeEditor>[0]) {
+  const current = activeEditor(state);
+  return current ? { record: current.record, document: current.document, catalog: current.catalog,
+    catalogLoading: current.catalogLoading, catalogError: current.catalogError } : null;
+}
+
 export function ConfigEditor() {
-  const entry = useAuthor(activeEditor);
+  const entry = useAuthor(useShallow(selectConfigEditor));
   const session = useConnection((state) => state.session);
-  const { updateMetric, toggleMetric, toggleSlicer } = useAuthor();
+  const updateMetric = useAuthor((state) => state.updateMetric);
+  const toggleMetric = useAuthor((state) => state.toggleMetric);
+  const toggleSlicer = useAuthor((state) => state.toggleSlicer);
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(0);
+  const [dimensionPage, setDimensionPage] = useState(0);
+  const [dimensionsOpen, setDimensionsOpen] = useState(false);
   const [hideUnused, setHideUnused] = useState(false);
   const [clearing, setClearing] = useState(false);
   useEffect(() => {
     setPage(0);
+    setDimensionPage(0);
+    setDimensionsOpen(false);
     setQuery("");
   }, [entry?.record.id]);
   const fields = useMemo(() => {
@@ -115,6 +139,7 @@ export function ConfigEditor() {
             onChange={(event) => {
               setQuery(event.target.value);
               setPage(0);
+              setDimensionPage(0);
             }}
           />
         </label>
@@ -125,6 +150,7 @@ export function ConfigEditor() {
             onChange={(event) => {
               setHideUnused(event.target.checked);
               setPage(0);
+              setDimensionPage(0);
             }}
           />
           Hide unused
@@ -287,11 +313,14 @@ export function ConfigEditor() {
       <details
         className="pulse-dimension-group"
         data-testid="dimension-metrics"
+        open={dimensionsOpen}
+        onToggle={(event) => setDimensionsOpen(event.currentTarget.open)}
       >
         <summary>
           Dimensions <span>{dimensions.length}</span>
         </summary>
-        {renderRows(dimensions)}
+        {dimensionsOpen && <DimensionMetricRows fields={dimensions} page={dimensionPage} onPageChange={setDimensionPage}
+          metrics={document.metrics} catalog={catalog} onToggle={toggleMetric} onChange={updateMetric} />}
       </details>
       {measures.length > PAGE_SIZE && (
         <Pagination

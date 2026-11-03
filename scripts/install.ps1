@@ -16,6 +16,8 @@ param(
     [string]$Version = $(if ($env:PULSE_METRIC_STUDIO_VERSION) { $env:PULSE_METRIC_STUDIO_VERSION } else { 'latest' }),
     [string]$Repo = $(if ($env:PULSE_METRIC_STUDIO_REPO) { $env:PULSE_METRIC_STUDIO_REPO } else { 'ahillspace/pulse-metric-studio' }),
     [switch]$NoLaunch,
+    # Existing installation selected by the running desktop app, when updating.
+    [string]$InstallDir,
     # Used by Pulse Metric Studio when it updates itself.
     [switch]$Update
 )
@@ -26,18 +28,26 @@ $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 $ProgressPreference = 'SilentlyContinue'
 
-# The NSIS installer's default per-user location.
-$InstallDir = Join-Path $env:LOCALAPPDATA 'Pulse Metric Studio'
 $DataDir = Join-Path $env:APPDATA 'com.ahillspace.pulsemetricstudio'
 
 function Start-PulseMetricStudio {
-    $exe = Get-ChildItem -Path $InstallDir -Filter '*.exe' -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -notlike 'uninstall*' } |
-        Select-Object -First 1
-    if ($exe) {
-        Start-Process -FilePath $exe.FullName
+    if (-not $InstallDir) { return }
+    $exe = Join-Path $InstallDir 'pulse-metric-studio.exe'
+    if (Test-Path -LiteralPath $exe -PathType Leaf) {
+        Start-Process -FilePath $exe
         Write-Host 'Pulse Metric Studio is starting.'
     }
+}
+
+function Get-ValidatedInstallDirectory([string]$Candidate) {
+    if ([string]::IsNullOrWhiteSpace($Candidate)) { return $null }
+    $candidatePath = $Candidate.Trim().Trim('"')
+    # Reject drive-relative and device paths before resolving the directory.
+    if ($candidatePath -notmatch '^(?:[A-Za-z]:\\|\\\\[^\\?\.]+\\[^\\]+\\?)') { return $null }
+    try { $candidatePath = [IO.Path]::GetFullPath($candidatePath) } catch { return $null }
+    if ($candidatePath.TrimEnd('\') -eq [IO.Path]::GetPathRoot($candidatePath).TrimEnd('\')) { return $null }
+    if (-not (Test-Path -LiteralPath (Join-Path $candidatePath 'pulse-metric-studio.exe') -PathType Leaf)) { return $null }
+    return $candidatePath.TrimEnd('\')
 }
 
 # Throw rather than exit: this script usually runs as a script block inside the
@@ -54,6 +64,25 @@ function Fail([string]$Message) {
     }
     throw "Pulse Metric Studio installer error: $Message"
 }
+
+# Use only a registered location containing the expected executable, or the
+# executable directory supplied by the running application.
+if ($PSBoundParameters.ContainsKey('InstallDir')) {
+    $InstallDir = Get-ValidatedInstallDirectory $InstallDir
+    if (-not $InstallDir) { Fail 'The selected installation directory is not a valid Pulse Metric Studio installation.' }
+} else {
+    $locations = @(@(
+        foreach ($key in @('HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Pulse Metric Studio',
+                           'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Pulse Metric Studio',
+                           'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Pulse Metric Studio')) {
+            $registered = Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue
+            if ($registered) { Get-ValidatedInstallDirectory $registered.InstallLocation }
+        }
+    ) | Select-Object -Unique)
+    if (@($locations).Count -gt 1) { Fail 'Multiple Pulse Metric Studio installations were found. Choose the installation directory explicitly.' }
+    $InstallDir = if ($locations) { $locations[0] } else { Join-Path $env:LOCALAPPDATA 'Pulse Metric Studio' }
+}
+
 
 # A public repository serves its releases over plain HTTPS. Anything else
 # (a private repository, or one without releases yet) needs the GitHub CLI.
@@ -85,8 +114,17 @@ function Stop-PulseMetricStudio {
 if ($Action -eq 'Uninstall') {
     Stop-PulseMetricStudio
     $uninstaller = Join-Path $InstallDir 'uninstall.exe'
-    if (Test-Path $uninstaller) {
-        Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait
+    if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
+        # NSIS normally relaunches its uninstaller from a temporary copy, so
+        # waiting on the original process cannot establish removal success.
+        $copy = Join-Path ([IO.Path]::GetTempPath()) ("pulse-metric-studio-$([guid]::NewGuid())-uninstall.exe")
+        try {
+            Copy-Item -LiteralPath $uninstaller -Destination $copy
+            $process = Start-Process -FilePath $copy -ArgumentList @('/S', "_?=$InstallDir") -Wait -PassThru -WindowStyle Hidden
+            if ($process.ExitCode -ne 0 -or (Test-Path -LiteralPath (Join-Path $InstallDir 'pulse-metric-studio.exe')) -or (Test-Path -LiteralPath $uninstaller)) {
+                Fail 'Pulse Metric Studio removal could not be confirmed. The update channel was retained.'
+            }
+        } finally { Remove-Item -LiteralPath $copy -Force -ErrorAction SilentlyContinue }
         Remove-Item -Force (Join-Path $DataDir 'update-channel') -ErrorAction SilentlyContinue
         Write-Host 'Pulse Metric Studio was uninstalled. Your data is kept in %APPDATA%\com.ahillspace.pulsemetricstudio, and saved Tableau tokens stay in Credential Manager.'
     } else {
@@ -157,7 +195,7 @@ try {
     Write-Host 'Checksum verified.'
 
     Stop-PulseMetricStudio
-    $process = Start-Process -FilePath $setup.FullName -ArgumentList '/S' -Wait -PassThru
+    $process = Start-Process -FilePath $setup.FullName -ArgumentList @('/S', "/D=$InstallDir") -Wait -PassThru -WindowStyle Hidden
     if ($process.ExitCode -ne 0) { Fail "The installer exited with code $($process.ExitCode)." }
     Write-Host "Installed Pulse Metric Studio $tag to $InstallDir."
 
