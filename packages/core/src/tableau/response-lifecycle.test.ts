@@ -1,13 +1,20 @@
 import assert from 'node:assert/strict';
-import { afterEach, test } from 'node:test';
+import { after, afterEach, test } from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createServer, type ServerResponse } from 'node:http';
 import { deleteReq, getJson, postJson, tableauFetch, TableauError, type TableauSession } from './rest-client.js';
+import { config } from '../config.js';
+import { closeDb } from '../db/index.js';
+import * as sessions from './session.js';
 
 const originalFetch = globalThis.fetch;
-afterEach(() => { globalThis.fetch = originalFetch; });
+const originalPaths = { dataDir: config.dataDir, dbPath: config.dbPath, machineKeyPath: config.machineKeyPath };
+const credentialDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'pulse-auth-body-'));
+Object.assign(config, { dataDir: credentialDirectory, dbPath: path.join(credentialDirectory, 'fixture.db'), machineKeyPath: path.join(credentialDirectory, 'machine.key') });
+afterEach(() => { globalThis.fetch = originalFetch; sessions.clearSession(); });
+after(() => { closeDb(); Object.assign(config, originalPaths); fs.rmSync(credentialDirectory, { recursive: true, force: true }); });
 const owner = (userId: string): TableauSession => ({ serverUrl: 'https://fixture.example.test', siteContentUrl: '', siteId: 'site', userId, token: 'fixture-token', apiVersion: '3.27' });
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 async function until(check: () => boolean) {
@@ -243,16 +250,11 @@ for (const status of [204, 205, 304]) {
 }
 
 for (const failure of ['stalled', 'disconnected', 'oversized'] as const) {
-  test(`simultaneous 401 ${failure} bodies cannot block the shared authentication refresh`, async (t) => {
-    const { config } = await import('../config.js');
-    const { closeDb } = await import('../db/index.js');
-    const sessions = await import('./session.js');
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pulse-auth-body-'));
-    config.dataDir = directory;
-    config.dbPath = path.join(directory, 'fixture.db');
-    t.after(() => { sessions.clearSession(); closeDb(); fs.rmSync(directory, { recursive: true, force: true }); });
+  test(`simultaneous 401 ${failure} bodies cannot block the shared authentication refresh`, async () => {
     const session = owner(`auth-${failure}`);
     const profile = sessions.saveConnection({ label: 'Fixture', serverUrl: session.serverUrl, siteContentUrl: '', patName: 'fixture', storageKind: 'encrypted', patSecret: 'fixture-secret' });
+    assert.equal(path.dirname(config.machineKeyPath), credentialDirectory);
+    assert.ok(fs.existsSync(config.machineKeyPath), 'credential encryption uses the fixture-owned key path');
     sessions.setSession(session, { connectionId: profile.id, patSecret: 'fixture-secret' });
     let signins = 0;
     let rejected = 0;
