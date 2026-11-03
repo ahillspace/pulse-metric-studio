@@ -15,9 +15,15 @@ const MAX_DETAIL_LENGTH = 300;
  * credential-field redaction.
  */
 export async function readProviderErrorDetail(response: Response, credentials: Array<string | undefined> = []): Promise<string | undefined> {
+  let text: string;
+  try {
+    text = await readBoundedText(response);
+  } catch {
+    return undefined;
+  }
   let body: unknown;
   try {
-    body = JSON.parse(await readBoundedText(response));
+    body = JSON.parse(text);
   } catch {
     return undefined;
   }
@@ -73,13 +79,17 @@ async function readBoundedText(response: Response): Promise<string> {
   if (!reader) return '';
   const chunks: Uint8Array[] = [];
   let bytes = 0;
-  while (bytes < MAX_ERROR_BODY_BYTES) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    const kept = value.subarray(0, MAX_ERROR_BODY_BYTES - bytes);
-    chunks.push(kept);
-    bytes += kept.byteLength;
+  try {
+    while (bytes < MAX_ERROR_BODY_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const kept = value.subarray(0, MAX_ERROR_BODY_BYTES - bytes);
+      chunks.push(kept);
+      bytes += kept.byteLength;
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
   }
-  await reader.cancel().catch(() => undefined);
   return Buffer.concat(chunks).toString('utf8');
 }

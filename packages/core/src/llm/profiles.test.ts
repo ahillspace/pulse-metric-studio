@@ -382,3 +382,24 @@ test('LLM registry state persists active selection and readiness timestamps', ()
     db.close();
   }
 });
+
+test('Chat compatibility persists across reopen and omitted-field edits and clears on protocol change', async () => {
+  const { store, stateStore, save } = fixture();
+  await save({ ...concurrentProfile, chatCompatibility: 'modern' } as LlmProfileWrite);
+  const reopened = new DbLlmProfileStore();
+  assert.equal((reopened.list().find(profile => profile.id === concurrentProfile.id) as any)?.chatCompatibility, 'modern');
+  const registry = new ProviderRegistry({ store, stateStore, environment: {} });
+  const app = await routes(registry);
+  try {
+    const read = await app.inject('/api/llm/profiles');
+    assert.equal(read.json().profiles[0].chatCompatibility, 'modern');
+    const edited = await app.inject({ method: 'PUT', url: '/api/llm/profiles/concurrent', payload: { ...concurrentProfile, label: 'Renamed' } });
+    assert.equal(edited.statusCode, 200, edited.body);
+    assert.equal(edited.json().chatCompatibility, 'modern');
+    const invalid = await app.inject({ method: 'PUT', url: '/api/llm/profiles/concurrent', payload: { ...concurrentProfile, protocol: 'openai-responses', chatCompatibility: 'modern' } });
+    assert.equal(invalid.statusCode, 400, invalid.body);
+    const switched = await app.inject({ method: 'PUT', url: '/api/llm/profiles/concurrent', payload: { ...concurrentProfile, protocol: 'openai-responses' } });
+    assert.equal(switched.statusCode, 200, switched.body);
+    assert.equal(switched.json().chatCompatibility, 'auto');
+  } finally { await app.close(); await registry.close(); }
+});

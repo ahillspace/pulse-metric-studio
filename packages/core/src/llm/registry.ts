@@ -312,6 +312,8 @@ export class ProviderRegistry {
       command: profile.command,
       credentialCommand: profile.credentialCommand,
       allowPrivateNetwork: profile.allowPrivateNetwork ?? false,
+      ...(profile.protocol === 'openai-chat' && profile.chatCompatibility && profile.chatCompatibility !== 'auto'
+        ? { chatCompatibility: profile.chatCompatibility } : {}),
       source: profile.source,
     };
     return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');

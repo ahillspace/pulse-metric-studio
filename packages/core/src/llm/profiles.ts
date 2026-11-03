@@ -1,7 +1,7 @@
 import type { Db } from '../db/index.js';
 import { getDb, getSetting, setSetting } from '../db/index.js';
 import { secretVault, type SecretVault } from '../secrets/vault.js';
-import type { LlmAuthMode, LlmHealthReasonCode, LlmProfilePublic, LlmProfileWrite, LlmProtocol } from '@pulse-metric-studio/shared';
+import type { LlmAuthMode, LlmChatCompatibility, LlmHealthReasonCode, LlmProfilePublic, LlmProfileWrite, LlmProtocol } from '@pulse-metric-studio/shared';
 
 /** Profiles saved by releases before 0.1.2, until the saved-secrets migration moves them. */
 export const LEGACY_PROFILES_KEY = 'llm.profiles.v1';
@@ -41,6 +41,7 @@ export interface StoredLlmProfile {
   /** The executable's name only, kept beside the vault reference for display. */
   credentialCommandHint: string | null;
   allowPrivateNetwork?: boolean;
+  chatCompatibility?: LlmChatCompatibility;
   source: 'environment' | 'saved';
 }
 
@@ -112,6 +113,7 @@ interface ProfileRow {
   credential_command_ref: string | null;
   credential_command_hint: string | null;
   allow_private_network: number;
+  chat_compatibility: LlmChatCompatibility;
 }
 
 export class DbLlmProfileStore implements LlmProfileStore {
@@ -175,8 +177,8 @@ export class DbLlmProfileStore implements LlmProfileStore {
         `INSERT INTO llm_profiles (
            id, label, protocol, base_url, model, auth_mode, secret_ref, header_refs_json, region,
            aws_profile, command, credential_command_ref, credential_command_hint, allow_private_network,
-           created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           created_at, updated_at, chat_compatibility
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            label = excluded.label, protocol = excluded.protocol, base_url = excluded.base_url,
            model = excluded.model, auth_mode = excluded.auth_mode, secret_ref = excluded.secret_ref,
@@ -184,12 +186,13 @@ export class DbLlmProfileStore implements LlmProfileStore {
            aws_profile = excluded.aws_profile, command = excluded.command,
            credential_command_ref = excluded.credential_command_ref,
            credential_command_hint = excluded.credential_command_hint,
-           allow_private_network = excluded.allow_private_network, updated_at = excluded.updated_at`,
+           allow_private_network = excluded.allow_private_network, updated_at = excluded.updated_at,
+           chat_compatibility = excluded.chat_compatibility`,
       ).run(
         saved.id, saved.label, saved.protocol, saved.baseUrl, saved.model, saved.authMode,
         refOf(saved.secret), JSON.stringify(Object.fromEntries(Object.entries(saved.headers).map(([name, value]) => [name, refOf(value)]))),
         saved.region, saved.awsProfile, saved.command, refOf(saved.credentialCommand), saved.credentialCommandHint,
-        saved.allowPrivateNetwork ? 1 : 0, now, now,
+        saved.allowPrivateNetwork ? 1 : 0, now, now, saved.chatCompatibility ?? 'auto',
       );
     } catch (error) {
       await this.discard(created);
@@ -264,6 +267,7 @@ function profileFromRow(row: ProfileRow): StoredLlmProfile {
     credentialCommand: row.credential_command_ref ? { ref: row.credential_command_ref } : null,
     credentialCommandHint: row.credential_command_hint,
     allowPrivateNetwork: row.allow_private_network === 1,
+    chatCompatibility: row.chat_compatibility,
     source: 'saved',
   };
 }
@@ -347,6 +351,9 @@ export function resolveLlmProfile(input: LlmProfileWrite, existing?: StoredLlmPr
     credentialCommand: command?.source ?? null,
     credentialCommandHint: command?.source ? command.hint : null,
     allowPrivateNetwork: cli ? false : input.allowPrivateNetwork ?? false,
+    chatCompatibility: input.protocol === 'openai-chat'
+      ? input.chatCompatibility ?? (existing?.protocol === 'openai-chat' ? existing.chatCompatibility : undefined) ?? 'auto'
+      : 'auto',
     source: 'saved',
   };
 }
@@ -367,6 +374,7 @@ export function toPublicProfile(profile: StoredLlmProfile): LlmProfilePublic {
     hasCredentialCommand: profile.credentialCommand !== null,
     credentialCommandHint: profile.credentialCommand ? profile.credentialCommandHint : null,
     allowPrivateNetwork: profile.allowPrivateNetwork ?? false,
+    chatCompatibility: profile.chatCompatibility ?? 'auto',
     source: profile.source,
   };
 }

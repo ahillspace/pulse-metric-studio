@@ -393,6 +393,16 @@ Provider profiles use one storage, registry, API, and settings workflow.
 The `codex-cli` and `claude-code` protocols use `local-account` authentication.
 Their concrete adapters own CLI discovery, launch validation, headless execution, response parsing, and error classification.
 HTTP adapters continue to own API-key and gateway requests.
+Chat Completions profiles store a `chatCompatibility` setting: `auto`, `modern`, or `legacy`.
+Automatic mode uses `max_completion_tokens` for `api.openai.com` and retains `max_tokens` for other endpoints.
+The **Chat Completions compatibility** control in **Advanced settings** overrides the request contract for custom gateways.
+Modern mode selects `max_completion_tokens`; legacy mode selects `max_tokens`.
+Contract selection happens before sending; the adapter never resubmits inference to try another token parameter.
+Changing compatibility requires a new successful connection test or authoring request before readiness turns green.
+The HTTP transport deadline covers headers and bounded body consumption.
+Successful response body timeouts and connection failures retain provider, model, and retry metadata and bypass model-format repair.
+For an error response, the HTTP status determines the classification if reading its diagnostic body fails.
+Caller cancellation retains its original reason; completed malformed or oversized provider bodies remain invalid-response failures.
 Pulse authoring receives assistant text through `LlmProvider.complete()` and applies the existing parsing, schema, semantic, and proposal checks.
 The app applies those checks to proposed operations before accepting draft changes or publishing through its interface.
 Dropped-operation warnings reach proposal review and candidate chat, with at most 20 warnings of 500 characters each.

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import Database from 'better-sqlite3';
 import { test } from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -91,4 +92,33 @@ test('feature migration failure rolls back schema and data and retains its pre-m
     registerDbMigrations('fixture', []);
     fs.rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test('Chat compatibility migration preserves profiles, secret references and selection and rolls back interrupted ledger writes', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'chat-contract-migration-'));
+  config.dataDir = directory; config.dbPath = path.join(directory, 'test.db');
+  try {
+    const db = getDb();
+    db.exec(`ALTER TABLE llm_profiles DROP COLUMN chat_compatibility;
+      DELETE FROM _migrations WHERE key='migration:006';
+      INSERT INTO settings VALUES('llm.provider','saved-provider');
+      INSERT INTO llm_profiles (id,label,protocol,base_url,model,auth_mode,secret_ref,header_refs_json,region,aws_profile,command,credential_command_ref,credential_command_hint,allow_private_network,created_at,updated_at)
+      VALUES('saved-provider','Saved','openai-chat','https://gateway.example.test/v1','fixture','bearer','saved-secret-ref','{"x-route":"saved-header-ref"}','','','','saved-command-ref','fixture',0,1,2);
+      CREATE TRIGGER reject_contract_migration BEFORE INSERT ON _migrations WHEN NEW.key='migration:006' BEGIN SELECT RAISE(ABORT,'Migration interrupted'); END;`);
+    closeDb();
+    assert.throws(() => getDb(), /Migration interrupted/);
+    const inspect = new Database(config.dbPath);
+    assert.equal((inspect.prepare('PRAGMA table_info(llm_profiles)').all() as Array<{ name: string }>).some(column => column.name === 'chat_compatibility'), false);
+    assert.equal(inspect.prepare("SELECT key FROM _migrations WHERE key='migration:006'").get(), undefined);
+    inspect.exec('DROP TRIGGER reject_contract_migration'); inspect.close();
+    const migrated = getDb();
+    const saved = migrated.prepare("SELECT * FROM llm_profiles WHERE id='saved-provider'").get() as any;
+    assert.equal(saved.chat_compatibility, 'auto');
+    assert.equal(saved.secret_ref, 'saved-secret-ref');
+    assert.equal(saved.header_refs_json, '{"x-route":"saved-header-ref"}');
+    assert.equal(saved.credential_command_ref, 'saved-command-ref');
+    assert.equal(saved.created_at, 1); assert.equal(saved.updated_at, 2);
+    assert.equal(migrated.prepare("SELECT value FROM settings WHERE key='llm.provider'").pluck().get(), 'saved-provider');
+    assert.ok(migrated.prepare("SELECT key FROM _migrations WHERE key='migration:006'").get());
+  } finally { closeDb(); fs.rmSync(directory, { recursive: true, force: true }); }
 });

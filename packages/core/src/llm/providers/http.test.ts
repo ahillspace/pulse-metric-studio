@@ -177,3 +177,38 @@ test('HTTP cancellation before sending does not submit a request', async () => {
   await assert.rejects(() => provider.complete({ messages: [], signal: AbortSignal.abort() }), { name: 'AbortError' });
   assert.equal(sent, false);
 });
+
+test('Chat Completions token limits follow the endpoint contract without guessing model names', async () => {
+  for (const [baseUrl, model, chatCompatibility, expected] of [
+    ['https://api.openai.com/v1', 'o3', undefined, 'max_completion_tokens'],
+    ['https://api.openai.com/v1', 'ordinary-model', undefined, 'max_completion_tokens'],
+    ['https://api.openai.com/v1', 'o3', 'legacy', 'max_tokens'],
+    ['https://gateway.example.test/v1', 'o3', undefined, 'max_tokens'],
+    ['https://api.openai.com.gateway.example.test/v1', 'o3', undefined, 'max_tokens'],
+    ['https://gateway.example.test/v1', 'deployment-alias', 'modern', 'max_completion_tokens'],
+  ] as const) {
+    const bodies: Record<string, unknown>[] = [];
+    const configured = { ...profile('openai-chat'), baseUrl, model, chatCompatibility };
+    const provider = new HttpLlmProvider(configured, async (_input, init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return Response.json({ choices: [{ message: { content: 'done' } }] });
+    }, allowEndpoint);
+    await provider.complete({ messages: [{ role: 'user', content: 'hello' }], maxTokens: 16 });
+    assert.equal(bodies.length, 1, 'contract selection never resubmits inference');
+    assert.equal(bodies[0]![expected], 16, `${baseUrl}, ${chatCompatibility ?? 'auto'}`);
+    assert.equal(Object.hasOwn(bodies[0]!, expected === 'max_tokens' ? 'max_completion_tokens' : 'max_tokens'), false);
+  }
+});
+
+test('other HTTP protocols keep their own token-limit contracts', async () => {
+  for (const [protocol, expected] of [['openai-responses', 'max_output_tokens'], ['anthropic-messages', 'max_tokens']] as const) {
+    let body: Record<string, unknown> = {};
+    const provider = new HttpLlmProvider(profile(protocol), async (_input, init) => {
+      body = JSON.parse(String(init?.body));
+      return Response.json({ output_text: 'done', content: [{ text: 'done' }] });
+    }, allowEndpoint);
+    await provider.complete({ messages: [], maxTokens: 17 });
+    assert.equal(body[expected], 17);
+    assert.equal(Object.hasOwn(body, 'max_completion_tokens'), false);
+  }
+});

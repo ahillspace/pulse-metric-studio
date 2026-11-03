@@ -611,3 +611,42 @@ test('Fastify preClose cancels in-flight requests and setup checks before waitin
 function withModels(listModels: (profile: StoredLlmProfile) => Promise<Array<{ id: string; label: string }>>): (profile: StoredLlmProfile) => LlmProvider {
   return profile => ({ ...provider(profile.id), label: profile.label, listModels: () => listModels(profile) });
 }
+
+test('changing Chat compatibility retires the provider and invalidates old readiness and late success', async () => {
+  const store = memoryProfiles([storedProfile('gateway', 'openai-chat', 'model')]);
+  const state = memoryState('gateway');
+  const clients: Array<{ disposed: number }> = [];
+  const registry = new ProviderRegistry({ store, stateStore: state, environment: {}, providerFactory: profile => {
+    const client = { disposed: 0 }; clients.push(client);
+    return { ...provider(profile.id), dispose: () => { client.disposed++; } };
+  } });
+  try {
+    const old = await registry.pick();
+    await old.complete({ messages: [] });
+    old.tracking!.commitSuccess();
+    assert.equal((await registry.status()).readiness.state, 'green');
+    const late = await registry.pick(); await late.complete({ messages: [] });
+    await registry.saveProfile({ id: 'gateway', label: 'gateway', protocol: 'openai-chat', baseUrl: 'https://gateway.example.test/v1', model: 'model', authMode: 'none', chatCompatibility: 'modern' });
+    assert.equal(clients[0].disposed, 1);
+    assert.equal((await registry.status()).readiness.state, 'yellow');
+    late.tracking!.commitSuccess();
+    assert.equal((await registry.status()).readiness.state, 'yellow');
+    const current = await registry.pick();
+    await current.complete({ messages: [] }); current.tracking!.commitSuccess();
+    assert.equal((await registry.status()).readiness.state, 'green');
+  } finally { await registry.close(); }
+});
+
+test('additive automatic compatibility keeps prior Chat and non-Chat readiness fingerprints', async () => {
+  for (const protocol of ['openai-chat', 'openai-responses', 'opencode'] as const) {
+    const saved = storedProfile('fixture', protocol, 'fixture-model');
+    const store = memoryProfiles([saved]);
+    const registry = new ProviderRegistry({ store, stateStore: memoryState('fixture'), environment: {}, providerFactory: profile => provider(profile.id) });
+    try {
+      const tracked = await registry.pick(); await tracked.complete({ messages: [] }); tracked.tracking!.commitSuccess();
+      assert.equal((await registry.status()).readiness.state, 'green');
+      await store.save({ ...saved, chatCompatibility: 'auto' });
+      assert.equal((await registry.status()).readiness.state, 'green', protocol);
+    } finally { await registry.close(); }
+  }
+});

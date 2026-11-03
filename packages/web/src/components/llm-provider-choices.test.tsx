@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import React from 'react';
 import { test } from 'node:test';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { act, create } from 'react-test-renderer';
 import { LLM_PROTOCOLS } from '@pulse-metric-studio/shared';
 import { ProviderSetupChoices, PROVIDER_CHOICES, newProviderId, providerAccess, providerChoice, providerDescription, straightenQuotes } from './llm-provider-choices';
 import { ProfileEditor, changeProfileProtocol } from './LlmSettings';
@@ -75,6 +76,7 @@ test('protocol conversion preserves compatible API drafts and clears incompatibl
   const api: Parameters<typeof ProfileEditor>[0]['form'] = {
     id: 'gateway', label: 'Gateway', protocol: 'openai-chat', baseUrl: 'https://gateway.example.test/v1',
     model: 'explicit-model', authMode: 'x-api-key', secret: 'new-key', hasSecret: true, clearSecret: false,
+    chatCompatibility: 'auto',
     headersText: '{"x-route":"draft"}', headersDirty: true, clearHeaders: false,
     region: '', awsProfile: '', command: '', credentialCommand: 'new-command', hasCredentialCommand: true,
     credentialCommandHint: 'saved-command', clearCredentialCommand: false, allowPrivateNetwork: true, source: 'saved',
@@ -177,3 +179,30 @@ for (const protocol of ['codex-cli', 'claude-code'] as const) {
     assert.match(saved, /<button[^>]*>Save profile/);
   });
 }
+
+test('Chat compatibility is visible, editable and reset when switching away from Chat Completions', () => {
+  let edited: Parameters<typeof ProfileEditor>[0]['form'] | undefined;
+  const props: Parameters<typeof ProfileEditor>[0] = {
+    form: { id: 'gateway', label: 'Gateway', protocol: 'openai-chat', baseUrl: 'https://gateway.example.test/v1', model: 'deployment', authMode: 'none', chatCompatibility: 'modern', secret: '', hasSecret: false, clearSecret: false, headersText: '{}', headersDirty: false, clearHeaders: false, region: '', awsProfile: '', command: '', credentialCommand: '', hasCredentialCommand: false, credentialCommandHint: null, clearCredentialCommand: false, allowPrivateNetwork: false, source: 'saved' },
+    setForm: form => { edited = form; }, dirty: false, existing: true, busy: false,
+    onCheck: async () => {}, onSave: async () => {}, onTest: async () => {}, onSelect: () => {}, onDelete: () => {},
+  };
+  const html = renderToStaticMarkup(<ProfileEditor {...props} />);
+  assert.match(html, /Chat Completions compatibility/);
+  assert.match(html, /value="modern" selected=""/);
+  assert.match(html, /Automatic uses modern token limits for OpenAI and legacy limits for other endpoints/);
+  let renderer!: ReturnType<typeof create>;
+  act(() => { renderer = create(<ProfileEditor {...props} />); });
+  try {
+    const control = renderer.root.findAllByType('select').find(select => select.props.value === 'modern');
+    assert.ok(control);
+    act(() => control.props.onChange({ target: { value: 'legacy' } }));
+    assert.equal(edited?.chatCompatibility, 'legacy');
+  } finally { act(() => renderer.unmount()); }
+  for (const protocol of ['openai-responses', 'anthropic-messages', 'codex-cli'] as const) {
+    const switched = changeProfileProtocol(props.form, protocol, true);
+    assert.equal(switched.chatCompatibility, 'auto');
+    assert.doesNotMatch(renderToStaticMarkup(<ProfileEditor {...props} form={switched} />), /Chat Completions compatibility/);
+    assert.equal(changeProfileProtocol(switched, 'openai-chat', true).chatCompatibility, 'auto');
+  }
+});
