@@ -42,7 +42,19 @@ export const PulseSlicerDraftSchema = z.object({
   fieldId: id,
   fieldLabel: z.string(),
 });
-export const PulseWorkspaceDocumentV1Schema = z.object({
+export const PulseFollowModeSchema = z.enum(['none', 'self', 'group']);
+export type PulseFollowMode = z.infer<typeof PulseFollowModeSchema>;
+export const PulseSelfRecipientSchema = z.object({ id, name: z.string().optional() });
+export type PulseSelfRecipient = z.infer<typeof PulseSelfRecipientSchema>;
+
+function normalizeFollowMode(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const record = value as Record<string, unknown>;
+  if (record.followMode !== undefined) return record;
+  return { ...record, followMode: record.groupFollow === undefined ? 'self' : typeof record.groupFollow === 'boolean' ? record.groupFollow ? 'group' : 'none' : record.groupFollow };
+}
+
+export const PulseWorkspaceDocumentV1Schema = z.preprocess(normalizeFollowMode, z.object({
   // Validate entries without z.record dropping a legitimate "__proto__" field ID.
   metrics: z.preprocess(
     (value) => value && Object.prototype.toString.call(value) === '[object Object]' ? new Map(Object.entries(value)) : null,
@@ -54,7 +66,7 @@ export const PulseWorkspaceDocumentV1Schema = z.object({
   ),
   digestAudience: z.string().max(PULSE_TEXT_LIMITS.audience),
   digestAudienceLocked: z.boolean(),
-  groupFollow: z.boolean(),
+  followMode: PulseFollowModeSchema,
   chat: z.array(
     z.object({
       role: z.enum(['user', 'assistant']),
@@ -63,7 +75,7 @@ export const PulseWorkspaceDocumentV1Schema = z.object({
       ts: z.number().int().nonnegative(),
     }),
   ),
-});
+}));
 export type PulseMetricDraft = z.infer<typeof PulseMetricDraftSchema>;
 export type PulseWorkspaceDocumentV1 = z.infer<
   typeof PulseWorkspaceDocumentV1Schema
@@ -121,7 +133,7 @@ export const PulseDefinitionSummarySchema = z.object({
 export type PulseDefinitionSummary = z.infer<
   typeof PulseDefinitionSummarySchema
 >;
-export const PulsePublishPlanSchema = z.object({
+export const PulsePublishPlanSchema = z.preprocess(normalizeFollowMode, z.object({
   draftId: id,
   revision: z.number().int().positive(),
   context: PulseDraftContextSchema,
@@ -134,14 +146,17 @@ export const PulsePublishPlanSchema = z.object({
     }),
   ),
   digestAudience: z.string(),
-  groupFollow: z.boolean(),
+  followMode: PulseFollowModeSchema,
+  selfRecipient: PulseSelfRecipientSchema.optional(),
   issues: z.array(PulseValidationIssueSchema),
-});
+}));
 export type PulsePublishPlan = z.infer<typeof PulsePublishPlanSchema>;
 export const PulseDiagnosticSchema = z.object({
   message: z.string(),
   code: z.string().optional(),
   status: z.number().optional(),
+  providerCode: z.string().optional(),
+  detail: z.string().optional(),
   issues: z.array(PulseValidationIssueSchema).optional(),
 });
 export type PulseDiagnostic = z.infer<typeof PulseDiagnosticSchema>;
@@ -153,8 +168,16 @@ const followStatus = z.enum([
   'failed',
   'skipped',
 ]);
-export const PulseFollowReceiptSchema = z.object({
+export const PulseFollowReceiptSchema = z.preprocess((value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const record = value as Record<string, unknown>;
+  if (record.mode === undefined && typeof record.requested !== 'boolean') return value;
+  const mode = record.mode ?? (record.requested === true ? 'group' : 'none');
+  return { ...record, mode, requested: mode !== 'none' };
+}, z.object({
   version: z.literal(1),
+  mode: PulseFollowModeSchema,
+  selfRecipient: PulseSelfRecipientSchema.optional(),
   requested: z.boolean(),
   group: z.object({
     status: followStatus,
@@ -175,7 +198,7 @@ export const PulseFollowReceiptSchema = z.object({
       error: z.string().optional(),
     }),
   ),
-});
+}));
 export type PulseFollowReceipt = z.infer<typeof PulseFollowReceiptSchema>;
 export const PulsePublishItemReceiptSchema = z.object({
   itemIndex: z.number().int().nonnegative(),
@@ -298,6 +321,7 @@ export const PulseProviderDiagnosticSchema = z.object({
   status: z.number().optional(),
   kind: z.enum(['auth', 'http', 'network']).optional(),
   detail: z.string().optional(),
+  providerCode: z.string().optional(),
 });
 export const PulseMetricVariantSchema = z.object({
   metricId: id,
@@ -479,7 +503,7 @@ export function emptyPulseDocument(): PulseWorkspaceDocumentV1 {
     slicers: {},
     digestAudience: '',
     digestAudienceLocked: false,
-    groupFollow: true,
+    followMode: 'self',
     chat: [],
   };
 }

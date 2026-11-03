@@ -88,7 +88,7 @@ test('a conflict verification 401 leaves submitted recipients unknown and later 
     const url = new URL(String(input));
     if (init?.method === 'POST') { posts++; calls.push('POST'); return Response.json({ error: 'conflict' }, { status: 409 }); }
     calls.push(`GET ${url.searchParams.get('metric_id')}`);
-    return posts ? Response.json({ error: 'invalid token' }, { status: 401 }) : Response.json({ subscriptions: [] });
+    return posts ? Response.json({ error: { detail: 'The owning session ended.' } }, { status: 401, headers: { validation_code: '401001' } }) : Response.json({ subscriptions: [] });
   };
   const app = Fastify();
   registerPulseRoutes(app);
@@ -100,6 +100,7 @@ test('a conflict verification 401 leaves submitted recipients unknown and later 
     assert.equal(result.terminated, true);
     assert.equal(result.stopped, true);
     assert.ok(result.results.every((entry: { code: string }) => entry.code === 'authentication_required'));
+    assert.match(result.results[0].error, /401001/);
     assert.equal(posts, 1);
     assert.deepEqual(calls, ['GET metric', 'GET later-metric', 'POST', 'GET metric']);
   } finally { await app.close(); }

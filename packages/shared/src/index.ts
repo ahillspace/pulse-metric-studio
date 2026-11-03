@@ -1,5 +1,6 @@
 export * from './pulse-enums.js';
 export * from './field-catalog.js';
+export * from './tableau-contracts.js';
 export * from './ops.js';
 export * from './timeframes.js';
 export * from './dimensional-fork.js';

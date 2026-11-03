@@ -4,9 +4,12 @@ import type {
   FieldCatalogDiagnostics,
   FieldExclusionReason,
   FieldProvenance,
+  VdsFailure,
 } from '@pulse-metric-studio/shared';
+import { VdsFailuresSchema } from '@pulse-metric-studio/shared';
 import type { TableauSession } from './rest-client.js';
-import { TableauError, apiPath, getJson, postJson } from './rest-client.js';
+import { TableauError, apiPath, getJson, postJson, redactCredentials, tableauProviderErrorInfo } from './rest-client.js';
+import { sanitizeProviderMessage } from '../llm/types.js';
 import { fetchCaptionMap, fetchFieldsViaMetadataGraphql } from './metadata-fallback.js';
 import { classifyNormalizedTimeType, normalizeProviderType } from './field-classification.js';
 import { getSessionContext, normalizeServerUrl } from './session.js';
@@ -202,16 +205,43 @@ export function isLuidShape(value: string): boolean {
 
 // -- VDS access ---------------------------------------------------------------
 
-async function tryVdsReadMetadata(session: TableauSession, luid: string): Promise<VdsModel | null> {
+class InvalidVdsResponse extends Error {}
+
+function retainVdsFailure(session: TableauSession, operation: VdsFailure['operation'], error: unknown, failures: VdsFailure[]): void {
+  if (error instanceof TableauError && error.kind === 'auth') throw error;
+  if (failures.length >= 2) return;
+  const info = error instanceof TableauError ? tableauProviderErrorInfo(error, [session.token]) : {};
+  const clean = (value: string) => sanitizeProviderMessage(redactCredentials(value, [session.token]));
+  const kind = error instanceof InvalidVdsResponse ? 'invalid-response'
+    : error instanceof TableauError ? error.kind : 'network';
+  failures.push({
+    operation,
+    message: clean(info.summary || (error instanceof Error ? error.message : '')).trim() || `VDS ${operation} failed.`,
+    ...(error instanceof TableauError && error.status >= 100 && error.status <= 599 ? { status: error.status } : {}),
+    ...(info.providerCode ? { providerCode: info.providerCode.slice(0, 80) } : {}),
+    ...(info.detail ? { detail: clean(info.detail) } : {}),
+    kind,
+  });
+}
+
+function normalizeVdsResponse(normalize: () => VdsModel, operation: VdsFailure['operation']): VdsModel {
+  let model: VdsModel;
+  try { model = normalize(); }
+  catch { throw new InvalidVdsResponse(`VDS ${operation} returned malformed metadata.`); }
+  if (!vdsLooksPopulated(model)) throw new InvalidVdsResponse(`VDS ${operation} returned empty or unsupported field metadata.`);
+  return model;
+}
+
+async function tryVdsReadMetadata(session: TableauSession, luid: string, failures: VdsFailure[]): Promise<VdsModel | null> {
   try {
     const data = await postJson<VdsReadMetadataResponse>(
       session,
       '/api/v1/vizql-data-service/read-metadata',
       { datasource: { datasourceLuid: luid } },
     );
-    if (data && typeof data === 'object') return normalizeReadMetadataResponse(data);
+    return normalizeVdsResponse(() => normalizeReadMetadataResponse(data), 'read-metadata');
   } catch (e) {
-    if (e instanceof TableauError && e.kind === 'auth') throw e;
+    retainVdsFailure(session, 'read-metadata', e, failures);
   }
   return null;
 }
@@ -280,15 +310,15 @@ function tableCaption(logicalTableId: string): string {
   return m ? m[1] : logicalTableId;
 }
 
-async function tryVdsDescribeDatasource(session: TableauSession, luid: string): Promise<VdsModel | null> {
+async function tryVdsDescribeDatasource(session: TableauSession, luid: string, failures: VdsFailure[]): Promise<VdsModel | null> {
   // Shape B seen across pods: describe-datasource with flat body
   try {
     const data = await postJson<VdsModel>(session, '/api/v1/vizql-data-service/describe-datasource', {
       datasourceLuid: luid,
     });
-    if (data && typeof data === 'object') return normalizeVdsEnvelope(data);
+    return normalizeVdsResponse(() => normalizeVdsEnvelope(data), 'describe-datasource');
   } catch (e) {
-    if (e instanceof TableauError && e.kind === 'auth') throw e;
+    retainVdsFailure(session, 'describe-datasource', e, failures);
   }
   return null;
 }
@@ -304,7 +334,18 @@ function normalizeVdsEnvelope(data: unknown): VdsModel {
 }
 
 function vdsLooksPopulated(model: VdsModel): boolean {
-  return Array.isArray(model.fieldGroups) && model.fieldGroups.some((g) => (g.fields?.length ?? 0) > 0);
+  if (!Array.isArray(model.fieldGroups)) return false;
+  const strings = ['name', 'caption', 'dataType', 'fieldType', 'physicalType', 'columnClass', 'defaultAggregation', 'formula', 'role', 'logicalTableId'] as const;
+  const fieldsValid = model.fieldGroups.every((group) => group && typeof group === 'object'
+    && (group.logicalTableId == null || typeof group.logicalTableId === 'string')
+    && (group.fields === undefined || Array.isArray(group.fields) && group.fields.every((field) => field && typeof field === 'object'
+      && strings.every((key) => field[key] == null || typeof field[key] === 'string'))));
+  if (!fieldsValid) return false;
+  const tables = model.datasourceModel?.logicalTables;
+  if (tables !== undefined && (!Array.isArray(tables) || tables.some((table) => !table || typeof table.logicalTableId !== 'string'))) return false;
+  if (model.parameters !== undefined && (!Array.isArray(model.parameters) || model.parameters.some((parameter) => !parameter
+    || ['name', 'parameterType', 'dataType'].some((key) => (parameter as Record<string, unknown>)[key] != null && typeof (parameter as Record<string, unknown>)[key] !== 'string')))) return false;
+  return model.fieldGroups.some((group) => group.fields?.some((field) => typeof field.name === 'string' && field.name.trim()));
 }
 
 // -- normalization ------------------------------------------------------------
@@ -558,16 +599,19 @@ async function loadFieldCatalog(session: TableauSession, luid: string, datasourc
     }
   }
 
-  let model = await tryVdsReadMetadata(session, luid);
+  const failures: VdsFailure[] = [];
+  let model = await tryVdsReadMetadata(session, luid, failures);
   if (!model || !vdsLooksPopulated(model)) {
-    model = await tryVdsDescribeDatasource(session, luid);
+    model = await tryVdsDescribeDatasource(session, luid, failures);
   }
   if (!model || !vdsLooksPopulated(model)) {
     const graphqlCatalog = await fetchFieldsViaMetadataGraphql(session, luid, { luid, name: dsName });
+    graphqlCatalog.vdsFailures = VdsFailuresSchema.parse(failures);
     return graphqlCatalog;
   }
 
   const catalog = normalizeVdsToCatalog(model, { luid, name: dsName }, 'vds');
+  if (failures.length) catalog.vdsFailures = VdsFailuresSchema.parse(failures);
   // Repair calc captions VDS could only give as `Calculation_NNN` (sqlproxy).
   try {
     await enrichCalcCaptions(session, luid, catalog);

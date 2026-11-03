@@ -18,7 +18,7 @@ test("real subscription response redacts credential-shaped provider header diagn
   globalThis.fetch = async (_url, init) =>
     init?.method === "POST"
       ? Response.json(
-          {},
+          { error: { detail: 'Authorization: Basic private-test-token' } },
           {
             status: 400,
             headers: {

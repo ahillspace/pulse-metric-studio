@@ -37,7 +37,7 @@ function authorFixture(changed: ReturnType<typeof fixture>["changed"], publish: 
   return createAuthorController({
     readDraft: async () => record,
     preview: async (_id: string, revision: number) => ({ draftId: record.id, revision, context: record.context, datasourceName: "A",
-      previewFingerprint: "reviewed", metrics: [{ ...receipt().items[0].summary, name: "Revenue", description: "" }], digestAudience: "Audience", groupFollow, issues: [] }),
+      previewFingerprint: "reviewed", metrics: [{ ...receipt().items[0].summary, name: "Revenue", description: "" }], digestAudience: "Audience", followMode: groupFollow ? "group" : "none", issues: [] }),
     publish,
   } as any, async () => ({ catalog: catalog() }), () => session, () => {}, 60_000, changed);
 }
@@ -52,6 +52,7 @@ for (const outcome of ["created", "unknown", "lost", "reused", "skipped"] as con
       if (outcome === "lost") throw new Error("Response lost");
       const published = receipt();
       published.follow.requested = outcome !== "skipped";
+      published.follow.mode = outcome === "skipped" ? "none" : "group";
       published.follow.group = { status: outcome, ...(outcome !== "skipped" ? { id: "new-group" } : {}) };
       return published;
     }, outcome !== "skipped");

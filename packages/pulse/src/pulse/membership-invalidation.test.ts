@@ -38,13 +38,13 @@ test('publication add-member invalidates primed membership before fresh relation
   const field = (id: string, role: 'MEASURE' | 'DIMENSION', dataType: string) => ({ id, name: id, label: id, caption: id, role, dataType, table: null, defaultAggregation: null, formula: null, requiresUserAgg: false });
   const catalog: DatasourceCatalog = { datasourceLuid: 'datasource', datasourceName: 'Orders', measures: [field('Sales', 'MEASURE', 'REAL')], dimensions: [field('Region', 'DIMENSION', 'STRING')], timeDimensions: [{ ...field('Date', 'DIMENSION', 'DATE'), timeType: 'DATE' }], excluded: [], parameters: [], source: 'vds', warnings: [] };
   const app = Fastify();
-  registerPulseRoutes(app, { catalog: async () => catalog, publish: { catalog: async () => catalog, create: async () => ({ definitionId: 'new-definition', raw: {} }), resolve: async () => 'new-metric', ensureGroup: async () => ({ ...group, existedBefore: false }) } });
+  registerPulseRoutes(app, { catalog: async () => catalog, publish: { groupCreationAccess: () => ({ state: 'allowed', reasonCode: 'fixture', message: 'Fixture group access.' }), catalog: async () => catalog, create: async () => ({ definitionId: 'new-definition', raw: {} }), resolve: async () => 'new-metric', ensureGroup: async () => ({ ...group, existedBefore: false }) } });
   const detail = () => app.inject({ method: 'POST', url: '/api/pulse/follow-state', payload: { metricIds: ['new-metric'] } });
   try {
     assert.equal((await detail()).json().groupFollowsByMetricId['new-metric'], false);
     const document = emptyPulseDocument();
     document.metrics.Sales = defaultPulseMetric(catalog, 'Sales')!;
-    document.groupFollow = true;
+    document.followMode = 'group';
     document.slicers.Region = { active: true, fieldId: 'Region', fieldLabel: 'Region' };
     const created = await app.inject({ method: 'POST', url: '/api/pulse/drafts', payload: { context, datasourceName: 'Orders', document } });
     assert.equal(created.statusCode, 200, created.body);

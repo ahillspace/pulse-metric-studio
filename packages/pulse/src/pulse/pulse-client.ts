@@ -2,6 +2,7 @@ interface PulseDefinitionResponse { definition?: { metadata?: { id?: string; nam
 import type { TableauSession } from '@pulse-metric-studio/core';
 import { TableauError,apiPath,deleteReq,getJson,isPastEndError,postJson } from '@pulse-metric-studio/core';
 import { boundedProviderDiagnostic,type PulseProviderDiagnostic } from './provider-diagnostics.js';
+import { pulseOperationErrorMessage } from './operation-errors.js';
 
 /**
  * Pulse REST wrapper (`/api/-/pulse`). Contract recovered from the working
@@ -439,7 +440,7 @@ export class SubscriptionBatchInterrupted extends TableauError {
     public readonly failedTargets: SubscriptionWriteTarget[] = [],
     public readonly phase: 'submission' | 'confirmation' = 'submission',
   ) {
-    super(cause.message, cause.status, cause.bodySnippet, cause.kind);
+    super(cause.message, cause.status, cause.bodySnippet, cause.kind, cause.providerCode, cause.providerInfo);
     this.failed = failed;
   }
 }
@@ -478,7 +479,7 @@ export async function batchCreateSubscriptions(session: TableauSession, items: S
           results.push({ ...batch[0]!, ok: true, alreadyExists: true });
           continue;
         }
-        if (error.status === 409 && batch.length > 1) {
+        if (error.status === 409) {
           // A conflict says nothing about the other submitted identities. Read evidence, never replay writes.
           try { records = await listSubscriptionsForMetric(session, metricId); alreadyExists = true; }
           catch (verificationError) {
@@ -487,7 +488,7 @@ export async function batchCreateSubscriptions(session: TableauSession, items: S
             records = [];
           }
         } else {
-          results.push(...batch.map((item) => ({ ...item, ok: false, alreadyExists: false, error: error.message })));
+          results.push(...batch.map((item) => ({ ...item, ok: false, alreadyExists: false, error: pulseOperationErrorMessage(error, 'follow', [session.token]) })));
           continue;
         }
       }

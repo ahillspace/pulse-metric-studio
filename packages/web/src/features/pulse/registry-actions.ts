@@ -34,6 +34,14 @@ export interface RegistryActionResults {
   summary?: string;
 }
 
+/** Show a few backend explanations without replacing the per-resource outcomes. */
+export function registryFailureMessages(results: RegistryActionResults) {
+  const reasons = [...new Set(results.items.filter(item => ["failed", "unknown", "not_attempted"].includes(item.status))
+    .map(item => item.detail?.trim()).filter((message): message is string => Boolean(message) && message !== results.summary?.trim())
+    .map(message => message.length > 300 ? `${message.slice(0, 297)}...` : message))];
+  return { messages: reasons.slice(0, 3), remaining: Math.max(0, reasons.length - 3) };
+}
+
 export interface ForkRegistryActionCounts {
   notAttempted: number;
   unknown: number;

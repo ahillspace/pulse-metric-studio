@@ -1,10 +1,7 @@
 import type { TableauSession } from "@pulse-metric-studio/core";
 import { TableauError } from "@pulse-metric-studio/core";
 import type { PulseDeleteResult } from "@pulse-metric-studio/shared";
-import {
-  boundedProviderDiagnostic,
-  diagnosticMessage,
-} from "../pulse/provider-diagnostics.js";
+import { pulseOperationErrorMessage } from '../pulse/operation-errors.js';
 import { deleteDefinition, deleteMetric } from "../pulse/pulse-client.js";
 
 import { invalidatePulseDefinitionInventory } from "./inventory.js";
@@ -75,10 +72,10 @@ export async function executeDeletes(
       outcomes.push({
         definitionId: entry.definitionId!,
         status: classifyFailure(error),
-        error: diagnosticMessage(boundedProviderDiagnostic(error)),
+        error: pulseOperationErrorMessage(error, 'delete', [session.token]),
       });
       failures.push(
-        `definition ${entry.definitionId} (${entry.name}): ${diagnosticMessage(boundedProviderDiagnostic(error))}`,
+        `definition ${entry.definitionId} (${entry.name}): ${pulseOperationErrorMessage(error, 'delete', [session.token])}`,
       );
     }
   }
@@ -114,10 +111,10 @@ export async function executeDeletes(
         outcomes.push({
           metricId: entry.metricId,
           status: classifyFailure(error),
-          error: diagnosticMessage(boundedProviderDiagnostic(error)),
+          error: pulseOperationErrorMessage(error, 'delete', [session.token]),
         });
         failures.push(
-          `metric ${entry.metricId}: ${diagnosticMessage(boundedProviderDiagnostic(error))}`,
+          `metric ${entry.metricId}: ${pulseOperationErrorMessage(error, 'delete', [session.token])}`,
         );
         return false;
       }

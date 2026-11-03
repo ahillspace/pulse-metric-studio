@@ -226,7 +226,7 @@ test('eligible dimensions require a VDS-backed catalog', async () => {
   });
   await assert.rejects(
     () => new PulseDimensionalForkService(deps).listEligibleDimensions(session, ['m1']),
-    /require a current VDS field catalog/,
+    /VDS field metadata required for variants/,
   );
 });
 
@@ -437,7 +437,7 @@ test('fork returns settled Tableau auth failures from create and reconciliation'
       });
       assert.equal(summary.terminated, true);
       assert.equal(summary.results[0]?.creationStatus, phase === 'create' ? 'unknown' : 'created');
-      assert.match(summary.results[0]?.error ?? '', /expired/);
+      assert.match(summary.results[0]?.error ?? '', /Reconnect to the owning account.*HTTP 401/);
       if (phase === 'reconciliation') assert.ok(summary.results[0]?.createdMetricId);
 
     });

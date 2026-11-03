@@ -1,27 +1,34 @@
 import { PULSE_TEXT_LIMITS } from "@pulse-metric-studio/shared";
 import { activeEditor, useAuthor } from "./controller";
+import { useConnection } from "../connections/controller";
+import { useId } from "react";
 
 export function DigestSettings() {
   const entry = useAuthor(activeEditor);
+  const { session, accessChecking, refreshAccess } = useConnection();
+  const accessId = useId();
   if (!entry) return null;
-  const { groupFollow, digestAudience, digestAudienceLocked } = entry.document;
+  const { followMode, digestAudience, digestAudienceLocked } = entry.document;
+  const groupAllowed = session?.groupCreation?.state === "allowed";
+  const accessMessage = session?.groupCreation?.message ?? (session ? "Group creation permission is not verified." : "Connect to Tableau to verify group creation permission.");
   return (
     <section
       className="pulse-digest-settings"
-      aria-label="Digest group settings"
+      aria-label="Follow after publishing"
     >
-      <label className="pulse-native-checkbox">
-        <input
-          type="checkbox"
-          checked={groupFollow}
-          onChange={(event) =>
-            useAuthor.getState().setGroupFollow(event.target.checked)
-          }
-        />
-        Create or follow a digest group
-      </label>
-      {groupFollow && (
-        <div className="pulse-digest-audience">
+      <span className="pulse-follow-label">Follow after publishing</span>
+      <div className="pulse-follow-options" role="group" aria-label="Publication following">
+        <button type="button" className="btn small" aria-pressed={followMode === "self"} onClick={() => useAuthor.getState().setFollowMode("self")}>Follow me</button>
+        <button type="button" className="btn small" aria-pressed={followMode === "group"} disabled={!groupAllowed} aria-describedby={groupAllowed ? undefined : accessId} title={groupAllowed ? undefined : accessMessage} onClick={() => useAuthor.getState().setFollowMode("group")}>Digest group</button>
+        <button type="button" className="btn small" aria-pressed={followMode === "none"} onClick={() => useAuthor.getState().setFollowMode("none")}>No follow</button>
+      </div>
+      <small className="section-hint">Follow me uses the connected Tableau account when you publish.</small>
+      {!groupAllowed && <p id={accessId} className="section-hint pulse-follow-access" role="status">
+        {accessMessage}{followMode === "group" && " Choose Follow me or No follow before publishing."}
+        {session && <button type="button" className="btn small" disabled={accessChecking} onClick={() => void refreshAccess()}>{accessChecking ? "Checking permissions..." : "Check permissions"}</button>}
+      </p>}
+      {followMode === "group" && (
+        <fieldset disabled={!groupAllowed} className="pulse-digest-audience">
           <label>
             Digest audience
             <input
@@ -64,7 +71,7 @@ export function DigestSettings() {
               />
             </svg>
           </button>
-        </div>
+        </fieldset>
       )}
     </section>
   );

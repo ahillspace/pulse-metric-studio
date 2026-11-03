@@ -13,6 +13,7 @@ test("publication result summarizes creation, preserves error code and message, 
   result.digestAudience = "Sales leadership";
   result.siteContentUrl = "example-site";
   result.follow.group = { status: "created", id: "group", name: "pmStudio - Source - Sales leadership" };
+  result.follow.mode = "group";
   result.items.push({ ...result.items[0], itemIndex: 1, name: "Profit", creationStatus: "not_created", diagnostic: { code: "400123", message: "The date field is unavailable." } });
   result.failedCount = 1;
   const html = renderToStaticMarkup(<PublicationResult receipt={result} onClose={() => {}} onActivity={() => {}} />);
@@ -45,10 +46,11 @@ test("Pulse landing link lowercases the site content URL and rejects non-web pro
 
 test("a successful publication without a digest does not warn about unrequested follow work", () => {
   const result = receipt();
-  result.follow = { version: 1, requested: false, group: { status: "not_attempted" }, membership: { status: "not_attempted" }, subscriptions: [] };
+  result.follow = { version: 1, mode: "none", requested: false, group: { status: "not_attempted" }, membership: { status: "not_attempted" }, subscriptions: [] };
   const render = () => renderToStaticMarkup(<PublicationResult receipt={result} onClose={() => {}} onActivity={() => {}} />);
   assert.doesNotMatch(render(), /Digest setup needs attention/);
   result.follow.requested = true;
+  result.follow.mode = "group";
   assert.match(render(), /Digest setup needs attention/);
 });
 

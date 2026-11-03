@@ -24,6 +24,7 @@ import {
   type PulseExactMetric,
 } from './pulse-client.js';
 import { metricDefinitionId, metricSpecification } from './reconciliation.js';
+import { vdsCatalogFailureMessage } from './operation-errors.js';
 
 /**
  * Fetch-all bounded row limit. One more than the fetch-all/search-required
@@ -36,7 +37,7 @@ const PROVIDER_CONCURRENCY = 5;
 export class PulseDimensionalForkError extends Error {
   constructor(
     message: string,
-    public readonly statusCode: 400 | 409 | 422 | 502 = 422,
+    public readonly statusCode: 400 | 401 | 409 | 422 | 502 = 422,
   ) {
     super(message);
     this.name = 'PulseDimensionalForkError';
@@ -337,7 +338,7 @@ export class PulseDimensionalForkService {
     const catalog = await this.dependencies.getCatalog(session, datasourceLuid);
     if (catalog.source !== 'vds') {
       throw new PulseDimensionalForkError(
-        'Pulse dimensional filters require a current VDS field catalog.',
+        vdsCatalogFailureMessage(catalog),
         422,
       );
     }

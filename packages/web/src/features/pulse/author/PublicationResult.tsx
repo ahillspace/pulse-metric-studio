@@ -8,6 +8,8 @@ import { BusyLabel, Modal } from "../components/ui";
 import { createPublishedPreviewCache, PublishedMetrics } from "./PublishedMetrics";
 import { sessionOwnerKey } from "../shell/session-events";
 import { ConfirmUndo } from "../activity/ConfirmUndo";
+import { TableauDiagnosticDetails } from "../components/TableauDiagnosticDetails";
+import { publicationFollowProblems } from "../publication-follow";
 
 export function PublicationResult({ receipt, onClose, onActivity }: {
   receipt: PulsePublishReceipt;
@@ -23,13 +25,15 @@ export function PublicationResult({ receipt, onClose, onActivity }: {
   const connected = Boolean(receipt.context && contextMatches(receipt.context, session));
   const busy = activity.undoBusy || activity.groupBusy || receipt.publishing;
   const group = receipt.follow.group;
+  const mode = receipt.follow.mode;
+  const selfRecipient = receipt.follow.selfRecipient;
   const audience = receipt.digestAudience || "digest group";
   const contentUrl = receipt.siteContentUrl ?? (connected ? session?.siteContentUrl : undefined);
   const pulseUrl = receipt.context && contentUrl !== undefined ? pulseSiteUrl(receipt.context.serverUrl, contentUrl) : null;
   const canUndo = receipt.undoEligible || receipt.items.some((item) => item.undoStatus === "failed" || item.undoStatus === "unknown");
-  const canDeleteGroup = group.status === "created" && Boolean(group.id) && group.deletion?.status !== "deleted";
+  const canDeleteGroup = mode === "group" && group.status === "created" && Boolean(group.id) && group.deletion?.status !== "deleted";
   const failures = receipt.items.filter((item) => item.creationStatus !== "created");
-  const followProblems = [group, receipt.follow.membership, ...receipt.follow.subscriptions].filter((item) => ['failed', 'unknown', 'not_attempted'].includes(item.status));
+  const followProblems = publicationFollowProblems(receipt.follow);
   const undone = receipt.items.filter((item) => item.undoStatus === "deleted").length;
   const published = receipt.items.filter((item) => item.creationStatus === "created" && item.undoStatus !== "deleted");
   const live = connected && receipt.context && contentUrl !== undefined && session ? { context: receipt.context, siteContentUrl: contentUrl, owner: session } : null;
@@ -37,7 +41,7 @@ export function PublicationResult({ receipt, onClose, onActivity }: {
     receipt.items.map((item) => [item.metricId, item.definitionId, item.creationStatus, item.undoStatus, item.resolutionStatus])]);
   previews.setScope(previewScope);
   const settled = (status: string) => status === "created" || status === "reused";
-  const digestFollowed = receipt.follow.requested && settled(group.status) && settled(receipt.follow.membership.status);
+  const digestFollowed = mode === "group" && receipt.follow.requested && settled(group.status) && settled(receipt.follow.membership.status);
   const outcomeCounts = [
     [receipt.failedCount, "failed"],
     [receipt.unknownCount, "unconfirmed"],
@@ -57,7 +61,7 @@ export function PublicationResult({ receipt, onClose, onActivity }: {
     }}>View in Pulse</button>
     <button className="btn" onClick={onActivity}>View in Activity</button>
     <button className="btn danger" disabled={!canUndo || !connected || busy} onClick={() => setConfirmUndo(true)}><BusyLabel busy={activity.undoBusy} idle="Undo Publication" active="Undoing..." /></button>
-    <button className="btn danger" disabled={!canDeleteGroup || !connected || busy} onClick={() => setConfirmGroup(true)}>{group.deletion?.status === "deleted" ? "Group deleted" : `Delete "${audience}" Group`}</button>
+    {mode === "group" && <button className="btn danger" disabled={!canDeleteGroup || !connected || busy} onClick={() => setConfirmGroup(true)}>{group.deletion?.status === "deleted" ? "Group deleted" : `Delete "${audience}" Group`}</button>}
   </>}>
     <header className="pulse-result-summary">
       <p className="pulse-result-total" role="status">{receipt.createdCount} {receipt.createdCount === 1 ? "metric created" : "metrics created"}</p>
@@ -67,6 +71,9 @@ export function PublicationResult({ receipt, onClose, onActivity }: {
       </p>
       {outcomeCounts.length > 0 && <p className="pulse-result-outcomes">{outcomeCounts.map(([count, label]) => <span key={label}>{count} {label}</span>)}</p>}
     </header>
+    {mode === "self" && <p>Personal follow target: {selfRecipient?.name ?? "the publishing Tableau account"}.
+      {!selfRecipient?.name && selfRecipient?.id && <> Account: <code>{selfRecipient.id}</code>.</>}
+    </p>}
     {undone > 0 && <p role="status">{undone} {undone === 1 ? "metric removed" : "metrics removed"} by undo.</p>}
     {receipt.items.filter((item) => item.undoStatus === "failed" || item.undoStatus === "unknown").map((item) => <p className="warning-banner" role="alert" key={`undo-${item.itemIndex}`}>
       <strong>{item.name}: </strong>{item.undoStatus === "unknown" ? "Undo is unconfirmed. " : "Undo failed. "}
@@ -77,10 +84,11 @@ export function PublicationResult({ receipt, onClose, onActivity }: {
     {failures.length > 0 && <ul className="pulse-result-errors">{failures.map((item) => <li key={item.itemIndex}>
       <strong>{item.name}</strong><span>{item.creationStatus === "unknown" ? "Unconfirmed" : item.creationStatus === "not_attempted" ? "Not sent" : "Failed"}</span>
       <p>{item.diagnostic?.code || item.diagnostic?.status ? `${item.diagnostic.code ?? item.diagnostic.status}: ` : ""}{item.diagnostic?.message || (item.creationStatus === "unknown" ? "Check Tableau before retrying this metric." : item.creationStatus === "not_attempted" ? "This metric was not submitted." : "Tableau did not create this metric.")}</p>
+      <TableauDiagnosticDetails diagnostic={item.diagnostic} />
     </li>)}</ul>}
     {receipt.items.some((item) => item.creationStatus === "created" && item.resolutionStatus !== "resolved" && item.undoStatus !== "deleted") && <p>Some created metrics are not yet visible in Tableau. See Activity for details.</p>}
     {receipt.items.filter((item) => item.creationStatus === "created" && item.resolutionStatus === "failed" && item.diagnostic && item.undoStatus !== "deleted").map((item) => <p className="warning-banner" key={`resolution-${item.itemIndex}`}><strong>{item.name}: </strong>{item.diagnostic!.code || item.diagnostic!.status ? `${item.diagnostic!.code ?? item.diagnostic!.status}: ` : ""}{item.diagnostic!.message}</p>)}
-    {receipt.follow.requested && followProblems.length > 0 && <p className="warning-banner">Digest setup needs attention. {followProblems.find((item) => item.error)?.error || "See Activity for details."}</p>}
+    {receipt.follow.requested && followProblems.length > 0 && <p className="warning-banner">{mode === "self" ? "Personal follow needs attention." : "Digest setup needs attention."} {followProblems.find((item) => item.error)?.error || "See Activity for details."}</p>}
     {(group.deletion?.status === "failed" || group.deletion?.status === "unknown") && <p className="warning-banner" role="alert">
       {group.deletion.status === "unknown" ? "Group deletion is unconfirmed. " : "Group deletion failed. "}{group.deletion.message}
       {group.deletion.status === "unknown" && " Check Tableau before retrying."}

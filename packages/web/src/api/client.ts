@@ -1,5 +1,5 @@
 import { desktopFetch } from "../desktop-transport";
-import type { DatasourceCatalog } from "@pulse-metric-studio/shared";
+import type { DatasourceCatalog, TableauGroupCreationAccess } from "@pulse-metric-studio/shared";
 
 /**
  * Pull a human-readable message out of an error response body. The server can
@@ -59,6 +59,8 @@ export interface TableauSessionInfo {
   siteId: string;
   userId: string;
   userName?: string;
+  siteRole?: string;
+  groupCreation?: TableauGroupCreationAccess;
 }
 
 export interface ConnectionSummary {

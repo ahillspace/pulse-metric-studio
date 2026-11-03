@@ -8,6 +8,8 @@
  */
 
 import { getSessionContext, getStoredConnection, isSessionCurrent, type TableauSessionContext } from './session.js';
+import { parseTableauProviderError, safeTableauProviderCode, type TableauProviderErrorInfo } from './provider-error-info.js';
+export { parseTableauProviderError, safeTableauProviderCode, type TableauProviderErrorInfo } from './provider-error-info.js';
 
 export interface TableauSession {
   serverUrl: string;
@@ -19,6 +21,8 @@ export interface TableauSession {
   apiVersion: string;
   /** Current user's display name from `/users/current` (fullName ?? name); best-effort. */
   userName?: string;
+  /** Verified site role from the authenticated user's own profile, when available. */
+  siteRole?: string;
 }
 
 /** Build a versioned API path like `/api/3.27/datasources`. */
@@ -34,10 +38,19 @@ export class TableauError extends Error {
     public readonly status: number,
     public readonly bodySnippet: string = '',
     public readonly kind: 'auth' | 'http' | 'network' = 'http',
+    public readonly providerCode?: string,
+    public readonly providerInfo?: TableauProviderErrorInfo,
   ) {
     super(message);
     this.name = 'TableauError';
   }
+}
+
+export function tableauProviderErrorInfo(error: TableauError, secrets: readonly string[] = []): TableauProviderErrorInfo {
+  const parsed = error.providerInfo
+    ? parseTableauProviderError({ code: error.providerInfo.providerCode, summary: error.providerInfo.summary, detail: error.providerInfo.detail }, secrets)
+    : parseTableauProviderError(error.bodySnippet || error.message, secrets);
+  return { ...parsed, ...(safeTableauProviderCode(error.providerCode, secrets) ? { providerCode: safeTableauProviderCode(error.providerCode, secrets) } : {}) };
 }
 
 function extractJsonErrorCode(text: string): string | null {
@@ -305,11 +318,14 @@ export async function getJson<T>(session: TableauSession, path: string, accept?:
   const body = await parseBody(resp, maxResponseBytes, timeoutMs);
   if (!resp.ok) {
     const snippet = redactCredentials(typeof body === 'string' ? body : JSON.stringify(body) ?? '', [session.token]).slice(0, 500);
+    const info = parseTableauProviderError(body, [session.token]);
     throw new TableauError(
       `GET ${path} failed (${resp.status})${validationDetail(resp)}`,
       resp.status,
       snippet,
       classifyStatus(resp.status, snippet),
+      safeTableauProviderCode(resp.headers.get('validation_code'), [session.token]) ?? info.providerCode,
+      info,
     );
   }
   return body as T;
@@ -334,11 +350,14 @@ export async function postJson<T>(
   const respBody = await parseBody(resp, opts.maxResponseBytes, opts.timeoutMs);
   if (!resp.ok) {
     const snippet = redactCredentials(typeof respBody === 'string' ? respBody : JSON.stringify(respBody) ?? '', [session.token]).slice(0, 800);
+    const info = parseTableauProviderError(respBody, [session.token]);
     throw new TableauError(
       `${opts.method ?? 'POST'} ${path} failed (${resp.status})${validationDetail(resp)}`,
       resp.status,
       snippet,
       classifyStatus(resp.status, snippet),
+      safeTableauProviderCode(resp.headers.get('validation_code'), [session.token]) ?? info.providerCode,
+      info,
     );
   }
   return respBody as T;
@@ -348,6 +367,7 @@ export async function deleteReq(session: TableauSession, path: string): Promise<
   const resp = await tableauFetch(session, path, { method: 'DELETE' });
   if (!resp.ok && resp.status !== 404) {
     const bodyText = redactCredentials(await readBoundedBody(resp, 64 * 1024, 30_000).catch(() => ''), [session.token]);
-    throw new TableauError(`DELETE ${path} failed (${resp.status})`, resp.status, bodyText.slice(0, 500), classifyStatus(resp.status, bodyText));
+    const info = parseTableauProviderError(bodyText, [session.token]);
+    throw new TableauError(`DELETE ${path} failed (${resp.status})`, resp.status, bodyText.slice(0, 500), classifyStatus(resp.status, bodyText), safeTableauProviderCode(resp.headers.get('validation_code'), [session.token]) ?? info.providerCode, info);
   }
 }

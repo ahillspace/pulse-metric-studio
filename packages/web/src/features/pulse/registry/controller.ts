@@ -586,6 +586,7 @@ export function createRegistryController(
             }
           }
         }
+        let resultsRecorded = false;
         try {
           const outcomesByTarget = new Map(
             outcomes.map((outcome) => [
@@ -626,17 +627,21 @@ export function createRegistryController(
           record(scope, {
             kind: "delete",
             title: "Delete results",
+            summary: failure,
             finishedAt: Date.now(),
             items,
           });
+          resultsRecorded = true;
           if (current(scope)) {
             deleteBatches = [];
-            set({ deletePlan: null, deleteError: failure ?? null });
+            set({ deletePlan: null, deleteError: null });
             await get().invalidate(scope.context, scope.owner);
           } else cache.delete(scope.key);
         } catch (error) {
           if (current(scope))
-            set({ deleteError: errorMessage(error), deletePlan: null });
+            set({ deletePlan: null, ...(resultsRecorded
+              ? { deleteError: null, error: errorMessage(error) }
+              : { deleteError: errorMessage(error) }) });
         } finally {
           if (current(scope)) set({ busy: null });
         }

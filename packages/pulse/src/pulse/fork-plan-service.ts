@@ -16,9 +16,9 @@ import {
   type DatasourceCatalog,
 } from '@pulse-metric-studio/shared';
 import { timeframeMeasurementPeriod } from '../domain/variants.js';
+import { pulseOperationErrorMessage, vdsCatalogFailureMessage } from './operation-errors.js';
 import { mergePulseStringFilter } from './dimensional-fork-service.js';
 import {
-  boundedProviderDiagnostic,
   diagnosticMessage,
 } from './provider-diagnostics.js';
 import {
@@ -442,7 +442,7 @@ export class PulseForkPlanService {
     const catalog = await this.dependencies.getCatalog(session, datasourceLuid);
     if (catalog.source !== 'vds') {
       throw new Error(
-        'Pulse dimensional filters require a current VDS field catalog.',
+        vdsCatalogFailureMessage(catalog),
       );
     }
     const fieldsById = eligibleFieldsById(catalog.dimensions, sources);
@@ -655,7 +655,7 @@ function reconciledResult(
       sourceMetricId,
       new Error(
         reconciliation.diagnostic
-          ? diagnosticMessage(reconciliation.diagnostic)
+          ? reconciliationError(reconciliation.diagnostic)
           : 'Metric reconciliation failed.',
       ),
       true,
@@ -674,6 +674,11 @@ function reconciledResult(
   };
 }
 
+function reconciliationError(diagnostic: import('./provider-diagnostics.js').PulseProviderDiagnostic): string {
+  if (diagnostic.status === undefined) return diagnosticMessage(diagnostic);
+  return pulseOperationErrorMessage(new TableauError(diagnostic.message, diagnostic.status, diagnostic.detail, diagnostic.kind ?? 'http', diagnostic.providerCode), 'visibility');
+}
+
 function failedResult(
   sourceMetricId: string,
   error: unknown,
@@ -686,7 +691,6 @@ function failedResult(
     'creationStatus' | 'reconciliationStatus'
   > = {},
 ): FailedResult {
-  const diagnostic = boundedProviderDiagnostic(error);
   return {
     result: {
       sourceMetricId,
@@ -694,7 +698,7 @@ function failedResult(
       ...context,
       ...(metricId ? { metricId } : {}),
       requestedSpecification,
-      error: diagnosticMessage(diagnostic),
+      error: pulseOperationErrorMessage(error, 'fork'),
     },
     providerFailure,
   };

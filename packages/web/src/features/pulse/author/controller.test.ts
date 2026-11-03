@@ -93,7 +93,7 @@ function fixture(
         { ...receipt().items[0].summary, name: "Sales", description: "" },
       ],
       digestAudience: "",
-      groupFollow: false,
+      followMode: "none",
       issues: [],
     }),
     publish: async () => receipt(),
@@ -916,4 +916,66 @@ test("reloading a saved draft invalidates a pending assistant candidate", async 
   await pending;
   assert.equal(activeEditor(store.getState())?.proposal, null);
   assert.equal(activeEditor(store.getState())?.proposalBusy, false);
+});
+
+test("follow mode edits autosave, retain audience protection, and invalidate reviewed publication", async (t) => {
+  let sends = 0;
+  const f = fixture({ publish: async () => { sends++; return receipt(); },
+    preview: async (id: string, revision: number): Promise<PulsePublishPlan> => ({ draftId: id, revision, context: f.records.get(id)!.context,
+      datasourceName: "A", previewFingerprint: `${revision}:${f.records.get(id)!.document.followMode}`, metrics: [], digestAudience: "Preserved",
+      followMode: f.records.get(id)!.document.followMode, selfRecipient: { id: session.userId }, issues: [] }) });
+  const saved = deferred<PulseDraftRecord>();
+  const auto = createAuthorController({ ...f.transport, saveDraft: async (id, input) => {
+    const result = await f.transport.saveDraft(id, input);
+    if (result.document.followMode === "self") saved.resolve(result);
+    return result;
+  } }, async (id) => ({ catalog: catalog(id) }), () => session, () => {}, 0);
+  t.after(() => { auto.getState().dispose(); f.store.getState().dispose(); });
+  await auto.getState().openDraft("a");
+  auto.getState().setAudience("Preserved"); auto.getState().setAudienceLocked(true); auto.getState().setFollowMode("group");
+  await auto.getState().flush(); await auto.getState().reviewPublication();
+  const before = activeEditor(auto.getState())!.preview!.previewFingerprint;
+  auto.getState().setFollowMode("self");
+  assert.equal(previewIsStale(activeEditor(auto.getState())!), true);
+  await auto.getState().publishReviewed(); assert.equal(sends, 0);
+  const record = await saved.promise;
+  assert.equal(record.document.followMode, "self");
+  assert.equal(record.document.digestAudience, "Preserved");
+  assert.equal(record.document.digestAudienceLocked, true);
+  await auto.getState().reviewPublication();
+  assert.notEqual(activeEditor(auto.getState())!.preview!.previewFingerprint, before);
+});
+
+test("accepting an assistant suggestion cannot replace a newer manual follow mode", async (t) => {
+  const response = deferred<PulseAuthorProposal>();
+  const f = fixture({ propose: () => response.promise });
+  t.after(() => f.store.getState().dispose());
+  await f.store.getState().openDraft("a");
+  const request = f.store.getState().requestProposal("Suggest a metric");
+  await new Promise(resolve => setImmediate(resolve));
+  f.store.getState().setFollowMode("none");
+  response.resolve({ baseRevision: 1, candidateDocument: { ...f.records.get("a")!.document, followMode: "group", digestAudience: "Suggested" }, changes: [], assistantMessage: "Suggested" });
+  await request; await f.store.getState().acceptProposal();
+  assert.equal(activeEditor(f.store.getState())!.document.followMode, "none");
+});
+
+test("same-owner permission metadata refresh does not discard an already requested catalog", async (t) => {
+  let owner = session;
+  let reads = 0;
+  const held = deferred<{ catalog: ReturnType<typeof catalog> }>();
+  const f = fixture();
+  const store = createAuthorController(f.transport, async () => { reads++; return held.promise; }, () => owner);
+  t.after(() => { store.getState().dispose(); f.store.getState().dispose(); });
+  const opening = store.getState().openDraft("a");
+  await new Promise(resolve => setImmediate(resolve));
+  owner = { ...session, groupCreation: { state: "allowed", reasonCode: "verified", message: "Group creation is available." } };
+  const loaded = new Promise<void>((resolve) => {
+    const unsubscribe = store.subscribe((state) => {
+      if (!state.entries.a.catalogLoading) { unsubscribe(); resolve(); }
+    });
+  });
+  held.resolve({ catalog: catalog("a") });
+  await opening; await loaded;
+  assert.equal(reads, 1);
+  assert.equal(activeEditor(store.getState())?.catalog?.datasourceLuid, "a");
 });

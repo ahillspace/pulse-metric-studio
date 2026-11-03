@@ -147,12 +147,21 @@ Authentication and reachability are separate: temporary network, throttling, or 
 First-party registry and dimension requests carry their captured expected owner for backend admission before provider work.
 A changed principal, activation generation, connection, server, or site returns a context error instead of running the queued request as another owner.
 Requests without that optional expectation retain the existing compatibility behavior.
+Connection status exposes the authenticated user's verified site role and group-creation access as allowed, denied, or unknown.
+Existing own-user reads obtain this metadata; PATs remain opaque credentials rather than locally decoded permission claims.
+Access metadata belongs to the complete authenticated session owner.
+Superseded checks cannot replace newer access or connection-status results for the same owner.
+Permission checks update that owner's access without refreshing datasource or metric inventory.
+Missing role information remains unknown, and a permission failure does not by itself expire authentication.
 See [`tableau-connections-api.ts`](../packages/web/src/tableau-connections-api.ts), [`routes.ts`](../packages/core/src/tableau/routes.ts), and [`session.ts`](../packages/core/src/tableau/session.ts).
 
 Field discovery prefers VDS metadata and uses the Metadata API fallback where supported by the response.
 Raw provider field IDs remain the catalog identity used by authoring and serialization.
 Caches are partitioned by connection context; a failed or partial provider read cannot establish that Tableau contains no matching content.
 Catalog cache hits preserve the original VDS or Metadata API source; internal timestamps determine freshness separately.
+Successful Metadata fallback retains bounded diagnostics for the unsuccessful VDS attempts.
+Ordinary fallback remains usable; an explicit dimensional fork reports the VDS cause when it requires VDS metadata.
+Datasource API access and group administration are separate capabilities.
 Discovery reuses a known datasource name or an exact datasource lookup instead of listing the site for one name.
 Dimension fields, counts, and value searches share bounded context for the authenticated owner and selected sources.
 Variant execution still refreshes and validates its captured source, catalog, and value domain.
@@ -179,8 +188,16 @@ The [audit findings](ARCHITECTURE_AUDIT.md#findings-and-recommendations) identif
 9. Author displays a result dialog with creation counts, diagnostics, and actions.
    Activity retains the complete receipt while disconnected.
 
-Publication verifies the initial metric's month-to-date timeframe through Tableau reads before resolving it for group subscriptions.
+Publication verifies the initial metric's month-to-date timeframe through Tableau reads before resolving it for follow subscriptions.
 An unexpected timeframe retains the confirmed definition and records a resolution diagnostic.
+One `followMode` records the intended post-publication action: `self`, `group`, or `none`.
+New workspaces default to `self`; legacy `groupFollow` values normalize to `group` or `none` without changing saved intent.
+The publication preview and fingerprint bind the mode, authenticated owner, and intended self recipient.
+Self following uses the captured publisher and confirmed metric IDs without group lookup, creation, or membership requests.
+Group setup requires matching-owner permission evidence before the first publication write.
+Denied or unknown group access disables the group option while keeping self following and no-follow choices available.
+An existing group selection remains selected until the user explicitly changes it or changes accounts.
+The follow receipt records its mode, captured self recipient when applicable, and distinct per-item outcomes.
 Digest groups use `pmStudio - Datasource Name - chosen name`, with the complete datasource and audience labels.
 The transport escapes XML while preserving the group name.
 Group actions use recorded group IDs and publication ownership.
@@ -288,6 +305,7 @@ See the [Pulse API reference](https://help.tableau.com/current/api/rest_api/en-u
 Deletion review uses names and metric identities from the immutable inventory snapshot without changing reviewed IDs or fingerprints.
 Follower counts come from the Manager's cached follow state; unavailable counts remain unknown.
 Deletion review does not fetch follower identities or refresh counts.
+Completed deletion outcomes use one results dialog; admission errors remain in the review dialog.
 Outside deletion review, deliberate follower inspection uses the per-metric follower-detail endpoint; unavailable or partial reads remain explicit.
 
 Metric Manager previews use Tableau's springboard insight and metric card image APIs through the existing authenticated connection.
@@ -462,6 +480,11 @@ Server logs suppress authorization headers and omit request query strings from r
 Disconnect requests identify the connection and session generation they intend to close.
 A stale request cannot disconnect a newer activation, including a newer session for the same connection.
 Unhandled errors return a reference rather than raw internal exception details.
+Explicit publish, delete, follow, unfollow, and fork failures use bounded, sanitized operation-specific explanations.
+Provider summaries, details, HTTP status, and provider codes remain available when Tableau supplies them.
+Conflict messages distinguish reported duplicate definitions from other conflicts; throttling remains distinct from a conflict.
+Descriptions do not change confirmed, unknown, failed, or unattempted outcomes and never authorize replaying an uncertain write.
+Background queries retain their existing fallback and diagnostic behavior.
 
 Activity records publication history.
 Share only the minimum receipt and log excerpt needed for diagnosis.

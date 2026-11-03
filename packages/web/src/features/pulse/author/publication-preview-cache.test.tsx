@@ -26,6 +26,7 @@ test("publication previews survive inventory refresh and canceled confirmations 
   useRegistry.setState({ inventory: inventory("before-publication-refresh") });
   const published = receipt();
   published.follow.group = { status: "created", id: "group", name: "Audience" };
+  published.follow.mode = "group";
   published.items = Array.from({ length: 3 }, (_, index) => ({ ...published.items[0], itemIndex: index, metricId: `metric-${index}` }));
   let requests = 0;
   globalThis.fetch = async (url) => {

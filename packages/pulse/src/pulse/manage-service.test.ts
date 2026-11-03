@@ -131,12 +131,13 @@ test('date forking preserves bounded structured provider diagnostics', async () 
     { sourceMetricId: 'metric-1', timeframeKey: 'LAST_30_DAYS' },
   ], dependencies({
     getOrCreate: async () => {
-      throw new TableauError('provider rejected request', 400, 'detail'.repeat(300));
+      throw new TableauError('provider rejected request', 400, JSON.stringify({ error: { summary: 'provider rejected request', detail: 'detail'.repeat(300) } }));
     },
   }));
   assert.equal(outcomes[0]?.status, 'failed');
   assert.match(outcomes[0]?.error ?? '', /provider rejected request/);
-  assert.ok((outcomes[0]?.error?.length ?? 0) <= 1200);
+  assert.match(outcomes[0]?.error ?? '', /HTTP 400/);
+  assert.ok((outcomes[0]?.error?.length ?? 0) <= 300);
 });
 
 test('date forking never reports a reconciliation failure as success', async () => {

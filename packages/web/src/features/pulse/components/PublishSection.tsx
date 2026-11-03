@@ -30,6 +30,7 @@ export function PublishSection({
     Object.values(entry.document.slicers).some((slicer) => slicer.active);
   const stale = previewIsStale(entry);
   const receipt = latestReceipt ?? entry.receipt;
+  const groupUnavailable = entry.document.followMode === "group" && session?.groupCreation?.state !== "allowed";
   return (
     <section
       className="pulse-publication-settings"
@@ -45,6 +46,7 @@ export function PublishSection({
                 className="btn primary"
                 disabled={
                   !connected ||
+                  groupUnavailable ||
                   !hasSelection ||
                   entry.previewBusy ||
                   entry.publishBusy ||
@@ -54,7 +56,7 @@ export function PublishSection({
                 onClick={() => void useAuthor.getState().reviewPublication()}
                 aria-label="Review publication"
                 title={
-                  !hasSelection
+                  groupUnavailable ? "Choose Follow me or No follow, or verify group creation permission." : !hasSelection
                     ? "Select at least one metric and one slicer to publish."
                     : undefined
                 }
@@ -104,6 +106,7 @@ export function PublishSection({
                 className="btn primary"
                 disabled={
                   (!connected && !entry.publishCommandId) ||
+                  (!entry.publishCommandId && groupUnavailable) ||
                   entry.publishBusy ||
                   (stale && !entry.publishCommandId) ||
                   preview.issues.length > 0 ||
@@ -164,12 +167,19 @@ export function PublishSection({
               </li>
             ))}
           </ul>
-          {preview.groupFollow && (
+          {preview.followMode === "group" && (
             <p>
               Digest group requested
               {preview.digestAudience ? ` for ${preview.digestAudience}` : ""}.
             </p>
           )}
+          {preview.followMode === "group" && groupUnavailable && <p className="warning-banner" role="alert">
+            {session?.groupCreation?.message ?? "Group creation permission is not verified."} Close this review and choose Follow me or No follow, or verify group creation permission.
+          </p>}
+          {preview.followMode === "self" && <p>Follow these metrics as {preview.selfRecipient?.name ?? "the publishing Tableau account"}.
+            {!preview.selfRecipient?.name && preview.selfRecipient?.id && <> Account: <code>{preview.selfRecipient.id}</code>.</>}
+          </p>}
+          {preview.followMode === "none" && <p>Publish these metrics without following them.</p>}
           {preview.issues.length > 0 && (
             <div className="warning-banner" role="alert">
               <h3>Resolve these issues before publishing</h3>

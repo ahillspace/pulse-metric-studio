@@ -2,6 +2,8 @@ import { aggregationLabel } from "../metric-labels";
 import type { PulsePublishReceipt } from "@pulse-metric-studio/shared";
 import { useActivity } from "./controller";
 import { ReceiptActions } from "./ReceiptActions";
+import { TableauDiagnosticDetails } from "../components/TableauDiagnosticDetails";
+import { publicationFollowProblems } from "../publication-follow";
 import "./activity.css";
 
 const followLabels = {
@@ -30,15 +32,8 @@ export function Receipt({
   const readError = useActivity((state) =>
     state.readReceiptId === receipt.id ? state.readError : null,
   );
-  const followNeedsAttention =
-    receipt.follow.requested &&
-    [
-      receipt.follow.group,
-      receipt.follow.membership,
-      ...receipt.follow.subscriptions,
-    ].some((item) =>
-      ["failed", "unknown", "not_attempted"].includes(item.status),
-    );
+  const followNeedsAttention = publicationFollowProblems(receipt.follow).length > 0;
+  const personal = receipt.follow.mode === "self";
   return (
     <section className="pulse-receipt" aria-label="Publication receipt">
       <header className="pulse-receipt-header">
@@ -95,6 +90,7 @@ export function Receipt({
             {item.diagnostic && (
               <p className="needs-attention">{item.diagnostic.message}</p>
             )}
+            <TableauDiagnosticDetails diagnostic={item.diagnostic} />
             {(item.undoStatus === "failed" ||
               item.undoStatus === "unknown") && (
               <p className="needs-attention">
@@ -137,8 +133,12 @@ export function Receipt({
           open={followNeedsAttention || undefined}
         >
           <summary>
-            Digest group{followNeedsAttention ? " - needs attention" : ""}
+            {personal ? "Personal follow" : "Digest group"}{followNeedsAttention ? " - needs attention" : ""}
           </summary>
+          {personal && <p>Account: {receipt.follow.selfRecipient?.name ?? "the publishing Tableau account"}.
+            {!receipt.follow.selfRecipient?.name && receipt.follow.selfRecipient?.id && <> Account: <code>{receipt.follow.selfRecipient.id}</code>.</>}
+          </p>}
+          {!personal && <>
           <p>
             {receipt.follow.group.name || "Group"}:{" "}
             {followLabels[receipt.follow.group.status]}
@@ -152,6 +152,7 @@ export function Receipt({
           {receipt.follow.membership.error && (
             <p className="needs-attention">{receipt.follow.membership.error}</p>
           )}
+          </>}
           <ul>
             {receipt.follow.subscriptions.map((item) => (
               <li key={item.itemIndex}>

@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
-import React from "react";
+import React, { type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { PulseDeletePlan } from "@pulse-metric-studio/shared";
 import { ExistingMetrics } from "../components/ExistingMetrics";
 import { useAuthor, type DraftEditor } from "../author/controller";
 import { useConnection } from "../connections/controller";
-import { useRegistry } from "./controller";
+import { createRegistryController, useRegistry } from "./controller";
+import { RegistryResultsModal } from "./views";
+import { unavailableFollowState } from "../follow-state";
 import { draft, inventory, session } from "../testing/fixtures";
 
 function reviewFixture(t: TestContext) {
@@ -68,6 +70,50 @@ function reviewFixture(t: TestContext) {
     return html.slice(start);
   };
 }
+
+test("denied cached deletion leaves one usable results dialog without reopening review", async (t) => {
+  reviewFixture(t);
+  const cached = useRegistry.getState().inventory!;
+  const context = draft().context;
+  const calls: string[] = [];
+  const local = createRegistryController({
+    inventory: async () => { calls.push("inventory"); return cached; },
+    followState: async (ids: string[]) => { calls.push("counts"); return unavailableFollowState(ids, "unavailable"); },
+  } as any, {
+    previewDelete: async (input) => { calls.push("cached-preview"); return { ...input, previewFingerprint: "cached", warnings: [],
+      targets: [{ kind: "metric", id: "cached-month", name: "Cached Monthly Revenue", definitionId: "definition-cached-month", inventoryComplete: true, affectedMetricIds: ["cached-month"] }] }; },
+    delete: async (input) => {
+      assert.deepEqual(input.metricIds, ["cached-month"]); assert.deepEqual(input.definitionIds, []);
+      calls.push("DELETE cached-month");
+      return { definitionsDeleted: 0, metricsDeleted: 0, failures: ["This account cannot delete the selected metric."],
+        outcomes: [{ metricId: "cached-month", status: "failed", error: "This account cannot delete the selected metric." }] };
+    },
+  });
+  local.getState().setContext(context, "A", session); await local.getState().load();
+  useRegistry.setState(local.getState(), true);
+  const unsubscribe = local.subscribe(state => useRegistry.setState(state, true)); t.after(unsubscribe);
+  await local.getState().previewDelete(["cached-month"], []);
+  assert.deepEqual(calls, ["inventory", "counts", "cached-preview"]);
+  await local.getState().executeDelete();
+  let tree: ReactElement | undefined;
+  const render = () => { function Capture() { tree = ExistingMetrics({}); return tree; } return renderToStaticMarkup(<Capture />); };
+  const html = render();
+  assert.equal((html.match(/role="dialog"/g) ?? []).length, 1);
+  assert.doesNotMatch(html, /Review deletion/);
+  assert.match(html, /Delete results/); assert.match(html, /This account cannot delete the selected metric/);
+  assert.match(html, /<button class="btn primary" type="button">Done<\/button>/);
+  const findResults = (node: ReactNode): ReactElement<any> | undefined => {
+    if (!React.isValidElement(node)) return;
+    const element = node as ReactElement<any>; if (element.type === RegistryResultsModal) return element;
+    for (const child of React.Children.toArray(element.props.children)) { const found = findResults(child); if (found) return found; }
+  };
+  const result = findResults(tree); assert.ok(result);
+  const modal = RegistryResultsModal(result.props) as ReactElement<any>;
+  assert.equal(modal.props.actions.props.children, "Done");
+  modal.props.actions.props.onClick();
+  assert.doesNotMatch(render(), /role="dialog"|Review deletion|Delete results/);
+  assert.deepEqual(calls, ["inventory", "counts", "cached-preview", "DELETE cached-month", "inventory", "counts"], "selected deletion and one final refresh only");
+});
 
 test("Manager deletion review uses fresh names for renamed resources and a sibling absent from cached inventory", (t) => {
   const render = reviewFixture(t);
