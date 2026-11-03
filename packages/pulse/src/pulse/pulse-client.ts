@@ -1,6 +1,6 @@
 interface PulseDefinitionResponse { definition?: { metadata?: { id?: string; name?: string } } }
 import type { TableauSession } from '@pulse-metric-studio/core';
-import { TableauError,apiPath,deleteReq,getJson,isPastEndError,postJson } from '@pulse-metric-studio/core';
+import { TableauError,TableauResponseSizeError,apiPath,deleteReq,getJson,isPastEndError,postJson } from '@pulse-metric-studio/core';
 import { boundedProviderDiagnostic,type PulseProviderDiagnostic } from './provider-diagnostics.js';
 import { pulseOperationErrorMessage } from './operation-errors.js';
 
@@ -46,6 +46,8 @@ export interface PulseMetricInventory {
   metrics: PulseExactMetric[];
   truncated: boolean;
   diagnostic?: PulseProviderDiagnostic;
+  /** Preserve a terminal local limit while retaining a useful partial prefix for inventory views. */
+  responseSizeExceeded?: true;
 }
 
 export async function createDefinition(
@@ -128,7 +130,7 @@ export async function listMetricsInventory(
       data = await getJson<unknown>(session, `${PULSE}/definitions/${encodeURIComponent(definitionId)}/metrics?${query}`);
     } catch (error) {
       if ((error instanceof TableauError && error.kind === 'auth') || page === 0) throw error;
-      return { metrics, truncated: true, diagnostic: boundedProviderDiagnostic(error) };
+      return { metrics, truncated: true, diagnostic: boundedProviderDiagnostic(error), ...(error instanceof TableauResponseSizeError ? { responseSizeExceeded: true as const } : {}) };
     }
     if (!isRecord(data) || !Array.isArray(data.metrics)) return partial('Pulse metric inventory page requires a metrics array.');
     if (data.total_available !== undefined) {
@@ -165,7 +167,13 @@ export async function listMetricsInventory(
 /** Callers requiring a complete list must not silently consume a partial prefix. */
 export async function listMetricsForDefinition(session: TableauSession, definitionId: string): Promise<PulseExactMetric[]> {
   const inventory = await listMetricsInventory(session, definitionId);
-  if (inventory.truncated) throw new TableauError(inventory.diagnostic?.message ?? 'Pulse metric inventory is incomplete.', 502);
+  if (inventory.truncated) {
+    if (inventory.responseSizeExceeded) throw new TableauResponseSizeError();
+    const diagnostic = inventory.diagnostic;
+    if (diagnostic?.status !== undefined)
+      throw new TableauError(diagnostic.message, diagnostic.status, diagnostic.detail ?? '', diagnostic.kind ?? 'http', diagnostic.providerCode);
+    throw new PulseContractError(diagnostic?.message ?? 'Pulse metric inventory is incomplete.');
+  }
   return inventory.metrics;
 }
 
@@ -178,10 +186,13 @@ export async function resolveDefaultMetricId(
   definitionId: string,
   attempts = 6,
 ): Promise<string | null> {
+  let lastFailure: unknown;
   for (let i = 0; i < attempts; i++) {
     if (i > 0) await sleep(1200 * i);
     try {
       const metrics = await listMetricsForDefinition(session, definitionId);
+      // A healthy empty read establishes propagation delay rather than failed access.
+      lastFailure = undefined;
       const candidate = metrics.find((metric) => metric.is_default === true)
         ?? metrics.find((metric) => isMonthToDate(metric.specification))
         ?? (metrics.length === 1 ? metrics[0] : undefined);
@@ -197,13 +208,22 @@ export async function resolveDefaultMetricId(
         return id;
       }
     } catch (e) {
-      if (e instanceof UnexpectedDefaultMetricError || (e instanceof TableauError && e.kind === 'auth')) throw e;
+      const retryable = e instanceof TableauError && !(e instanceof PulseContractError) && !(e instanceof TableauResponseSizeError)
+        && e.kind !== 'auth' && (e.kind === 'network' || [404, 408, 429].includes(e.status) || e.status >= 500);
+      if (!retryable) throw e;
+      lastFailure = e;
     }
   }
+  if (lastFailure !== undefined) throw lastFailure;
   return null;
 }
 
 class UnexpectedDefaultMetricError extends Error {}
+
+/** A successful HTTP read with an unusable provider contract cannot establish pending visibility. */
+class PulseContractError extends TableauError {
+  constructor(message: string, body = '') { super(message, 502, body); }
+}
 
 function isMonthToDate(specification: unknown): boolean {
   if (!isRecord(specification) || !isRecord(specification.measurement_period)) return false;
@@ -776,9 +796,8 @@ function hasDirectFollowerIdentity(record: Record<string, unknown>): boolean {
 }
 
 function unsupportedContract(label: string, data: unknown): TableauError {
-  return new TableauError(
+  return new PulseContractError(
     `Unsupported Pulse ${label} response shape`,
-    502,
     boundedJson(data),
   );
 }

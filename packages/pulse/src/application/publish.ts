@@ -420,7 +420,9 @@ export class PulsePublishService {
       const item = items[subscription.itemIndex]!;
       if (item.creationStatus !== 'created' || !item.metricId) {
         subscription.status = 'skipped';
-        subscription.error = 'No confirmed default metric is available.';
+        subscription.error = item.resolutionStatus === 'failed' && item.diagnostic?.message
+          ? `Default metric confirmation failed: ${item.diagnostic.message}`
+          : 'No confirmed default metric is available.';
         this.repository.saveFollow(commandId, follow);
         continue;
       }
