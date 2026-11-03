@@ -46,6 +46,11 @@ export class TableauError extends Error {
   }
 }
 
+/** A successful provider payload cannot become usable by retrying the same local size limit. */
+export class TableauResponseSizeError extends TableauError {
+  constructor() { super('Tableau response exceeds the permitted size.', 502); }
+}
+
 export function tableauProviderErrorInfo(error: TableauError, secrets: readonly string[] = []): TableauProviderErrorInfo {
   const parsed = error.providerInfo
     ? parseTableauProviderError({ code: error.providerInfo.providerCode, summary: error.providerInfo.summary, detail: error.providerInfo.detail }, secrets)
@@ -66,6 +71,13 @@ export function classifyStatus(status: number, bodyText: unknown): TableauError[
 /** Upper bound for any Tableau response body unless a caller sets a tighter one. */
 export const DEFAULT_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
 
+interface TableauRequestInit extends RequestInit {
+  timeoutMs?: number;
+  maxResponseBytes?: number;
+  /** Status-only operations discard irrelevant bodies without changing their confirmed outcome. */
+  responseBody?: { discardOnSuccess: boolean; discardOnStatuses?: readonly number[] };
+}
+
 /**
  * Removes credentials Tableau may reflect in an error body (the session token,
  * a PAT secret) before the text reaches the UI or the log.
@@ -85,53 +97,114 @@ async function parseBody(resp: Response, maxBytes = DEFAULT_MAX_RESPONSE_BYTES, 
   try { return JSON.parse(text); } catch { return text; }
 }
 
-export async function readBoundedBody(resp: Response, maxBytes: number, timeoutMs: number): Promise<string> {
-  const tooLarge = () => new TableauError('Tableau response exceeds the permitted size.', 502);
+function requestCancelled(): TableauError {
+  return new TableauError('Tableau request was cancelled.', 0, '', 'network');
+}
+
+async function awaitAuthentication(refresh: Promise<boolean>, deadline: number, signal?: AbortSignal | null): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout>;
+  let abort: (() => void) | undefined;
+  try {
+    return await Promise.race([refresh, new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new TableauError('Tableau request timed out while refreshing authentication.', 0, '', 'network')), Math.max(0, deadline - Date.now()));
+      abort = () => reject(requestCancelled());
+      signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) abort();
+    })]);
+  } finally {
+    clearTimeout(timer!);
+    if (abort) signal?.removeEventListener('abort', abort);
+  }
+}
+
+/** Await cleanup, but never extend the request's original deadline to do it. */
+async function cancelBody(cancel: () => Promise<unknown>, deadline: number, signal?: AbortSignal | null, terminate?: () => void): Promise<void> {
+  let cancelled: Promise<unknown>;
+  try { cancelled = cancel(); } catch { return; }
+  await new Promise<void>((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', stop);
+      resolve();
+    };
+    const stop = () => { finish(); terminate?.(); };
+    const timer = setTimeout(stop, Math.max(0, deadline - Date.now()));
+    signal?.addEventListener('abort', stop, { once: true });
+    void cancelled.then(finish, finish);
+    if (signal?.aborted) stop();
+  });
+}
+
+async function readBoundedBytes(resp: Response, maxBytes: number, timeoutMs: number, signal?: AbortSignal | null, terminate?: () => void): Promise<ArrayBuffer> {
+  const expiresAt = Date.now() + timeoutMs;
+  const tooLarge = () => new TableauResponseSizeError();
+  if (signal?.aborted) {
+    if (resp.body) await cancelBody(() => resp.body!.cancel(), expiresAt, signal, terminate);
+    throw requestCancelled();
+  }
+  if (!resp.body) return new ArrayBuffer(0);
   if (Number(resp.headers.get('content-length')) > maxBytes) {
-    void resp.body?.cancel().catch(() => {});
+    await cancelBody(() => resp.body!.cancel(), expiresAt, signal, terminate);
     throw tooLarge();
   }
-  if (!resp.body) return '';
   const reader = resp.body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
   let timer: ReturnType<typeof setTimeout>;
+  let abort: (() => void) | undefined;
   const deadline = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
       reject(new TableauError('Tableau response body timed out.', 0, '', 'network'));
-      void reader.cancel().catch(() => {});
     }, timeoutMs);
+    abort = () => reject(requestCancelled());
+    signal?.addEventListener('abort', abort, { once: true });
   });
   try {
     for (;;) {
       const { value, done } = await Promise.race([reader.read(), deadline]);
       if (done) break;
       size += value.byteLength;
-      if (size > maxBytes) {
-        void reader.cancel().catch(() => {});
-        throw tooLarge();
-      }
+      if (size > maxBytes) throw tooLarge();
       chunks.push(value);
     }
-  } finally { clearTimeout(timer!); reader.releaseLock(); }
-  return Buffer.concat(chunks, size).toString('utf8');
+  } catch (error) {
+    const cancelled = signal?.aborted;
+    await cancelBody(() => reader.cancel(), expiresAt, signal, terminate);
+    if (cancelled) throw requestCancelled();
+    if (error instanceof TableauError) throw error;
+    throw new TableauError('Network error while reading the Tableau response.', 0, '', 'network');
+  } finally {
+    clearTimeout(timer!);
+    if (abort) signal?.removeEventListener('abort', abort);
+    reader.releaseLock();
+  }
+  return Uint8Array.from(Buffer.concat(chunks, size)).buffer;
+}
+
+export async function readBoundedBody(resp: Response, maxBytes: number, timeoutMs: number): Promise<string> {
+  return Buffer.from(await readBoundedBytes(resp, maxBytes, timeoutMs)).toString('utf8');
+}
+
+/** Provider streams never escape their request permit; callers receive ordinary buffered responses. */
+function bufferedResponse(resp: Response, body: ArrayBuffer | null): Response {
+  const result = new Response(body, { status: resp.status, statusText: resp.statusText, headers: resp.headers });
+  for (const property of ['url', 'redirected', 'type'] as const)
+    Object.defineProperty(result, property, { value: resp[property] });
+  return result;
 }
 
 export async function tableauFetch(
   session: TableauSession,
   path: string,
-  init: RequestInit & { timeoutMs?: number; maxResponseBytes?: number } = {},
+  init: TableauRequestInit = {},
 ): Promise<Response> {
   const requestToken = session.token;
   const context = getSessionContext(session);
   const deadline = Date.now() + (init.timeoutMs ?? 30_000);
-  let resp = await rawFetch(session, path, init, requestToken, context, deadline);
-
-  // Refresh only the owning active session, sharing the refresh across callers.
-  if (resp.status === 401 && requestToken) {
-    const refreshed = await reauthenticate(session, requestToken, context);
-    if (refreshed) resp = await rawFetch(session, path, init, session.token, context, deadline);
-  }
+  let resp = await rawFetch(session, path, init, requestToken, context, deadline, true);
 
   // Version self-healing: pods disagree about supported REST versions (some
   // report stale serverInfo values, some retire old versions). On
@@ -217,25 +290,38 @@ class RequestGate {
   private readonly waiting: Array<() => void> = [];
   private resumeAt = 0;
 
-  async run<T>(task: () => Promise<T>, deadline: number): Promise<T> {
+  async run<T>(task: () => Promise<T>, deadline: number, signal?: AbortSignal | null): Promise<T> {
+    if (signal?.aborted) throw requestCancelled();
     if (this.active >= MAX_CONCURRENT_TABLEAU_REQUESTS) {
       await new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => {
+        const cleanup = () => { clearTimeout(timeout); signal?.removeEventListener('abort', abort); };
+        const fail = (error: TableauError) => {
           const index = this.waiting.indexOf(wake);
           if (index >= 0) this.waiting.splice(index, 1);
-          reject(new TableauError('Tableau request timed out while waiting for capacity.', 0, '', 'network'));
-        }, Math.max(0, deadline - Date.now()));
-        const wake = () => { clearTimeout(timeout); resolve(); };
+          cleanup();
+          reject(error);
+        };
+        const timeout = setTimeout(() => fail(new TableauError('Tableau request timed out while waiting for capacity.', 0, '', 'network')), Math.max(0, deadline - Date.now()));
+        const abort = () => fail(requestCancelled());
+        const wake = () => { cleanup(); resolve(); };
         this.waiting.push(wake);
+        signal?.addEventListener('abort', abort, { once: true });
       });
     } else {
       this.active++;
     }
     try {
+      if (signal?.aborted) throw requestCancelled();
       for (let wait = this.resumeAt - Date.now(); wait > 0; wait = this.resumeAt - Date.now()) {
         if (this.resumeAt >= deadline) throw new TableauError('Tableau is temporarily unavailable until its rate limit permits another request.', 429);
-        await new Promise((resolve) => setTimeout(resolve, wait));
+        await new Promise<void>((resolve, reject) => {
+          const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); };
+          const abort = () => { cleanup(); reject(requestCancelled()); };
+          const timer = setTimeout(() => { cleanup(); resolve(); }, wait);
+          signal?.addEventListener('abort', abort, { once: true });
+        });
       }
+      if (signal?.aborted) throw requestCancelled();
       if (Date.now() >= deadline) throw new TableauError('Tableau request timed out while waiting for capacity.', 0, '', 'network');
       return await task();
     } finally {
@@ -263,26 +349,80 @@ function requestGate(session: TableauSession): RequestGate {
 async function rawFetch(
   session: TableauSession,
   path: string,
-  init: RequestInit & { timeoutMs?: number } = {},
+  init: TableauRequestInit = {},
   token = session.token,
   context = getSessionContext(session),
   deadline = Date.now() + (init.timeoutMs ?? 30_000),
+  refreshAuthentication = false,
 ): Promise<Response> {
   const gate = requestGate(session);
-  for (let attempt = 0; ; attempt++) {
-    const resp = await gate.run(() => sendOnce(session, path, { ...init, timeoutMs: Math.max(1, deadline - Date.now()) }, token, context), deadline);
-    if (resp.status !== 429) return resp;
-    const delay = retryAfterMs(resp.headers.get('retry-after'));
-    gate.pause(delay);
-    if (attempt === MAX_THROTTLE_RETRIES || Date.now() + delay >= deadline) return resp;
-    void resp.body?.cancel().catch(() => {});
+  let authenticationAttempted = false;
+  let currentToken = token;
+  for (let attempt = 0; ;) {
+    const result = await gate.run(async () => {
+      const controller = new AbortController();
+      const signal = init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal;
+      const terminate = () => controller.abort();
+      let resp: Response | undefined;
+      try {
+        resp = await sendOnce(session, path, { ...init, signal, timeoutMs: Math.max(1, deadline - Date.now()) }, currentToken, context);
+        // Refresh from conclusive headers: an optional 401 diagnostic body must not block reauthentication.
+        if (resp.status === 401 && refreshAuthentication && !authenticationAttempted && currentToken) {
+          authenticationAttempted = true;
+          if (Date.now() >= deadline) throw new TableauError('Tableau request timed out before authentication could refresh.', 0, '', 'network');
+          const refreshed = await awaitAuthentication(reauthenticate(session, currentToken, context), deadline, signal);
+          if (refreshed) {
+            if (resp.body) await cancelBody(() => resp!.body!.cancel(), deadline, signal, terminate);
+            currentToken = session.token;
+            return { retry: 'authentication' as const };
+          }
+        }
+        if (resp.status === 429) {
+          const delay = retryAfterMs(resp.headers.get('retry-after'));
+          // Install the cooldown before this permit can wake an already queued caller.
+          gate.pause(delay);
+          if (attempt < MAX_THROTTLE_RETRIES && Date.now() + delay < deadline) {
+            if (resp.body) await cancelBody(() => resp!.body!.cancel(), deadline, signal, terminate);
+            return { retry: 'throttle' as const };
+          }
+        }
+        const needsVersionDiagnostic = resp.status === 404 && /^\/api\/\d+\.\d+\//.test(path);
+        if (!needsVersionDiagnostic && init.responseBody && ((init.responseBody.discardOnSuccess && resp.ok) || init.responseBody.discardOnStatuses?.includes(resp.status))) {
+          if (resp.body) await cancelBody(() => resp!.body!.cancel(), deadline, signal, terminate);
+          return { retry: false as const, response: bufferedResponse(resp, null) };
+        }
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) {
+          if (resp.body) await cancelBody(() => resp!.body!.cancel(), deadline, signal, terminate);
+          if (!resp.ok && !needsVersionDiagnostic) return { retry: false as const, response: bufferedResponse(resp, null) };
+          throw new TableauError('Tableau response body timed out.', 0, '', 'network');
+        }
+        try {
+          const bytes = await readBoundedBytes(resp, init.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES, remaining, signal, terminate);
+          return { retry: false as const, response: bufferedResponse(resp, resp.body ? bytes : null) };
+        } catch (error) {
+          if (resp.ok || needsVersionDiagnostic || init.signal?.aborted) throw error;
+          // Keep a confirmed HTTP rejection when its optional explanation is unreadable.
+          const code = safeTableauProviderCode(resp.headers.get('validation_code'), [session.token]);
+          const summary = error instanceof Error ? error.message : 'Tableau response details could not be read.';
+          throw new TableauError(`${init.method ?? 'GET'} ${path} failed (${resp.status})${validationDetail(resp)}`, resp.status, '', classifyStatus(resp.status, { code }), code, { summary, ...(code ? { providerCode: code } : {}) });
+        }
+      } catch (error) {
+        if (resp?.body && !resp.bodyUsed) await cancelBody(() => resp!.body!.cancel(), deadline, signal, terminate);
+        throw error;
+      } finally {
+        terminate();
+      }
+    }, deadline, init.signal);
+    if (!result.retry) return result.response;
+    if (result.retry === 'throttle') attempt++;
   }
 }
 
 async function sendOnce(
   session: TableauSession,
   path: string,
-  init: RequestInit & { timeoutMs?: number },
+  init: TableauRequestInit,
   token: string,
   context: TableauSessionContext | null,
 ): Promise<Response> {
@@ -296,11 +436,14 @@ async function sendOnce(
   // header — omitting it yields 401 "Unable to authenticate user" even with
   // a valid token. Versioned paths ignore it, so always send it.
   if (!headers.has('X-Tableau-Site-Id') && session.siteId) headers.set('X-Tableau-Site-Id', session.siteId);
-  const timeoutMs = init.timeoutMs ?? 30_000;
+  const { timeoutMs = 30_000, maxResponseBytes: _maxBytes, responseBody: _bodyPolicy, ...request } = init;
   let resp: Response;
   try {
-    resp = await fetch(url, { ...init, headers, redirect: 'error', signal: AbortSignal.timeout(timeoutMs) });
+    const timeout = AbortSignal.timeout(timeoutMs);
+    const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+    resp = await fetch(url, { ...request, headers, redirect: 'error', signal });
   } catch (e) {
+    if (init.signal?.aborted) throw requestCancelled();
     throw new TableauError(`Network error calling ${path}: ${(e as Error).message}`, 0, '', 'network');
   }
   return resp;
@@ -366,7 +509,7 @@ export async function postJson<T>(
 }
 
 export async function deleteReq(session: TableauSession, path: string): Promise<void> {
-  const resp = await tableauFetch(session, path, { method: 'DELETE' });
+  const resp = await tableauFetch(session, path, { method: 'DELETE', maxResponseBytes: 64 * 1024, responseBody: { discardOnSuccess: true, discardOnStatuses: [404] } });
   if (!resp.ok && resp.status !== 404) {
     const bodyText = redactCredentials(await readBoundedBody(resp, 64 * 1024, 30_000).catch(() => ''), [session.token]);
     const info = parseTableauProviderError(bodyText, [session.token]);

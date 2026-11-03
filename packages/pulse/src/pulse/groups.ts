@@ -124,6 +124,7 @@ export async function addUserToGroup(
         },
         body: `<tsRequest><user id="${escapeXml(userId)}" /></tsRequest>`,
         timeoutMs: 20_000,
+        responseBody: { discardOnSuccess: true, discardOnStatuses: [409] },
       },
     );
     if (response.ok || response.status === 409) return; // 409 = already a member
@@ -160,7 +161,7 @@ export async function deleteGroup(
         session,
         `/sites/${encodeURIComponent(session.siteId)}/groups/${encodeURIComponent(groupId)}`,
       ),
-      { method: "DELETE", timeoutMs: 20_000 },
+      { method: "DELETE", timeoutMs: 20_000, responseBody: { discardOnSuccess: true, discardOnStatuses: [404] } },
     );
     if (response.ok || response.status === 404) return;
     const body = await readBoundedBody(response, DEFAULT_MAX_RESPONSE_BYTES, 20_000).catch(() => "");

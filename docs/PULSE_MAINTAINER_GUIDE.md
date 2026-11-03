@@ -188,9 +188,13 @@ Discovery reuses a known datasource name or an exact datasource lookup instead o
 Dimension fields, counts, and value searches share bounded context for the authenticated owner and selected sources.
 Variant execution still refreshes and validates its captured source, catalog, and value domain.
 [`tableauFetch`](../packages/core/src/tableau/rest-client.ts) owns registered-session checks, concurrency admission, authentication refresh, version adaptation, and bounded throttling retries.
+The per-identity concurrency limit covers provider response bodies through bounded consumption or cancellation, rather than ending when headers arrive.
+Status-only operations discard irrelevant bodies without changing accepted mutation outcomes.
+Cancellation cleanup respects the original request deadline and aborts its request when that boundary expires.
 Read and mutation retries have different safety rules; an ambiguous write is not a confirmed rejection.
 Version negotiation makes forward progress and changes the session version only after a successful response.
 A provider's `Retry-After` minimum is respected; a deadline that cannot accommodate it returns an unavailable result without an early retry.
+The transport installs that cooldown before releasing capacity to queued requests.
 Queued requests observe their original deadline and never dispatch after expiration.
 See [`getFieldCatalog`](../packages/core/src/tableau/vds-fields.ts) and [`metadata-fallback.ts`](../packages/core/src/tableau/metadata-fallback.ts).
 The [audit findings](ARCHITECTURE_AUDIT.md#findings-and-recommendations) identify response paths that bypass the common body-size limit and pagination limits that need further qualification.
@@ -217,6 +221,10 @@ Composer-only edits do not replace the selected table inputs.
 
 Publication verifies the initial metric's month-to-date timeframe through Tableau reads before resolving it for follow subscriptions.
 An unexpected timeframe retains the confirmed definition and records a resolution diagnostic.
+Successful empty reads remain pending while Tableau propagates the default metric.
+Permission failures and malformed Pulse response contracts fail resolution immediately.
+Retryable read failures retain the final provider diagnostic when polling exhausts; a later healthy empty read restores pending visibility.
+Resolution failure preserves confirmed creation and explains skipped following without replaying the definition write.
 One `followMode` records the intended post-publication action: `self`, `group`, or `none`.
 New workspaces default to `self`; legacy `groupFollow` values normalize to `group` or `none` without changing saved intent.
 The publication preview and fingerprint bind the mode, authenticated owner, and intended self recipient.
