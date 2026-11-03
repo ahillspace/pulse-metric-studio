@@ -184,9 +184,12 @@ export function registerTableauRoutes(
     });
   });
 
-  app.get('/api/tableau/status', async () => {
+  app.get<{ Querystring: { restore?: boolean } }>('/api/tableau/status', {
+    schema: { querystring: { type: 'object', properties: { restore: { type: 'boolean' } } } },
+  }, async (req) => {
     const session = getSession();
     if (!session) {
+      if (req.query.restore === false) return { connected: false };
       let stored: ReturnType<typeof getStoredConnection>;
       try {
         stored = getStoredConnection();

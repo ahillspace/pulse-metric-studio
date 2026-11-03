@@ -26,6 +26,36 @@ async function fixture(fetchImpl: typeof fetch) {
   return app;
 }
 
+test('non-restoring status observes a disconnected session without signing in its saved profile', async () => {
+  const profile = sessions.saveConnection({ label: 'Saved fixture', serverUrl: 'https://fixture.example.test', siteContentUrl: '', patName: 'fixture', storageKind: 'encrypted', patSecret: 'fixture-pat' });
+  sessions.clearSession();
+  let signins = 0;
+  let profileReads = 0;
+  const app = Fastify();
+  await app.register(sensible);
+  registerTableauRoutes(app, {
+    discoverRestApiVersion: async () => '3.27',
+    patSignin: async () => { signins++; return { token: 'fixture-token', siteId: 'fixture-site', userId: 'fixture-user' }; },
+    fetchImpl: async () => { profileReads++; return Response.json({ user: { id: 'fixture-user', siteRole: 'Creator' } }); },
+  });
+  try {
+    const disconnected = await app.inject('/api/tableau/status?restore=false');
+    assert.equal(disconnected.statusCode, 200, disconnected.body);
+    assert.equal(disconnected.json().connected, false);
+    assert.equal(sessions.getSession(), null);
+    assert.equal(signins, 0);
+    assert.equal(profileReads, 0);
+    const restored = (await app.inject('/api/tableau/status')).json();
+    assert.equal(restored.restored, true);
+    assert.equal(restored.session.connectionId, profile.id);
+    assert.equal(signins, 1);
+    const observed = (await app.inject('/api/tableau/status?restore=false')).json();
+    assert.equal(observed.session.sessionGeneration, restored.session.sessionGeneration);
+    assert.equal(signins, 1);
+    assert.equal(profileReads, 2);
+  } finally { await app.close(); sessions.deleteConnection(profile.id); }
+});
+
 test('real status response derives group creation from verified own-user metadata and refreshes an already named user', async () => {
   const owner = actor();
   sessions.setSession(owner, { connectionId: 'fixture-connection', patSecret: 'fixture-pat' });

@@ -72,7 +72,7 @@ export interface ConnectionSummary {
 }
 
 export const api = {
-  status: () =>
+  status: (options?: { restore?: boolean }) =>
     req<{
       connected: boolean;
       reachable?: boolean;
@@ -80,7 +80,7 @@ export const api = {
       restored?: boolean;
       hasStoredProfile?: boolean;
       session?: TableauSessionInfo;
-    }>("/api/tableau/status"),
+    }>(`/api/tableau/status${options?.restore === false ? "?restore=false" : ""}`),
   disconnect: (owner: Pick<TableauSessionInfo, "connectionId" | "sessionGeneration">) =>
     req<{ ok: true }>("/api/tableau/disconnect", "POST", owner),
   connections: () =>

@@ -149,6 +149,8 @@ Retirement records contain references and outcomes, never secret values.
 Durable replacement outcomes preserve operation identity independently of the current credential.
 Replaying a superseded replacement cannot restore its historical credential or session.
 The renderer fences committed responses against newer observed owners while retaining their cleanup tickets.
+An old-owner authentication expiry permits a status check that reconciles the active backend session without activating saved credentials.
+A newer observed activation or deliberate disconnect cancels that reconciliation.
 Activation and disconnection use connection identity and session generation to protect a newer activation from an older request.
 Requests capture their authenticated owner before dispatch; late authentication errors and terminated receipts cannot expire a replacement session.
 Connection checks query the authenticated user's profile using the captured user ID.

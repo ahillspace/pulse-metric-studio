@@ -29,7 +29,9 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 $DataDir = Join-Path $env:APPDATA 'com.ahillspace.pulsemetricstudio'
-$pulseRecoveryHandled = $false
+# Mutate one invocation-owned object from functions: script: has a different
+# owner when this helper is invoked as a downloaded script block.
+$pulseRecovery = [pscustomobject]@{ Handled = $false }
 
 function Start-PulseMetricStudio {
     if (-not $InstallDir) { return }
@@ -54,7 +56,7 @@ function Get-ValidatedInstallDirectory([string]$Candidate) {
 # Throw rather than exit: this script usually runs as a script block inside the
 # user's own PowerShell session, and exit would close their window.
 function Fail([string]$Message) {
-    $script:pulseRecoveryHandled = $true
+    $pulseRecovery.Handled = $true
     if ($Update) {
         # The app closed itself for this update: tell it why the update did
         # not happen, and bring it back.
@@ -218,7 +220,7 @@ try {
     Remove-Item -Recurse -Force $workDir -ErrorAction SilentlyContinue
 }
 } catch {
-    if (-not $pulseRecoveryHandled) {
+    if (-not $pulseRecovery.Handled) {
         Fail 'The installer could not complete the operation. Check the update log and try again.'
     }
     throw

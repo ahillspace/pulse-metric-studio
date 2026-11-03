@@ -11,8 +11,11 @@ const shellCandidates = process.platform === 'win32'
   ? [path.join(process.env.ProgramFiles ?? '', 'Git', 'bin', 'sh.exe')]
   : ['/bin/sh'];
 const shell = shellCandidates.find((candidate) => fs.existsSync(candidate));
-const powershell = process.platform === 'win32' ? 'powershell.exe' : 'pwsh';
-const hasPowerShell = !spawnSync(powershell, ['-NoProfile', '-Command', 'exit 0']).error;
+const powershell = 'powershell.exe';
+// These fixtures exercise real Windows path resolution and temporary files.
+// PowerShell on another OS cannot supply those filesystem semantics.
+const hasPowerShell = process.platform === 'win32'
+  && !spawnSync(powershell, ['-NoProfile', '-Command', 'exit 0']).error;
 
 const shellHarness = `
 waits=0
@@ -135,14 +138,18 @@ try {
     if ($env:TEST_CUSTOM_DIR -and $env:TEST_REGISTERED -ne '1') {
         $options.InstallDir = if ($env:TEST_INVALID_DIR -eq '1') { Join-Path $env:TEST_CUSTOM_DIR 'missing' } else { $env:TEST_CUSTOM_DIR }
     }
-    & $env:TEST_INSTALLER @options
+    if ($env:TEST_INVOCATION -eq 'scriptblock') {
+        & ([scriptblock]::Create((Get-Content -LiteralPath $env:TEST_INSTALLER -Raw))) @options
+    } else {
+        & $env:TEST_INSTALLER @options
+    }
 } catch {
     Write-Output $_.Exception.Message
     exit 23
 }
 `;
 
-function runInstaller(platform, action, close, update = false, custom = false, uninstallResult = '', registered = false, invalidDir = false, failure = '') {
+function runInstaller(platform, action, close, update = false, custom = false, uninstallResult = '', registered = false, invalidDir = false, failure = '', invocation = 'file') {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'pulse-installer-shutdown-'));
   try {
     const mac = platform === 'macOS';
@@ -167,7 +174,7 @@ function runInstaller(platform, action, close, update = false, custom = false, u
         LOCALAPPDATA: path.join(temporary, 'local'), APPDATA: path.join(temporary, 'roaming'),
         TEST_CLOSE: close, TEST_ACTION: action, TEST_UPDATE: update ? '1' : '0',
         TEST_CUSTOM_DIR: custom ? app : '', TEST_UNINSTALL_RESULT: uninstallResult, TEST_REGISTERED: registered ? '1' : '0', TEST_INVALID_DIR: invalidDir ? '1' : '0', TEST_FAILURE: failure,
-        TEST_INSTALLER: path.join(root, 'scripts', mac ? 'install.sh' : 'install.ps1').replaceAll('\\', '/'),
+        TEST_INSTALLER: path.join(root, 'scripts', mac ? 'install.sh' : 'install.ps1').replaceAll('\\', '/'), TEST_INVOCATION: invocation,
       },
     });
     assert.ifError(result.error);
@@ -205,13 +212,32 @@ test('Windows update recovers when a normal close request throws', { skip: !hasP
   assert.equal(result.events.includes('force-stop'), false);
 });
 
-test('Windows update does not run recovery twice after an explicit installer failure', { skip: !hasPowerShell }, () => {
-  const result = runInstaller('Windows', 'Install', 'closed', true, true, '', false, false, 'setup-exit');
-  assert.notEqual(result.status, 0, result.output);
-  assert.match(result.updateError ?? '', /exited with code 2/i);
-  assert.equal(result.events.filter((event) => event === 'launch').length, 1);
-  assert.equal(result.channel, true);
-});
+for (const invocation of ['file', 'scriptblock']) {
+  test(`Windows ${invocation} update preserves the specific failure and runs recovery once`, { skip: !hasPowerShell }, () => {
+    const result = runInstaller('Windows', 'Install', 'closed', true, true, '', false, false, 'setup-exit', invocation);
+    assert.notEqual(result.status, 0, result.output);
+    assert.match(result.output, /exited with code 2/i);
+    assert.match(result.updateError ?? '', /exited with code 2/i);
+    assert.doesNotMatch(result.output, /could not complete the operation/i);
+    assert.equal(result.events.filter((event) => event === 'launch').length, 1);
+    assert.equal(result.channel, true);
+  });
+
+  for (const update of [false, true]) {
+    test(`Windows ${invocation} ${update ? 'update' : 'uninstall'} preserves the close diagnostic`, { skip: !hasPowerShell }, () => {
+      const result = runInstaller('Windows', update ? 'Install' : 'Uninstall', 'keep-open', update, true, '', false, false, '', invocation);
+      assert.notEqual(result.status, 0, result.output);
+      assert.match(result.output, /could not finish closing/i);
+      assert.doesNotMatch(result.output, /could not complete the operation/i);
+      assert.equal(result.events.filter((event) => event === 'launch').length, update ? 1 : 0);
+      if (update) assert.match(result.updateError ?? '', /could not finish closing/i);
+      else assert.equal(result.updateError, null);
+      assert.equal(result.events.includes('replace'), false);
+      assert.equal(result.version, 'old');
+      assert.equal(result.channel, true);
+    });
+  }
+}
 
 test('Windows latest version lookup ignores local installation registry failures', { skip: !hasPowerShell }, () => {
   const result = runInstaller('Windows', 'LatestVersion', 'closed', false, false, '', false, false, 'registry');

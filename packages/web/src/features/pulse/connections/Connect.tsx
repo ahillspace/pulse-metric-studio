@@ -138,7 +138,7 @@ export function ConnectCard() {
   ): Promise<void> {
     clearPatSecret();
     if (response.superseded) {
-      await useConnection.getState().init();
+      await useConnection.getState().reconcileActiveSession(revision);
       await reloadConnections();
       throw new Error("A later connection change replaced this result. Check the current connection before continuing.");
     }

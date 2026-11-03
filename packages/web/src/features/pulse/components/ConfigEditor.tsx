@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ComponentProps } from "react";
+import { memo, useEffect, useMemo, useState, type ComponentProps } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { validatePulseDocument } from "@pulse-metric-studio/shared";
 import {
@@ -29,7 +29,7 @@ export function selectConfigEditor(state: Parameters<typeof activeEditor>[0]) {
     catalogLoading: current.catalogLoading, catalogError: current.catalogError } : null;
 }
 
-export function ConfigEditor() {
+export const ConfigEditor = memo(function ConfigEditor() {
   const entry = useAuthor(useShallow(selectConfigEditor));
   const session = useConnection((state) => state.session);
   const updateMetric = useAuthor((state) => state.updateMetric);
@@ -361,7 +361,7 @@ export function ConfigEditor() {
       )}
     </section>
   );
-}
+});
 
 export function Pagination({
   page,
