@@ -429,6 +429,7 @@ test("a committed replacement recovers after an old-owner authentication expiry 
     datasources: async () => ({ datasources: [] }),
   });
   await store.getState().connected(session, session.connectionId);
+  assert.equal(store.getState().startAction(), true);
   const revision = store.getState().captureOwnerRevision();
   const pending = replaceNativeCredential({
     store: async () => "new-reference",
@@ -438,8 +439,9 @@ test("a committed replacement recovers after an old-owner authentication expiry 
       if (!await store.getState().adoptCommittedSession(committed.session!, committed.connection.id, revision)) throw Error("newer owner observed");
     },
     retire: async () => { retired = true; assert.equal(store.getState().session?.sessionGeneration, 3); return "removed"; },
-  });
+  }).finally(() => store.getState().finishAction());
   await replacing.promise;
+  assert.equal(store.getState().connecting, true);
   store.getState().expireSession(session);
   assert.equal(store.getState().session, null);
   response.resolve({ ok: true, connection: { id: session.connectionId }, session: replacement, retirement: { ticket: "ticket" } });
@@ -447,6 +449,7 @@ test("a committed replacement recovers after an old-owner authentication expiry 
   assert.deepEqual(statusOptions, [{ restore: false }]);
   assert.equal(store.getState().session?.sessionGeneration, 3);
   assert.equal(store.getState().error, null);
+  assert.equal(store.getState().connecting, false);
   assert.equal(retired, true);
   assert.equal(discarded, false);
 });
