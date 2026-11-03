@@ -140,10 +140,11 @@ The public release repository is `ahillspace/pulse-metric-studio`.
 5. Stage the release into an empty directory:
 
    ```sh
-   sh scripts/stage-release.sh release-assets PATH_TO_INSTALLER
+   sh scripts/stage-release.sh --repo ahillspace/pulse-metric-studio release-assets PATH_TO_INSTALLER
    ```
 
-   Staging reads the root package version, copies matching installers, rewrites helper defaults, and writes `checksums.txt`.
+   `--repo` is required and names the repository the release is published to.
+   Staging reads the root package version, copies matching installers, rewrites the install scripts to default to that repository, and writes `checksums.txt`.
    It also discovers matching disk images and Windows setup installers under `native-artifacts/`.
    External installers need their matching sanitized `release-evidence.json` beside the file or in the parent build directory.
    Preserve this sidecar when transferring installers between build machines.
