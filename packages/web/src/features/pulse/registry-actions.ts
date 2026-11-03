@@ -21,6 +21,7 @@ export interface RegistryActionItem {
   status: RegistryActionStatus;
   resultMetricId?: string;
   creationStatus?: PulseVariantResult["creationStatus"];
+  sharedWithSourceMetricId?: string;
   reconciliationStatus?: PulseVariantResult["reconciliationStatus"];
   requestedSpecification?: unknown;
   detail?: string;
@@ -43,6 +44,8 @@ export function registryFailureMessages(results: RegistryActionResults) {
 }
 
 export interface ForkRegistryActionCounts {
+  shared: number;
+  creationFailed: number;
   notAttempted: number;
   unknown: number;
   created: number;
@@ -74,6 +77,8 @@ export function forkRegistryActionCounts(
   items: RegistryActionItem[],
 ): ForkRegistryActionCounts {
   const counts: ForkRegistryActionCounts = {
+    shared: 0,
+    creationFailed: 0,
     notAttempted: 0,
     unknown: 0,
     created: 0,
@@ -84,12 +89,20 @@ export function forkRegistryActionCounts(
     failed: 0,
   };
   for (const item of items) {
+    if (item.sharedWithSourceMetricId) {
+      counts.shared += 1;
+      continue;
+    }
     if (item.creationStatus === "not_attempted") {
       counts.notAttempted += 1;
       continue;
     }
     if (item.creationStatus === "unknown") {
       counts.unknown += 1;
+      continue;
+    }
+    if (item.creationStatus === "failed" || (!item.creationStatus && item.status === "failed" && !item.resultMetricId)) {
+      counts.creationFailed += 1;
       continue;
     }
     if (item.creationStatus === "created") counts.created += 1;
@@ -140,6 +153,7 @@ export function forkRegistryActionItem(
     status,
     ...(result.metricId ? { resultMetricId: result.metricId } : {}),
     ...(creationStatus ? { creationStatus } : {}),
+    ...(result.sharedWithSourceMetricId ? { sharedWithSourceMetricId: result.sharedWithSourceMetricId } : {}),
     ...(reconciliationStatus ? { reconciliationStatus } : {}),
     ...(result.requestedSpecification !== undefined
       ? { requestedSpecification: result.requestedSpecification }
@@ -151,10 +165,14 @@ export function forkRegistryActionItem(
 export function registryActionLabel(
   kind: RegistryActionKind,
   item: RegistryActionItem,
+  sharedSourceLabel?: string,
 ): string {
   if (kind === "fork") {
-    if (item.creationStatus === "not_attempted") return "not sent";
-    if (item.creationStatus === "unknown") return "creation outcome unknown";
+    const shared = item.sharedWithSourceMetricId ? `shared destination with ${sharedSourceLabel ?? item.sharedWithSourceMetricId}; ` : "";
+    if (item.creationStatus === "not_attempted") return `${shared}not sent`;
+    if (item.creationStatus === "unknown") return `${shared}creation outcome unknown`;
+    if (item.creationStatus === "failed") return `${shared}creation rejected`;
+    if (!item.creationStatus && !item.resultMetricId) return `${shared}creation failed`;
     const creation =
       item.creationStatus === "created"
         ? "created"
@@ -171,7 +189,7 @@ export function registryActionLabel(
             : item.reconciliationStatus === "failed"
               ? "visibility verification failed"
               : "reconciliation status unavailable";
-    return creation ? `${creation}; ${reconciliation}` : reconciliation;
+    return shared ? `${shared}${reconciliation}` : creation ? `${creation}; ${reconciliation}` : reconciliation;
   }
   if (item.status === "created")
     return kind === "follow" ? "followed" : "created";

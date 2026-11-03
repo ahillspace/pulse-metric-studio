@@ -5,8 +5,7 @@ import { pulseOperationErrorMessage } from '../pulse/operation-errors.js';
 import { deleteDefinition, deleteMetric } from "../pulse/pulse-client.js";
 
 import { invalidatePulseDefinitionInventory } from "./inventory.js";
-import { mapWithConcurrency } from "./registry-collections.js";
-const PROVIDER_CONCURRENCY = 5;
+const METRIC_DELETE_GROUP_SIZE = 5;
 export interface DeletePlanEntry {
   definitionId?: string;
   metricIds: string[];
@@ -87,40 +86,41 @@ export async function executeDeletes(
       })),
     )
     .filter((entry) => !deletingDefinitionIds.has(entry.definitionId ?? ""));
-  const metricResults = await mapWithConcurrency(
-    metricEntries,
-    PROVIDER_CONCURRENCY,
-    async (entry) => {
-      if (stopped) {
-        outcomes.push({
-          metricId: entry.metricId,
-          status: "not_attempted",
-          error: "The deletion batch stopped before this resource was sent.",
-        });
-        return false;
-      }
-      try {
-        await deps.deleteMetric(session, entry.metricId);
-        outcomes.push({ metricId: entry.metricId, status: "deleted" });
-        return true;
-      } catch (error) {
-        if (error instanceof TableauError && error.status === 404) {
-          outcomes.push({ metricId: entry.metricId, status: "already_absent" });
-          return true;
+  let metricsDeleted = 0;
+  for (let offset = 0; offset < metricEntries.length; offset += METRIC_DELETE_GROUP_SIZE) {
+    const metricResults = await Promise.all(
+      metricEntries.slice(offset, offset + METRIC_DELETE_GROUP_SIZE).map(async (entry) => {
+        if (stopped) {
+          outcomes.push({
+            metricId: entry.metricId,
+            status: "not_attempted",
+            error: "The deletion batch stopped before this resource was sent.",
+          });
+          return false;
         }
-        outcomes.push({
-          metricId: entry.metricId,
-          status: classifyFailure(error),
-          error: pulseOperationErrorMessage(error, 'delete', [session.token]),
-        });
-        failures.push(
-          `metric ${entry.metricId}: ${pulseOperationErrorMessage(error, 'delete', [session.token])}`,
-        );
-        return false;
-      }
-    },
-  );
-  const metricsDeleted = metricResults.filter(Boolean).length;
+        try {
+          await deps.deleteMetric(session, entry.metricId);
+          outcomes.push({ metricId: entry.metricId, status: "deleted" });
+          return true;
+        } catch (error) {
+          if (error instanceof TableauError && error.status === 404) {
+            outcomes.push({ metricId: entry.metricId, status: "already_absent" });
+            return true;
+          }
+          outcomes.push({
+            metricId: entry.metricId,
+            status: classifyFailure(error),
+            error: pulseOperationErrorMessage(error, 'delete', [session.token]),
+          });
+          failures.push(
+            `metric ${entry.metricId}: ${pulseOperationErrorMessage(error, 'delete', [session.token])}`,
+          );
+          return false;
+        }
+      }),
+    );
+    metricsDeleted += metricResults.filter(Boolean).length;
+  }
 
   // An exact metric is part of its definition's cached inventory, so a
   // metric-only delete must invalidate the inventory too - otherwise the next

@@ -284,16 +284,25 @@ export function registryResultHeadlines(
     const parts = [`${forkCounts.created} created`];
     if (forkCounts.existing > 0)
       parts.push(`${forkCounts.existing} already existed`);
-    if (forkCounts.pendingVisibility > 0)
-      parts.push(`${forkCounts.pendingVisibility} pending visibility`);
-    if (forkCounts.ownershipMismatch > 0)
-      parts.push(`${forkCounts.ownershipMismatch} ownership mismatch`);
-    if (forkCounts.failed > 0) parts.push(`${forkCounts.failed} failed`);
+    if (forkCounts.creationFailed > 0)
+      parts.push(`${forkCounts.creationFailed} failed`);
     if (forkCounts.unknown > 0)
       parts.push(`${forkCounts.unknown} outcome unknown`);
     if (forkCounts.notAttempted > 0)
       parts.push(`${forkCounts.notAttempted} not sent`);
-    return [`${parts.join(", ")}.`];
+    const headlines = [`Creation: ${parts.join(", ")}.`];
+    const visibility: string[] = [];
+    if (forkCounts.visible > 0)
+      visibility.push(`${forkCounts.visible} verified`);
+    if (forkCounts.pendingVisibility > 0)
+      visibility.push(`${forkCounts.pendingVisibility} pending`);
+    if (forkCounts.ownershipMismatch > 0)
+      visibility.push(`${forkCounts.ownershipMismatch} ownership mismatch`);
+    if (forkCounts.failed > 0) visibility.push(`${forkCounts.failed} failed`);
+    if (visibility.length) headlines.push(`Visibility: ${visibility.join(", ")}.`);
+    if (forkCounts.shared > 0)
+      headlines.push(`${forkCounts.shared} additional selected source${forkCounts.shared === 1 ? " shares" : "s share"} these destinations.`);
+    return headlines;
   }
   const counts = registryActionCounts(results.items);
   const parts: string[] = [];
@@ -314,6 +323,9 @@ export function RegistryResultsModal({
   const outcome = registryActionOutcome(results.items);
   const headlines = registryResultHeadlines(results);
   const failures = registryFailureMessages(results);
+  const sourceLabels = results.kind === "fork"
+    ? new Map(results.items.map(item => [item.metricId, item.metricLabel]))
+    : undefined;
   return (
     <Modal
       title={results.title}
@@ -349,9 +361,9 @@ export function RegistryResultsModal({
               key={item.key}
               className={item.status === "failed" ? "err" : ""}
             >
-              <strong>{item.metricLabel}</strong>
+              <strong>{results.kind === "fork" ? "Source: " : ""}{item.metricLabel}</strong>
               {item.targetLabel ? ` - ${item.targetLabel}` : ""}:{" "}
-              {registryActionLabel(results.kind, item)}
+              {registryActionLabel(results.kind, item, item.sharedWithSourceMetricId ? sourceLabels?.get(item.sharedWithSourceMetricId) : undefined)}
               {item.detail ? ` - ${item.detail}` : ""}
             </li>
           ))}

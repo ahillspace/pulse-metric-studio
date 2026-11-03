@@ -436,7 +436,7 @@ test('fork returns settled Tableau auth failures from create and reconciliation'
         version: 1, sourceMetricIds: ['m1'], fieldId: 'Region', selection: { mode: 'VALUES', values: ['West'] },
       });
       assert.equal(summary.terminated, true);
-      assert.equal(summary.results[0]?.creationStatus, phase === 'create' ? 'unknown' : 'created');
+      assert.equal(summary.results[0]?.creationStatus, phase === 'create' ? 'failed' : 'created');
       assert.match(summary.results[0]?.error ?? '', /Reconnect to the owning account.*HTTP 401/);
       if (phase === 'reconciliation') assert.ok(summary.results[0]?.createdMetricId);
 

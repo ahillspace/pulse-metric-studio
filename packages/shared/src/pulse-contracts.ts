@@ -454,6 +454,7 @@ export type PulseFollowOperationResult = z.infer<
 export type PulseFollowersDetail = z.infer<typeof PulseFollowersDetailSchema>;
 export const PulseVariantResultSchema = z.object({
   sourceMetricId: id,
+  sharedWithSourceMetricId: id.optional(),
   status: z.enum([
     'created',
     'existing',
@@ -463,7 +464,7 @@ export const PulseVariantResultSchema = z.object({
     'ownership_mismatch',
   ]),
   creationStatus: z
-    .enum(['created', 'existing', 'unknown', 'not_attempted'])
+    .enum(['created', 'existing', 'failed', 'unknown', 'not_attempted'])
     .optional(),
   reconciliationStatus: z
     .enum(['visible', 'pending_visibility', 'ownership_mismatch', 'failed'])

@@ -52,9 +52,11 @@ export async function reconcileMetricOwnership(
   let exactMetricResolved = false;
   let ownershipVerified = false;
   let inventoryFailure: PulseProviderDiagnostic | undefined;
+  let attempts = 0;
   const owner = sessionCacheKey(session);
 
   for (let attempt = 0; attempt < delaysMs.length; attempt++) {
+    attempts = attempt + 1;
     const delay = delaysMs[attempt] ?? 0;
     if (delay > 0) await dependencies.wait(delay);
     if (sessionCacheKey(session) !== owner) throw new TableauError('The Tableau session changed during visibility reconciliation.', 401, '', 'auth');
@@ -129,9 +131,12 @@ export async function reconcileMetricOwnership(
           attempts: attempt + 1,
         };
       }
+      if (inventoryFailure) break;
     } catch (error) {
       if (error instanceof TableauError && error.kind === 'auth') throw error;
       inventoryFailure = boundedProviderDiagnostic(error);
+      // Transport retries are complete; only a missing listing can still be propagation lag.
+      if (!(error instanceof TableauError && error.status === 404)) break;
     }
   }
 
@@ -142,7 +147,7 @@ export async function reconcileMetricOwnership(
       exactMetricResolved,
       inventoryVisible: false,
       ownershipVerified,
-      attempts: delaysMs.length,
+      attempts,
       diagnostic: inventoryFailure,
     };
   }
@@ -152,7 +157,7 @@ export async function reconcileMetricOwnership(
     exactMetricResolved,
     inventoryVisible: false,
     ownershipVerified,
-    attempts: delaysMs.length,
+    attempts,
   };
 }
 

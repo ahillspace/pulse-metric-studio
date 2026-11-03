@@ -319,6 +319,8 @@ Deletion submits the exact selection, snapshot identifier, and reviewed plan fin
 Execution validates those cached inputs and sends only DELETE requests, without checking concurrent external edits.
 Deleting a definition sends one definition DELETE; Tableau removes its metrics and subscriptions.
 Selected child metrics covered by that definition do not receive individual DELETE requests.
+Individual metric DELETEs run in sequential groups of up to five; definition DELETEs remain serial.
+Every request in a group, including its bounded transport retries, settles before the next group starts.
 Snapshots remain available across deletion batches, and the controller refreshes inventory one time after the operation, including partial or unknown outcomes.
 A bulk selection containing defaults opens an explicit review of the affected definitions and their metrics.
 An ordinary variant selection never authorizes deleting its parent definition.
@@ -358,7 +360,14 @@ Metric Manager preview images remain in memory and are discarded when the contex
 Publication confirmations reuse bounded owner/receipt/item-state previews when canceled; explicit refresh and relevant receipt mutations invalidate them.
 An unrelated Manager inventory replacement does not regenerate publication previews that already match their receipt and authenticated owner.
 Visibility reconciliation retains successful ownership evidence and polls only unresolved visibility evidence within the operation.
+Exact-metric or listing HTTP 404 responses and complete listings that omit the metric remain propagation evidence for visibility polling.
+Other failed reads and incomplete listings that omit the metric stop visibility polling without restarting transport retries.
 Sources that converge to the same definition and destination specification share one creation; aliases do not gain duplicate creation or undo ownership.
+Final destination identity includes retained filters and the selected or inherited timeframe; selecting another source never merges different destination specifications.
+Variant writes and visibility confirmation run in sequential groups of up to five destinations, including each request's bounded transport retries.
+Source reads retain their bounded worker pool.
+Explicit validation, authentication, permission, conflict, and throttling rejections are failed creations; timeouts, connection failures, server errors, and missing identifiers remain unknown.
+Creation and visibility outcomes appear separately, and shared destinations retain their source mappings without multiplying destination counts.
 The card uses the unique successful BAN summary sparkline, one successful period-over-period insight, and the highest-scored successful supporting insight.
 Tableau supplies the chart, facts, and markup.
 Springboard requests specify bundle version `1`; card image requests use Tableau's default locale.

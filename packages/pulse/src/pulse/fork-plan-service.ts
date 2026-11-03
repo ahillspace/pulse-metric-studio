@@ -272,67 +272,67 @@ export class PulseForkPlanService {
           { creationStatus: 'not_attempted' },
         ),
     };
-    const created = await mapWithConcurrency(
-      [...plans.values()],
-      PROVIDER_CONCURRENCY,
-      async ({
-        source,
-        specification,
-      }): Promise<PulseForkPlanResult | FailedResult> => {
-        let response: { metricId: string | null; created: boolean } | undefined;
-        try {
-          response = await this.dependencies.getOrCreate(session, {
-            definitionId: source.definitionId,
-            specification,
-          });
-          if (!response.metricId) {
-            return failedResult(
-              source.metricId,
-              new Error(
-                'Tableau returned no metric identifier; creation outcome is unknown.',
-              ),
-              true,
-              specification,
-              undefined,
-              'failed',
-              { creationStatus: 'unknown' },
-            );
-          }
-          const reconciliation = await reconcile({
-            metricId: response.metricId,
-            definitionId: source.definitionId,
-            datasourceLuid: source.datasourceLuid,
-          });
-          return reconciledResult(
-            source.metricId,
-            response.metricId,
-            response.created,
-            specification,
-            reconciliation,
-          );
-        } catch (error) {
-          if (error instanceof TableauError && error.kind === 'auth')
-            mutationControl.stopped = true;
+    const planned = [...plans.values()];
+    const createDestination = async ({ source, specification }: typeof planned[number]): Promise<PulseForkPlanResult | FailedResult> => {
+      let response: { metricId: string | null; created: boolean } | undefined;
+      try {
+        response = await this.dependencies.getOrCreate(session, {
+          definitionId: source.definitionId,
+          specification,
+        });
+        if (!response.metricId) {
           return failedResult(
             source.metricId,
-            error,
+            new Error(
+              'Tableau returned no metric identifier; creation outcome is unknown.',
+            ),
             true,
             specification,
-            response?.metricId ?? undefined,
+            undefined,
             'failed',
-            {
-              creationStatus: response?.metricId
-                ? response.created
-                  ? 'created'
-                  : 'existing'
-                : 'unknown',
-              ...(response?.metricId ? { reconciliationStatus: 'failed' } : {}),
-            },
+            { creationStatus: 'unknown' },
           );
         }
-      },
-      mutationControl,
-    );
+        const reconciliation = await reconcile({
+          metricId: response.metricId,
+          definitionId: source.definitionId,
+          datasourceLuid: source.datasourceLuid,
+        });
+        return reconciledResult(
+          source.metricId,
+          response.metricId,
+          response.created,
+          specification,
+          reconciliation,
+        );
+      } catch (error) {
+        if (error instanceof TableauError && error.kind === 'auth')
+          mutationControl.stopped = true;
+        return failedResult(
+          source.metricId,
+          error,
+          true,
+          specification,
+          response?.metricId ?? undefined,
+          'failed',
+          {
+            creationStatus: response?.metricId
+              ? response.created
+                ? 'created'
+                : 'existing'
+              : confirmedCreationRejection(error) ? 'failed' : 'unknown',
+            ...(response?.metricId ? { reconciliationStatus: 'failed' } : {}),
+          },
+        );
+      }
+    };
+    const created: Array<PulseForkPlanResult | FailedResult> = [];
+    for (let offset = 0; offset < planned.length; offset += PROVIDER_CONCURRENCY) {
+      created.push(...await Promise.all(
+        planned.slice(offset, offset + PROVIDER_CONCURRENCY).map(plan =>
+          mutationControl.stopped ? mutationControl.notStarted(plan) : createDestination(plan)),
+      ));
+    }
 
     const results: PulseForkPlanResult[] = failures.map(
       (failure) => failure.result,
@@ -340,7 +340,6 @@ export class PulseForkPlanService {
     let providerFailures = failures.filter(
       (failure) => failure.providerFailure,
     ).length;
-    const planned = [...plans.values()];
     for (const [index, outcome] of created.entries()) {
       if ('result' in outcome) {
         results.push(outcome.result);
@@ -351,9 +350,9 @@ export class PulseForkPlanService {
       const primary = 'result' in outcome ? outcome.result : outcome;
       for (const sourceMetricId of planned[index]!.sourceMetricIds.slice(1)) {
         results.push({ ...structuredClone(primary), sourceMetricId,
+          sharedWithSourceMetricId: primary.sourceMetricId,
           ...(primary.creationStatus === 'created' ? { creationStatus: 'existing' as const } : {}),
         });
-        if ('result' in outcome && outcome.providerFailure) providerFailures++;
       }
     }
     const summary = summarizeResults(results, providerFailures);
@@ -593,7 +592,8 @@ export function forkPlanHttpStatus(
 ): 200 | 207 | 422 | 502 {
   if (summary.failed === 0) return 200;
   if (summary.created + summary.existing > 0) return 207;
-  if (summary.failed < summary.attempted) return 207;
+  const destinations = summary.results.filter(result => !result.sharedWithSourceMetricId).length;
+  if (summary.failed < destinations) return 207;
   return (summary as InternalPulseForkPlanSummary)[providerFailureCount] ===
     summary.failed
     ? 502
@@ -718,24 +718,25 @@ function summarizeResults(
   const ordered = [...results].sort((left, right) =>
     compareCanonicalStrings(left.sourceMetricId, right.sourceMetricId),
   );
+  const destinations = ordered.filter(result => !result.sharedWithSourceMetricId);
   const summary: InternalPulseForkPlanSummary = {
     attempted: ordered.length,
-    notAttempted: ordered.filter(
+    notAttempted: destinations.filter(
       (result) => result.creationStatus === 'not_attempted',
     ).length,
-    created: ordered.filter(
+    created: destinations.filter(
       (result) =>
-        result.creationStatus === 'created' || result.status === 'created',
+        (result.creationStatus ?? result.status) === 'created',
     ).length,
-    existing: ordered.filter(
+    existing: destinations.filter(
       (result) =>
-        result.creationStatus === 'existing' || result.status === 'existing',
+        (result.creationStatus ?? result.status) === 'existing',
     ).length,
-    failed: ordered.filter(
+    failed: destinations.filter(
       (result) =>
         result.status === 'failed' || result.status === 'ownership_mismatch',
     ).length,
-    pendingVisibility: ordered.filter(
+    pendingVisibility: destinations.filter(
       (result) =>
         result.reconciliationStatus === 'pending_visibility' ||
         result.status === 'pending_visibility',
@@ -747,6 +748,11 @@ function summarizeResults(
     enumerable: false,
   });
   return summary;
+}
+
+function confirmedCreationRejection(error: unknown): boolean {
+  return error instanceof TableauError && error.kind !== 'network'
+    && [400, 401, 403, 404, 409, 422, 429].includes(error.status);
 }
 
 function canonicalIdentifiers(values: unknown[], label: string): string[] {
@@ -848,16 +854,13 @@ async function mapWithConcurrency<T, R>(
   values: T[],
   concurrency: number,
   worker: (value: T) => Promise<R>,
-  control?: { stopped: boolean; notStarted: (value: T) => R },
 ): Promise<R[]> {
   const results: R[] = new Array(values.length);
   let nextIndex = 0;
   async function run(): Promise<void> {
     while (nextIndex < values.length) {
       const index = nextIndex++;
-      results[index] = control?.stopped
-        ? control.notStarted(values[index]!)
-        : await worker(values[index]!);
+      results[index] = await worker(values[index]!);
     }
   }
   await Promise.all(
