@@ -84,3 +84,47 @@ test('failure to record retirement rolls back replacement without clearing the a
     assert.equal(sessions.getSession(), owner);
   } finally { getDb().exec('DROP TRIGGER fail_retirement'); await app.close(); }
 });
+
+
+test('replaying a committed replacement cannot undo a later replacement, even after database reopen', async () => {
+  const secrets = new Map([['history-a', 'secret-a'], ['history-b', 'secret-b'], ['history-c', 'secret-c']]);
+  const broker = { resolve: async (ref: string) => { const value = secrets.get(ref); if (!value) throw Error('missing'); return value; }, delete: async () => { throw Error('cleanup unavailable'); } };
+  const makeApp = async () => { const app = Fastify(); await app.register(sensible); registerTableauRoutes(app, { credentialBroker: broker, discoverRestApiVersion: async () => '3.27', patSignin: async input => ({ token: input.patSecret, siteId: 'site', userId: 'user' }), fetchImpl: async () => Response.json({ user: { id: 'user' } }) }); return app; };
+  const first = sessions.saveConnection({ label: 'History', serverUrl: 'https://history.example.test', siteContentUrl: '', patName: 'fixture', storageKind: 'os', credentialRef: 'history-a' });
+  const op1 = crypto.randomUUID(), op2 = crypto.randomUUID();
+  const body = (operationId: string, credentialRef: string) => ({ operationId, credentialRef, storageKind: 'os', patName: 'fixture' });
+  let app = await makeApp();
+  const put = (operationId: string, credentialRef: string) => app.inject({ method: 'PUT', url: `/api/tableau/connections/${first.id}/credential`, payload: body(operationId, credentialRef) });
+  try {
+    const a = await put(op1, 'history-b'); assert.equal(a.statusCode, 200); const ticket = a.json().retirement.ticket;
+    assert.equal((await put(op2, 'history-c')).statusCode, 200);
+    await app.close(); sessions.clearSession(); closeDb(); app = await makeApp();
+    const replay = await put(op1, 'history-b');
+    assert.equal(replay.statusCode, 200, replay.body);
+    assert.equal(replay.json().superseded, true);
+    assert.equal(replay.json().session, null);
+    assert.equal(replay.json().retirement.ticket, ticket);
+    assert.equal(sessions.getStoredConnection(first.id)?.credentialRef, 'history-c');
+    const conflict = await put(op1, 'history-c'); assert.equal(conflict.statusCode, 409);
+    const reconciliation = await app.inject({ method: 'POST', url: '/api/tableau/connections/reconcile', payload: { kind: 'replace', operationId: op1, connectionId: first.id, credentialRef: 'history-b' } });
+    assert.equal(reconciliation.json().status, 'committed');
+    assert.equal(reconciliation.json().superseded, true);
+    assert.equal((await app.inject('/api/tableau/credential-retirements')).json().retirements.filter((item: { connectionId: string }) => item.connectionId === first.id).length, 2);
+  } finally { await app.close(); }
+});
+
+
+test('encrypted replacement operation identifies different secrets without retaining them', async () => {
+  const first = sessions.saveConnection({ label: 'Encrypted', serverUrl: 'https://encrypted.example.test', siteContentUrl: '', patName: 'fixture', storageKind: 'encrypted', patSecret: 'original-fixture-secret' });
+  const app = Fastify(); await app.register(sensible);
+  registerTableauRoutes(app, { discoverRestApiVersion: async () => '3.27', patSignin: async () => ({ token: 'token', siteId: 'site', userId: 'user' }), fetchImpl: async () => Response.json({ user: { id: 'user' } }) });
+  const operationId = crypto.randomUUID();
+  const put = (patSecret: string) => app.inject({ method: 'PUT', url: `/api/tableau/connections/${first.id}/credential`, payload: { operationId, storageKind: 'encrypted', explicitFallback: true, patName: 'fixture', patSecret } });
+  try {
+    assert.equal((await put('new-fixture-secret')).statusCode, 200);
+    assert.equal((await put('new-fixture-secret')).statusCode, 200);
+    assert.equal((await put('different-fixture-secret')).statusCode, 409);
+    const values = getDb().prepare("SELECT value FROM settings WHERE key LIKE 'tableauCredentialReplacement:%'").all() as Array<{ value: string }>;
+    assert.ok(values.every(item => !item.value.includes('new-fixture-secret') && !item.value.includes('different-fixture-secret')));
+  } finally { await app.close(); }
+});

@@ -115,8 +115,11 @@ export function ConnectCard() {
   async function finishConnection(
     session: TableauSessionInfo,
     connectionId: string,
+    revision: number,
   ): Promise<void> {
-    await useConnection.getState().connected(session, connectionId);
+    if (!await useConnection.getState().adoptCommittedSession(session, connectionId, revision)) {
+      throw new Error("A newer Tableau connection was observed. Check the current connection before continuing.");
+    }
     await reloadConnections(connectionId);
   }
 
@@ -131,10 +134,16 @@ export function ConnectCard() {
 
   async function finishCommittedMutation(
     response: Awaited<ReturnType<typeof tableauConnectionsApi.connect>>,
+    revision: number,
   ): Promise<void> {
     clearPatSecret();
+    if (response.superseded) {
+      await useConnection.getState().init();
+      await reloadConnections();
+      throw new Error("A later connection change replaced this result. Check the current connection before continuing.");
+    }
     if (response.session) {
-      await finishConnection(response.session, response.connection.id);
+      await finishConnection(response.session, response.connection.id, revision);
       return;
     }
     await reloadConnections(response.connection.id);
@@ -145,12 +154,13 @@ export function ConnectCard() {
   }
 
   async function runConnectionAction(
-    action: () => Promise<void>,
+    action: (ownerRevision: number) => Promise<void>,
   ): Promise<void> {
     if (!useConnection.getState().startAction()) return;
+    const ownerRevision = useConnection.getState().captureOwnerRevision();
     setLocalError(null);
     try {
-      await action();
+      await action(ownerRevision);
     } catch (actionError) {
       setLocalError(errorMessage(actionError));
     } finally {
@@ -159,7 +169,7 @@ export function ConnectCard() {
   }
 
   async function connectNew(): Promise<void> {
-    await runConnectionAction(async () => {
+    await runConnectionAction(async (ownerRevision) => {
       if (storageKind === "os") {
         if (!capability?.available)
           throw new Error(
@@ -195,7 +205,7 @@ export function ConnectCard() {
           }
           throw connectError;
         }
-        await finishCommittedMutation(response);
+        await finishCommittedMutation(response, ownerRevision);
         return;
       }
 
@@ -212,21 +222,21 @@ export function ConnectCard() {
         storageKind: "encrypted",
         explicitFallback: true,
       });
-      await finishCommittedMutation(response);
+      await finishCommittedMutation(response, ownerRevision);
     });
   }
 
   async function activateSaved(): Promise<void> {
     if (!selected) return;
-    await runConnectionAction(async () => {
+    await runConnectionAction(async (ownerRevision) => {
       const response = await tableauConnectionsApi.activate(selected.id);
-      await finishConnection(response.session, selected.id);
+      await finishConnection(response.session, selected.id, ownerRevision);
     });
   }
 
   async function replaceCredential(): Promise<void> {
     if (!selected) return;
-    await runConnectionAction(async () => {
+    await runConnectionAction(async (ownerRevision) => {
       if (selected.storageKind === "os") {
         if (!capability?.available || !selected.credentialRef) {
           throw new Error(
@@ -253,7 +263,7 @@ export function ConnectCard() {
               if (retirementGeneration.current === request) setRetirementCheckFailed(true);
             });
           },
-          adopt: finishCommittedMutation,
+          adopt: (committed) => finishCommittedMutation(committed, ownerRevision),
           retire: async (value) => (await tableauConnectionsApi.retireCredential(value)).status,
         });
         if (ticket && retirement === "removed") {
@@ -280,7 +290,7 @@ export function ConnectCard() {
         },
       );
       setFallbackConfirmed(false);
-      await finishCommittedMutation(response);
+      await finishCommittedMutation(response, ownerRevision);
     });
   }
 

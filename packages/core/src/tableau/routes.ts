@@ -1,4 +1,5 @@
 import '@fastify/sensible';
+import { credentialOperationFingerprint } from '../db/crypto.js';
 import type { FastifyInstance } from 'fastify';
 import {
   createCredentialBrokerClient,
@@ -26,6 +27,8 @@ import {
   replaceCredentialWithRetirement,
   credentialRetirements,
   credentialRetirement,
+  credentialReplacement,
+  isCurrentCredentialReplacement,
   markCredentialRetired,
   resolveConnectionSecret,
   saveConnection,
@@ -131,6 +134,7 @@ export function registerTableauRoutes(
 
     return runCredentialMutation(app, pendingCredentialMutations, operationId, fingerprint, async () => {
       const generation = getSessionGeneration();
+      if (credentialReplacement(operationId)) throw app.httpErrors.conflict('The connection operation ID is already assigned to another request.');
       const existing = getStoredConnection(operationId);
       if (existing) {
         if (!connectionMatchesCreateAttempt(existing, body, coordinates)) {
@@ -153,6 +157,7 @@ export function registerTableauRoutes(
       return withCredentialMutationLock(async () => {
         await verifyCredentialForCommit(credential, broker);
         assertSessionGeneration(generation);
+        if (credentialReplacement(operationId)) throw app.httpErrors.conflict('The connection operation ID is already assigned to another request.');
         let profile: ConnectionProfile;
         try {
           profile = saveConnection({
@@ -306,6 +311,17 @@ export function registerTableauRoutes(
     } else if (body.kind === 'replace') {
       const connectionId = body.connectionId?.trim();
       if (!connectionId) throw app.httpErrors.badRequest('connectionId is required for replacement reconciliation.');
+      const recorded = credentialReplacement(operationId);
+      if (recorded) {
+        if (recorded.connectionId !== connectionId || recorded.profile.storageKind !== 'os' || recorded.profile.credentialRef !== credentialRef) {
+          throw app.httpErrors.conflict('The connection operation ID is already assigned to another request.');
+        }
+        const connection = publicConnection(connectionId);
+        const superseded = !connection || !isCurrentCredentialReplacement(operationId, connectionId);
+        return { status: 'committed' as const, connection: connection ?? recorded.profile,
+          ...(superseded ? { superseded: true as const } : {}),
+          ...(recorded.retirement ? { retirement: recorded.retirement } : {}) };
+      }
       const connection = publicConnection(connectionId);
       if (connection?.storageKind === 'os' && connection.credentialRef === credentialRef) {
         const saved = credentialRetirements().find(item => item.operationId === operationId && item.connectionId === connectionId && item.newRef === credentialRef);
@@ -337,29 +353,26 @@ export function registerTableauRoutes(
 
   app.put('/api/tableau/connections/:id/credential', async (req) => {
     const { id } = req.params as { id: string };
-    const stored = getStoredConnection(id);
-    if (!stored) throw app.httpErrors.notFound('Saved Tableau connection not found.');
     const body = req.body as CredentialInput & { operationId?: string; patName?: string };
     const operationId = parseOperationId(app, body.operationId);
-    const patName = body.patName?.trim() || stored.patName;
-    const coordinates = { serverUrl: stored.serverUrl, siteContentUrl: stored.siteContentUrl, patName };
+    const recorded = credentialReplacement(operationId);
+    const stored = getStoredConnection(id);
+    const basis = recorded?.profile ?? stored;
+    if (!basis) throw app.httpErrors.notFound('Saved Tableau connection not found.');
+    const patName = body.patName?.trim() || basis.patName;
+    const coordinates = { serverUrl: basis.serverUrl, siteContentUrl: basis.siteContentUrl, patName };
     const fingerprint = credentialMutationFingerprint('replace', operationId, body, coordinates, id);
 
     return runCredentialMutation(app, pendingCredentialMutations, operationId, fingerprint, async () => {
+      const prior = credentialReplacement(operationId);
+      if (prior) return replayCredentialReplacement(app, prior, fingerprint);
       const generation = getSessionGeneration();
-      const current = getStoredConnection(id);
-      if (!current) throw app.httpErrors.notFound('Saved Tableau connection not found.');
-      if (connectionUsesRequestedOsCredential(current, body, patName)) {
-        const resumed = await resumeCommittedCredentialMutation(
-          app, publicConnection(id)!, body, coordinates, broker, discoverVersion, signIn, fetchImpl,
-        );
-        const saved = credentialRetirements().find(item => item.operationId === operationId && item.connectionId === id && item.newRef === body.credentialRef);
-        return { ...resumed, ...(saved ? { retirement: { ticket: saved.ticket } } : {}) };
-      }
-
+      if (!stored) throw app.httpErrors.notFound('Saved Tableau connection not found.');
       const credential = await parseCredentialInput(app, body, broker);
       const session = await createTableauSession(coordinates, credential.patSecret, discoverVersion, signIn, fetchImpl);
       return withCredentialMutationLock(async () => {
+        const committed = credentialReplacement(operationId);
+        if (committed) return replayCredentialReplacement(app, committed, fingerprint);
         await verifyCredentialForCommit(credential, broker);
         assertSessionGeneration(generation);
         const replaced = replaceCredentialWithRetirement(id, {
@@ -367,15 +380,13 @@ export function registerTableauRoutes(
           ...(credential.storageKind === 'os'
             ? { storageKind: 'os' as const, credentialRef: credential.credentialRef }
             : { storageKind: 'encrypted' as const, patSecret: credential.patSecret }),
-        }, operationId);
+        }, operationId, fingerprint);
         if (!replaced) throw app.httpErrors.notFound('Saved Tableau connection not found.');
         const { profile, retirement } = replaced;
         const activated = setActiveConnection(id);
         if (activated) setSession(session, { connectionId: id, patSecret: credential.patSecret });
         return {
-          ok: true as const,
-          connection: profile,
-          session: activated ? publicSession(session) : null,
+          ok: true as const, connection: profile, session: activated ? publicSession(session) : null,
           ...(!activated ? { activationError: activationUnavailable() } : {}),
           ...(retirement ? { retirement } : {}),
         };
@@ -449,7 +460,23 @@ type CredentialMutationResponse = {
   session: ReturnType<typeof publicSession> | null;
   activationError?: ReturnType<typeof activationUnavailable>;
   retirement?: { ticket: string };
+  superseded?: true;
 };
+
+function replayCredentialReplacement(
+  app: FastifyInstance,
+  outcome: NonNullable<ReturnType<typeof credentialReplacement>>,
+  fingerprint: string,
+): CredentialMutationResponse {
+  if (outcome.fingerprint !== fingerprint) throw app.httpErrors.conflict('The connection operation ID is already assigned to another request.');
+  const current = publicConnection(outcome.connectionId);
+  const superseded = !current || !isCurrentCredentialReplacement(outcome.operationId, outcome.connectionId);
+  const active = getSession();
+  const session = !superseded && active && isSessionCurrent(active) && getSessionContext(active)?.connectionId === outcome.connectionId ? publicSession(active) : null;
+  return { ok: true, connection: current ?? outcome.profile, session,
+    ...(superseded ? { superseded: true as const } : !session ? { activationError: activationUnavailable() } : {}),
+    ...(outcome.retirement ? { retirement: outcome.retirement } : {}) };
+}
 
 type PendingCredentialMutation = {
   fingerprint: string;
@@ -508,6 +535,7 @@ function credentialMutationFingerprint(
     storageKind: body.storageKind ?? null,
     credentialRef: body.storageKind === 'os' ? body.credentialRef?.trim() ?? null : null,
     explicitFallback: body.storageKind === 'encrypted' ? body.explicitFallback === true : null,
+    secretFingerprint: body.storageKind === 'encrypted' && typeof body.patSecret === 'string' ? credentialOperationFingerprint(body.patSecret) : null,
   });
 }
 
@@ -521,17 +549,6 @@ function connectionMatchesCreateAttempt(
     && connection.patName === coordinates.patName
     && connection.storageKind === body.storageKind
     && (body.storageKind !== 'os' || connection.credentialRef === body.credentialRef?.trim());
-}
-
-function connectionUsesRequestedOsCredential(
-  connection: StoredConnection,
-  body: CredentialInput,
-  patName: string,
-): boolean {
-  return body.storageKind === 'os'
-    && connection.storageKind === 'os'
-    && connection.credentialRef === body.credentialRef?.trim()
-    && connection.patName === patName;
 }
 
 function publicConnection(id: string): ConnectionProfile | null {

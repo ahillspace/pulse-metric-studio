@@ -29,6 +29,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 $DataDir = Join-Path $env:APPDATA 'com.ahillspace.pulsemetricstudio'
+$pulseRecoveryHandled = $false
 
 function Start-PulseMetricStudio {
     if (-not $InstallDir) { return }
@@ -53,6 +54,7 @@ function Get-ValidatedInstallDirectory([string]$Candidate) {
 # Throw rather than exit: this script usually runs as a script block inside the
 # user's own PowerShell session, and exit would close their window.
 function Fail([string]$Message) {
+    $script:pulseRecoveryHandled = $true
     if ($Update) {
         # The app closed itself for this update: tell it why the update did
         # not happen, and bring it back.
@@ -60,14 +62,17 @@ function Fail([string]$Message) {
             New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
             Set-Content -Path (Join-Path $DataDir 'update-error') -Value $Message -Encoding UTF8
         } catch {}
-        Start-PulseMetricStudio
+        try { Start-PulseMetricStudio } catch {}
     }
     throw "Pulse Metric Studio installer error: $Message"
 }
 
+try {
 # Use only a registered location containing the expected executable, or the
 # executable directory supplied by the running application.
-if ($PSBoundParameters.ContainsKey('InstallDir')) {
+if ($Action -eq 'LatestVersion') {
+    # Version lookup does not manage a local installation.
+} elseif ($PSBoundParameters.ContainsKey('InstallDir')) {
     $InstallDir = Get-ValidatedInstallDirectory $InstallDir
     if (-not $InstallDir) { Fail 'The selected installation directory is not a valid Pulse Metric Studio installation.' }
 } else {
@@ -211,4 +216,10 @@ try {
     if ($Update -or -not $NoLaunch) { Start-PulseMetricStudio }
 } finally {
     Remove-Item -Recurse -Force $workDir -ErrorAction SilentlyContinue
+}
+} catch {
+    if (-not $pulseRecoveryHandled) {
+        Fail 'The installer could not complete the operation. Check the update log and try again.'
+    }
+    throw
 }

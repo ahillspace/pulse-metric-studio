@@ -189,6 +189,8 @@ Standalone Windows helper operations resolve a registered installation or accept
 Relaunch, failure recovery, and uninstall use that directory.
 NSIS removal runs from a temporary copy and checks process completion and removal postconditions.
 Uninstall clears the update channel only after confirmed removal; failure leaves it intact.
+Version lookup remains independent of installation discovery.
+Unexpected update failures record an error and attempt one recovery launch from the validated installation directory.
 Both helpers clean their temporary download directories.
 Helper uninstall removes the app and channel record while retaining app data and native credentials.
 Preserve the data directory and credential entries during ordinary updates and uninstalls.

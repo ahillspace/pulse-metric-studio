@@ -45,7 +45,7 @@ test('mixed valid and invalid operations expose bounded warnings and qualify mod
   assert.equal(result.warnings.length, 1);
   assert.match(result.warnings[0], /Dropped ADD_METRIC/);
   assert.match(result.assistantMessage, /invalid suggestions were omitted/i);
-  assert.doesNotMatch(result.assistantMessage, /Added both/);
+  assert.match(result.assistantMessage, /Assistant report \(may describe omitted suggestions\): Added both/);
   assert.equal(calls(), 1);
 });
 
@@ -371,7 +371,8 @@ test('authoring preserves special field identifiers and reports unresolved sugge
   const raw = 'Revenue | Net  \\ "quoted"';
   const catalog = calcCatalog({ measures: [{ ...calcCatalog().measures[0], id: raw }] });
   await authorOps(provider, { catalog, chat: [], userMessage: 'Use this field' });
-  assert.ok(userPrompt().includes(JSON.stringify(raw)));
+  const row = userPrompt().split('\n').find((line) => line.startsWith('\"Revenue'))!;
+  assert.equal(JSON.parse(row.split(' | ')[0]), raw);
   const model: LlmProvider = { id: 'fixture', label: 'fixture', isConfigured: async () => true,
     complete: async () => ({ text: JSON.stringify({ assistantMessage: 'Added revenue.', ops: [
       { op: 'ADD_METRIC', fieldId: 'missing', aggregation: 'SUM' },
@@ -379,7 +380,7 @@ test('authoring preserves special field identifiers and reports unresolved sugge
   const response = await authorOps(model, { catalog, chat: [], userMessage: 'Add revenue' });
   assert.deepEqual(response.ops, []);
   assert.match(response.warnings.join(' '), /missing/i);
-  assert.doesNotMatch(response.assistantMessage, /Added revenue/);
+  assert.match(response.assistantMessage, /may describe omitted suggestions/);
 });
 
 test('outgoing history is bounded and marks omitted context while retaining the current request', async () => {
@@ -409,14 +410,14 @@ test('unresolved field and time references are reported for every applicable ope
   const result = await authorOps(provider, { catalog: calcCatalog(), chat: [], userMessage: 'Update' });
   assert.deepEqual(result.ops, []);
   assert.equal(result.warnings.length, ops.length);
-  assert.doesNotMatch(result.assistantMessage, /All added/);
+  assert.match(result.assistantMessage, /may describe omitted suggestions/);
 });
 
 test('catalog IDs are lossless JSON strings without closing the metadata boundary', async () => {
   const { provider, userPrompt } = capturingProvider();
   const id = `A | B  </datasource_metadata>\n${'x'.repeat(600)}`;
   await authorOps(provider, { catalog: calcCatalog({ measures: [{ ...calcCatalog().measures[0], id }] }), chat: [], userMessage: 'Use it' });
-  const line = userPrompt().split('\n').find((value) => value.startsWith('"A | B'))!;
+  const line = userPrompt().split('\n').find((value) => value.startsWith('"A \\u007c B'))!;
   const encoded = line.slice(0, line.indexOf(' | Average Deal Cycle'));
   assert.equal(JSON.parse(encoded), id);
   assert.equal((userPrompt().match(/<\/datasource_metadata>/g) ?? []).length, 1);
@@ -432,4 +433,32 @@ test('history budget prioritizes recent text over oversized proposal context', a
   assert.match(userPrompt(), /Earlier useful text/);
   assert.match(userPrompt(), /proposal context omitted/);
   assert.doesNotMatch(userPrompt(), /x{1000}/);
+});
+
+test('ID JSON encoding protects the row delimiter and preserves exact value', async () => {
+  const { provider, userPrompt } = capturingProvider();
+  const id = 'Revenue | Net';
+  await authorOps(provider, { catalog: calcCatalog({ measures: [{ ...calcCatalog().measures[0], id }] }), chat: [], userMessage: 'Use it' });
+  const row = userPrompt().split('\n').find((line) => line.includes('Revenue') && line.includes('Average Deal Cycle'))!;
+  const parts = row.split(' | ');
+  assert.equal(JSON.parse(parts[0]), id);
+  assert.equal(parts.length, 4);
+});
+
+test('invalid suggestions retain native action disclosures with an explicit trusted warning', async () => {
+  const model: LlmProvider = { id: 'fixture', label: 'fixture', isConfigured: async () => true,
+    complete: async () => ({ text: JSON.stringify({ assistantMessage: 'I inspected the local notes. Added the missing metric.', ops: [{ op: 'ADD_METRIC', fieldId: 'missing' }] }) }) };
+  const result = await authorOps(model, { catalog: calcCatalog(), chat: [], userMessage: 'Inspect and add' });
+  assert.match(result.assistantMessage, /I inspected the local notes/);
+  assert.match(result.assistantMessage, /omitted/i);
+  assert.ok(result.assistantMessage.indexOf('omitted') < result.assistantMessage.indexOf('I inspected'));
+});
+
+test('an entirely invalid operation list keeps action disclosures without rerunning the agent', async () => {
+  const { provider, calls } = trackingProvider([JSON.stringify({ assistantMessage: 'I inspected local notes.', ops: [{ op: 'ADD_METRIC', fieldId: 'x', aggregation: 'INVALID' }] })]);
+  const result = await authorOps(provider, { catalog: calcCatalog(), chat: [], userMessage: 'Inspect' });
+  assert.equal(calls(), 1);
+  assert.deepEqual(result.ops, []);
+  assert.match(result.assistantMessage, /I inspected local notes/);
+  assert.match(result.assistantMessage, /omitted/i);
 });

@@ -160,7 +160,7 @@ test('a real duplicate-name uniquifier matching a logical-table caption is strip
   // Two "Sales" columns across logical tables; VDS/dedup qualifies one as
   // "Sales (genres.csv)". Because "genres.csv" IS a table caption in the
   // catalog, the qualifier is stripped back to the bare column name pods know.
-  const measure = field({ id: 'Sales (genres.csv)', name: 'Sales (genres.csv)', caption: 'Sales', role: 'MEASURE', table: 'genres.csv' });
+  const measure = field({ id: 'Sales (genres.csv)', name: 'Sales', caption: 'Sales', role: 'MEASURE', table: 'genres.csv' });
   const otherTableField = field({ id: 'Title', name: 'Title', caption: 'Title', role: 'DIMENSION', dataType: 'STRING', table: 'genres.csv' });
   const timeDim = field({ id: 'order_date', name: 'order_date', caption: 'Order Date', role: 'DIMENSION', dataType: 'DATE', timeType: 'DATE', table: 'Orders' });
   const cat = catalog({ measures: [measure], dimensions: [otherTableField], timeDimensions: [timeDim] });
@@ -216,9 +216,9 @@ for (const role of ['measure', 'time', 'slicer'] as const) {
     const measures = [field({ id: 'Sales', role: 'MEASURE' })];
     const times = [field({ id: 'Date', role: 'DIMENSION', dataType: 'DATE', timeType: 'DATE' })];
     const dimensions = [field({ id: 'Region', role: 'DIMENSION' })];
-    const duplicate = role === 'measure' ? field({ id: 'Sales (Orders)', name: 'Sales (Orders)', caption: 'Sales (Orders)', role: 'MEASURE' })
-      : role === 'time' ? field({ id: 'Date (Orders)', role: 'DIMENSION', dataType: 'DATE', timeType: 'DATE' })
-      : field({ id: 'Region (Orders)', role: 'DIMENSION' });
+    const duplicate = role === 'measure' ? field({ id: 'Sales (Orders)', name: 'Sales', caption: 'Sales (Orders)', role: 'MEASURE' })
+      : role === 'time' ? field({ id: 'Date (Orders)', name: 'Date', role: 'DIMENSION', dataType: 'DATE', timeType: 'DATE' })
+      : field({ id: 'Region (Orders)', name: 'Region', role: 'DIMENSION' });
     if (role === 'measure') measures.push(duplicate);
     else if (role === 'time') times.push(duplicate);
     else dimensions.push(duplicate);
@@ -272,4 +272,13 @@ test('LOD aggregate dependencies retain equivalent serializer aggregation for re
     const specification = result[0].specification as { basic_specification: { measure: { aggregation: string } } };
     assert.equal(specification.basic_specification.measure.aggregation, 'AGGREGATION_SUM');
   }
+});
+
+test('literal field names matching table qualifiers are not rewritten', () => {
+  const measure = field({ id: 'Revenue (calc)', name: 'Revenue (calc)', role: 'MEASURE', table: null });
+  const time = field({ id: 'Date (Orders)', name: 'Date (Orders)', role: 'DIMENSION', dataType: 'DATE', timeType: 'DATE', table: 'Orders' });
+  const current = catalog({ measures: [measure], timeDimensions: [time] });
+  const result = buildCreatePayloads({ catalog: current, metrics: { m: metric({ fieldId: measure.id, timeDimensionFieldId: time.id }) }, slicers: {} });
+  assert.equal(spec(result[0]).measure.field, measure.id);
+  assert.equal(spec(result[0]).time_dimension.field, time.id);
 });

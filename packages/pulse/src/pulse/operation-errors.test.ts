@@ -74,7 +74,7 @@ test('the deliberate dimension route explains retained VDS denial after successf
     if (url.pathname.includes('/pulse/metrics/')) return Response.json({ metric: { id: 'metric', definition_id: 'definition', specification: { filters: [] } } });
     if (url.pathname.includes('/pulse/definitions/')) return Response.json({ definition: { metadata: { id: 'definition' }, specification: { datasource: { id: 'datasource' } }, extension_options: { allowed_dimensions: ['Region'] } } });
     if (url.pathname.endsWith('/datasources/datasource')) return Response.json({ datasource: { id: 'datasource', name: 'Fixture' } });
-    if (url.pathname.includes('metadata/graphql')) return Response.json({ data: { publishedDatasources: [{ luid: 'datasource', name: 'Fixture', fieldsConnection: { totalCount: 1, pageInfo: { hasNextPage: false }, nodes: [{ __typename: 'ColumnField', id: 'region', name: 'Region', dataType: 'STRING', role: 'DIMENSION' }] } }] } });
+    if (url.pathname.includes('metadata/graphql')) return Response.json({ data: { publishedDatasources: [{ luid: 'datasource', name: 'Fixture', fieldsConnection: { totalCount: 1, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ __typename: 'ColumnField', id: 'region', name: 'Region', dataType: 'STRING', role: 'DIMENSION' }] } }] } });
     return Response.json({ error: { code: '403004', summary: 'VDS access denied', detail: 'API Access permission is required.' } }, { status: 403 });
   };
   const app = Fastify();

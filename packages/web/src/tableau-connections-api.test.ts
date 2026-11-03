@@ -275,13 +275,14 @@ test('treats a rejected mutation as committed when reconciliation finds the cred
 test('retains a retirement ticket when a committed replacement is reconciled', async () => {
   const api = createTableauConnectionsApi(async (input) => {
     if (String(input) === '/api/tableau/connections/reconcile') return jsonResponse({
-      status: 'committed', retirement: { ticket: 'retirement-ticket' },
+      status: 'committed', superseded: true, retirement: { ticket: 'retirement-ticket' },
       connection: { id: 'connection-1', label: 'Saved', serverUrl: 'https://example.test', siteContentUrl: '', patName: 'fixture', storageKind: 'os', credentialRef: 'new-ref' },
     });
     return jsonResponse({ message: 'Response lost.' }, 500);
   }, () => OPERATION_ID);
   const response = await api.replaceCredential('connection-1', { storageKind: 'os', credentialRef: 'new-ref' });
   assert.deepEqual(response.retirement, { ticket: 'retirement-ticket' });
+  assert.equal(response.superseded, true);
 });
 
 test('pending credential cleanup survives reload and can be retried by ticket', async () => {

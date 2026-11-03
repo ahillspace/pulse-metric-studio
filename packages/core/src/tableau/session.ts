@@ -357,6 +357,16 @@ export function replaceConnectionCredential(id: string, input: ReplaceConnection
 
 type CredentialRetirement = { ticket: string; operationId: string; connectionId: string; oldRef: string; newRef: string | null; state: 'pending' | 'removed' };
 const RETIREMENT_PREFIX = 'tableauCredentialRetirement:';
+type CredentialReplacementOutcome = { operationId: string; fingerprint: string; connectionId: string; profile: ConnectionProfile; retirement?: { ticket: string } };
+const REPLACEMENT_PREFIX = 'tableauCredentialReplacement:';
+const CURRENT_REPLACEMENT_PREFIX = 'tableauCurrentReplacement:';
+export function isCurrentCredentialReplacement(operationId: string, connectionId: string): boolean {
+  return getSetting(db(), CURRENT_REPLACEMENT_PREFIX + connectionId) === operationId;
+}
+export function credentialReplacement(operationId: string): CredentialReplacementOutcome | undefined {
+  const value = getSetting(db(), REPLACEMENT_PREFIX + operationId);
+  return value ? JSON.parse(value) as CredentialReplacementOutcome : undefined;
+}
 
 export function credentialRetirements(): CredentialRetirement[] {
   const rows = db().prepare('SELECT value FROM settings WHERE key LIKE ?').all(`${RETIREMENT_PREFIX}%`) as Array<{ value: string }>;
@@ -372,18 +382,22 @@ export function markCredentialRetired(record: CredentialRetirement): void {
   setSetting(db(), RETIREMENT_PREFIX + record.ticket, JSON.stringify({ ...record, state: 'removed' }));
 }
 
-export function replaceCredentialWithRetirement(id: string, input: ReplaceConnectionCredentialInput, operationId: string): { profile: ConnectionProfile; retirement?: { ticket: string } } | null {
+export function replaceCredentialWithRetirement(id: string, input: ReplaceConnectionCredentialInput, operationId: string, fingerprint: string): { profile: ConnectionProfile; retirement?: { ticket: string } } | null {
   const result = db().transaction(() => {
     const previous = getStoredConnection(id);
     if (!previous) return null;
     const profile = updateConnectionCredential(id, input);
     if (!profile) return null;
     const oldRef = previous.storageKind === 'os' ? previous.credentialRef : null;
-    if (!oldRef || oldRef === profile.credentialRef) return { profile };
-    const ticket = crypto.randomUUID();
-    const record: CredentialRetirement = { ticket, operationId, connectionId: id, oldRef, newRef: profile.credentialRef, state: 'pending' };
-    setSetting(db(), RETIREMENT_PREFIX + ticket, JSON.stringify(record));
-    return { profile, retirement: { ticket } };
+    const retirement = oldRef && oldRef !== profile.credentialRef ? { ticket: crypto.randomUUID() } : undefined;
+    if (retirement && oldRef) {
+      const record: CredentialRetirement = { ticket: retirement.ticket, operationId, connectionId: id, oldRef, newRef: profile.credentialRef, state: 'pending' };
+      setSetting(db(), RETIREMENT_PREFIX + retirement.ticket, JSON.stringify(record));
+    }
+    const outcome: CredentialReplacementOutcome = { operationId, fingerprint, connectionId: id, profile, ...(retirement ? { retirement } : {}) };
+    setSetting(db(), REPLACEMENT_PREFIX + operationId, JSON.stringify(outcome));
+    setSetting(db(), CURRENT_REPLACEMENT_PREFIX + id, operationId);
+    return { profile, ...(retirement ? { retirement } : {}) };
   })();
   if (result) invalidateReplacedCredential(id);
   return result;
@@ -402,6 +416,7 @@ export function deleteConnection(id: string): ConnectionProfile | null {
   const existing = getStoredConnection(id);
   if (!existing) return null;
   db().prepare('DELETE FROM connections WHERE id = ?').run(id);
+  setSetting(db(), CURRENT_REPLACEMENT_PREFIX + id, '');
   if (getSetting(db(), 'activeConnectionId') === id) {
     setSetting(db(), 'activeConnectionId', '');
     clearSession();

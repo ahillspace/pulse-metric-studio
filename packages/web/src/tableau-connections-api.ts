@@ -60,6 +60,7 @@ export interface CredentialMutationResponse {
   ok: true;
   connection: SavedConnection;
   session: TableauSessionInfo | null;
+  superseded?: boolean;
   retirement?: { ticket: string };
   activationError?: {
     code: 'activation_unavailable';
@@ -268,7 +269,7 @@ type CredentialReconciliationRequest = {
 };
 
 type CredentialReconciliationResponse =
-  | { status: 'committed'; connection: SavedConnection; retirement?: { ticket: string } }
+  | { status: 'committed'; connection: SavedConnection; superseded?: boolean; retirement?: { ticket: string } }
   | { status: 'not_committed' | 'pending' };
 
 function credentialReconciliationRequest(
@@ -305,6 +306,7 @@ async function reconcileRejectedCredentialMutation(
         ok: true,
         connection: result.connection,
         session: null,
+        ...(result.superseded ? { superseded: true } : {}),
         ...(result.retirement ? { retirement: result.retirement } : {}),
         activationError: {
           code: 'activation_unavailable',

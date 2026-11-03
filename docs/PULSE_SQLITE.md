@@ -14,7 +14,7 @@ See the [maintainer guide](PULSE_MAINTAINER_GUIDE.md) for operation flows and tr
 | `pulse_workspaces`, `pulse_publish_runs`, `pulse_publish_items` | Pulse repository; durable authoring and publication evidence |
 | `connections` | Core Tableau session store; durable connection metadata and credential location |
 | `llm_profiles` | Core AI profile store; durable provider configuration and secret references |
-| `settings` | Core settings helpers; active connection, active provider, provider readiness, and credential retirement records |
+| `settings` | Core settings helpers; active connection, active provider, readiness, and credential replacement and retirement records |
 | `local_secrets` | Local secret vault; encrypted fallback values addressed by opaque references |
 | `_migrations` | Shared migration infrastructure and saved-secrets migration; applied migration keys |
 | `runs`, `run_metrics` | Retained historical publication archives; migration reads these records |
@@ -41,7 +41,7 @@ The active connection setting remains available for later restoration.
 The core Tableau session store owns `tableauCredentialRetirement:` records in `settings`.
 Each record contains a ticket, operation ID, connection ID, old and replacement credential references, and pending or removed state.
 It contains no secret values.
-Credential replacement and its pending retirement record commit in the same SQLite transaction.
+Credential replacement, its operation outcome, and its pending retirement record commit in the same SQLite transaction.
 Active session invalidation follows that commit.
 Pending tickets survive restart and remain available for cleanup retries.
 Removed records preserve retry idempotency.
@@ -49,6 +49,10 @@ A backend critical section checks all saved references before deleting a retired
 New reference adoption revalidates the OS credential under that same critical section before committing.
 Failed cleanup retains the committed connection and the pending record.
 These records use the existing settings schema and require no SQL migration.
+The `tableauCredentialReplacement:` records preserve request fingerprints and committed outcomes independently of the current connection state.
+The `tableauCurrentReplacement:` marker identifies the replacement that still owns a connection's current credential.
+Reconciliation reports superseded operations as committed without restoring their historical credential or session.
+Encrypted fallback secrets contribute a domain-separated machine-key HMAC to request identity; operation records never contain their plaintext.
 
 ## Active Pulse tables
 

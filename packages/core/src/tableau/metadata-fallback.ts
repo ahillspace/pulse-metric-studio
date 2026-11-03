@@ -345,6 +345,7 @@ async function fetchGraphqlNodes(
 ): Promise<{ name?: string; nodes: GraphqlNode[] } | null> {
   const nodes: GraphqlNode[] = [];
   const seenCursors = new Set<string>();
+  const seenNodeIds = new Set<string>();
   let hasNextPage = true;
   let after: string | null = null;
   let dsName: string | undefined;
@@ -374,7 +375,22 @@ async function fetchGraphqlNodes(
       (totalCount !== undefined && conn.totalCount !== totalCount))
       throw new TableauError('Field metadata response is incomplete.', 502);
     totalCount = conn.totalCount;
-    for (const node of conn.nodes as GraphqlNode[]) nodes.push(node);
+    for (const node of conn.nodes) {
+      if (Array.isArray(node) || typeof node.id !== 'string' || !node.id.trim() ||
+        typeof node.__typename !== 'string' || !node.__typename.trim() ||
+        (node.name != null && typeof node.name !== 'string') ||
+        (node.fullyQualifiedName != null && typeof node.fullyQualifiedName !== 'string') ||
+        (node.role != null && typeof node.role !== 'string') ||
+        (node.dataType != null && typeof node.dataType !== 'string') ||
+        (node.aggregation != null && typeof node.aggregation !== 'string') ||
+        (node.description != null && typeof node.description !== 'string') ||
+        (node.formula != null && typeof node.formula !== 'string') ||
+        (node.isHidden != null && typeof node.isHidden !== 'boolean') ||
+        !(node.name?.trim() || node.fullyQualifiedName?.trim()) || seenNodeIds.has(node.id))
+        throw new TableauError('Field metadata response is incomplete.', 502);
+      seenNodeIds.add(node.id);
+      nodes.push(node as GraphqlNode);
+    }
     const pageInfo = conn.pageInfo;
     hasNextPage = pageInfo.hasNextPage;
     const next = pageInfo.endCursor;

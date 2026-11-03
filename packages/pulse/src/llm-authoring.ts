@@ -159,7 +159,7 @@ function buildUserPrompt(input: AuthorInput): string {
         const hasCaption = Boolean(f.caption) && f.caption !== f.name;
         const label = untrustedMetadata(f.label);
         const human = hasCaption ? label : (f.formula ? `${label} [=${untrustedMetadata(f.formula, MAX_METADATA_FORMULA)}]` : label);
-        return `${JSON.stringify(f.id).replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029')} | ${human} | ${f.role} | ${f.dataType}${f.requiresUserAgg ? ' | USER_AGG' : ''}`;
+        return `${JSON.stringify(f.id).replace(/\|/g, '\\u007c').replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029')} | ${human} | ${f.role} | ${f.dataType}${f.requiresUserAgg ? ' | USER_AGG' : ''}`;
     };
     const cap = (arr: CatalogField[], n: number, kind: string) => {
         if (arr.length > n) {
@@ -267,10 +267,12 @@ async function authorWithinDeadline(provider: LlmProvider, input: AuthorInput, d
     const fields = new Set([...input.catalog.measures, ...input.catalog.dimensions, ...input.catalog.timeDimensions].map((field) => field.id));
     const times = new Set(input.catalog.timeDimensions.map((field) => field.id));
     const dimensions = new Set(input.catalog.dimensions.map((field) => field.id));
+    const selected = input.selection && typeof input.selection === 'object' ? input.selection as { metrics?: Record<string, unknown>; slicers?: Record<string, unknown> } : {};
     const referenceWarnings: string[] = [];
     parsed.ops = (parsed.ops as Op[]).filter((op) => {
         if (op.op === 'SET_DIGEST_AUDIENCE') return true;
-        const missing = !fields.has(op.fieldId) || (op.op === 'ADD_SLICER' && !dimensions.has(op.fieldId)) ? op.fieldId :
+        const selectedRemoval = op.op === 'REMOVE_METRIC' ? Object.hasOwn(selected.metrics ?? {}, op.fieldId) : op.op === 'REMOVE_SLICER' ? Object.hasOwn(selected.slicers ?? {}, op.fieldId) : false;
+        const missing = (!fields.has(op.fieldId) && !selectedRemoval) || (op.op === 'ADD_SLICER' && !dimensions.has(op.fieldId)) ? op.fieldId :
             ('timeDimensionFieldId' in op && op.timeDimensionFieldId && !times.has(op.timeDimensionFieldId) ? op.timeDimensionFieldId : null);
         if (missing === null) return true;
         referenceWarnings.push(`Dropped ${op.op}: field reference ${JSON.stringify(missing)} is not in the current catalog.`);
@@ -280,7 +282,7 @@ async function authorWithinDeadline(provider: LlmProvider, input: AuthorInput, d
     provider.tracking?.commitSuccess();
     return {
         assistantMessage: attempt.warnings.length
-            ? `${parsed.ops.length} valid suggested change${parsed.ops.length === 1 ? ' is' : 's are'} included. Invalid suggestions were omitted; review the warnings before applying changes.`
+            ? `${parsed.ops.length} valid suggested change${parsed.ops.length === 1 ? ' is' : 's are'} included. Invalid suggestions were omitted; review the warnings before applying changes.${typeof parsed.assistantMessage === 'string' && parsed.assistantMessage ? `\nAssistant report (may describe omitted suggestions): ${parsed.assistantMessage}` : ''}`
             : typeof parsed.assistantMessage === 'string' ? parsed.assistantMessage : '',
         ops: (parsed.ops ?? []),
         digestAudience: typeof parsed.digestAudience === 'string' ? parsed.digestAudience : undefined,
@@ -329,9 +331,6 @@ async function tryParse(provider: LlmProvider, messages: LlmMessage[], timeoutMs
             }
             return [check.data];
         });
-        if (validOps.length === 0 && opsRaw.length > 0) {
-            return { ok: false, error: `all ops invalid: ${issues.join(' | ').slice(0, 400)}`, rawText: result.text };
-        }
         parsed.ops = validOps;
         return { ok: true, parsed, rawText: result.text, provider: result.provider, model: result.model, warnings: issues };
     }

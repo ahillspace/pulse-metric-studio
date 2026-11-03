@@ -38,7 +38,7 @@ test('authoritative metadata rejects missing and repeated continuation cursors',
     globalThis.fetch = async () => {
       calls += 1;
       if (calls > 2) throw new Error('Metadata repeated a page beyond the test budget.');
-      return Response.json({ data: { publishedDatasources: [{ fieldsConnection: { totalCount: 2, nodes: [field], pageInfo: { hasNextPage: true, endCursor: cursor } } }] } });
+      return Response.json({ data: { publishedDatasources: [{ fieldsConnection: { totalCount: 2, nodes: [{ ...field, id: `node-${calls}` }], pageInfo: { hasNextPage: true, endCursor: cursor } } }] } });
     };
     await assert.rejects(fetchFieldsViaMetadataGraphql(session(), 'ds', { luid: 'ds', name: 'DS' }), /pagination is incomplete/);
     assert.equal(calls, cursor === null ? 1 : 2);
@@ -46,7 +46,7 @@ test('authoritative metadata rejects missing and repeated continuation cursors',
 });
 
 test('valid metadata pagination stays complete and caption enrichment remains best-effort', async () => {
-  const field = (name: string) => ({ __typename: 'ColumnField', name, fullyQualifiedName: `[${name}]`, role: 'MEASURE', dataType: 'REAL' });
+  const field = (name: string) => ({ __typename: 'ColumnField', id: name, name, fullyQualifiedName: `[${name}]`, role: 'MEASURE', dataType: 'REAL' });
   const cursors: unknown[] = [];
   globalThis.fetch = async (_input, init) => {
     const after = JSON.parse(String(init?.body)).variables.after;
@@ -101,7 +101,7 @@ test('metadata catalog keeps row calculations with removed aggregate and table-c
     { name: 'Revenue', formula: '// SUM([Sales]) was removed\n[Sales] * 2' },
     { name: 'Revenue twice', formula: '/* WINDOW_SUM([Sales]) was removed */ [Revenue] * 2' },
   ].map((node) => ({ ...node, __typename: 'CalculatedField', fullyQualifiedName: `[${node.name}]`, role: 'MEASURE', dataType: 'REAL' }));
-  globalThis.fetch = async () => Response.json({ data: { publishedDatasources: [{ fieldsConnection: { totalCount: nodes.length, nodes, pageInfo: { hasNextPage: false, endCursor: null } } }] } });
+  globalThis.fetch = async () => Response.json({ data: { publishedDatasources: [{ fieldsConnection: { totalCount: nodes.length, nodes: nodes.map((node, index) => ({ ...node, id: `node-${index}`, __typename: node.formula ? 'CalculatedField' : 'ColumnField' })), pageInfo: { hasNextPage: false, endCursor: null } } }] } });
   const catalog = await fetchFieldsViaMetadataGraphql(session(), 'ds', { luid: 'ds', name: 'DS' });
   assert.deepEqual(catalog.excluded, []);
   assert.equal(catalog.measures.length, 2);
@@ -167,7 +167,7 @@ test('metadata catalog parser terminates for malformed references and preserves 
     for (const formula of formulas) {
       const nodes = ["Owner's Revenue", 'Revenue "Quoted"', 'Revenue // note'].map(name => ({ name, fullyQualifiedName: '[' + name + ']', formula: 'SUM([Sales])', role: 'MEASURE', dataType: 'REAL' }));
       nodes.push({ name: 'Wrapper', fullyQualifiedName: '[Wrapper]', formula, role: 'MEASURE', dataType: 'REAL' });
-      globalThis.fetch = async () => Response.json({ data: { publishedDatasources: [{ fieldsConnection: { totalCount: nodes.length, nodes, pageInfo: { hasNextPage: false, endCursor: null } } }] } });
+      globalThis.fetch = async () => Response.json({ data: { publishedDatasources: [{ fieldsConnection: { totalCount: nodes.length, nodes: nodes.map((node, index) => ({ ...node, id: 'node-' + index, __typename: node.formula ? 'CalculatedField' : 'ColumnField' })), pageInfo: { hasNextPage: false, endCursor: null } } }] } });
       const catalog = await fetchFieldsViaMetadataGraphql({ serverUrl: 'https://test.invalid', siteContentUrl: '', siteId: 'site', userId: 'user', token: 'test', apiVersion: '3.27' }, 'ds', { luid: 'ds', name: 'DS' });
       results.push({ aggregate: catalog.measures.find(f => f.id === 'Wrapper')?.requiresUserAgg, excluded: catalog.excluded.some(f => f.field.id === 'Wrapper') });
     }
@@ -188,7 +188,7 @@ test('final metadata catalog propagates hidden dependencies without exposing the
     node('RankPlus', '[Rank] + 1'), node('RankTwice', '[RankPlus] * 2'),
     node('Margin', 'SUM([Profit])/SUM([Sales])', true), node('MarginX2', '[Margin] * 2'),
     node('MarginX4', '[MarginX2] * 2'), node('RowLevel', '[Sales] * 2')];
-  globalThis.fetch = async () => Response.json({ data: { publishedDatasources: [{ fieldsConnection: { totalCount: nodes.length, nodes, pageInfo: { hasNextPage: false, endCursor: null } } }] } });
+  globalThis.fetch = async () => Response.json({ data: { publishedDatasources: [{ fieldsConnection: { totalCount: nodes.length, nodes: nodes.map((node, index) => ({ ...node, id: `node-${index}`, __typename: node.formula ? 'CalculatedField' : 'ColumnField' })), pageInfo: { hasNextPage: false, endCursor: null } } }] } });
   const catalog = await fetchFieldsViaMetadataGraphql(session(), 'ds', { luid: 'ds', name: 'DS' });
   for (const id of ['RankPlus', 'RankTwice']) assert.ok(catalog.excluded.some(({ field, reason }) => field.id === id && reason === 'table_calc'));
   for (const id of ['MarginX2', 'MarginX4']) assert.equal(catalog.measures.find((field) => field.id === id)?.requiresUserAgg, true);
@@ -212,7 +212,7 @@ test('fetchFieldsViaMetadataGraphql paginates and sends $luid as String!', async
               fieldsConnection: {
                 totalCount: 2,
                 pageInfo: { hasNextPage: true, endCursor: 'CUR1' },
-                nodes: [{ __typename: 'ColumnField', name: 'Order Date', fullyQualifiedName: '[Order Date]', role: 'DIMENSION', dataType: 'DATE' }],
+                nodes: [{ __typename: 'ColumnField', id: 'date', name: 'Order Date', fullyQualifiedName: '[Order Date]', role: 'DIMENSION', dataType: 'DATE' }],
               },
             },
           ],
@@ -227,7 +227,7 @@ test('fetchFieldsViaMetadataGraphql paginates and sends $luid as String!', async
             fieldsConnection: {
               totalCount: 2,
               pageInfo: { hasNextPage: false, endCursor: null },
-              nodes: [{ __typename: 'ColumnField', name: 'Sales', fullyQualifiedName: '[Sales]', role: 'MEASURE', dataType: 'REAL' }],
+              nodes: [{ __typename: 'ColumnField', id: 'sales', name: 'Sales', fullyQualifiedName: '[Sales]', role: 'MEASURE', dataType: 'REAL' }],
             },
           },
         ],
@@ -284,7 +284,7 @@ test('incomplete fallback is not cached as a complete catalog', async () => {
   globalThis.fetch = async (url) => {
     if (!String(url).includes('/api/metadata/graphql')) return new Response('{}', { status: 500 });
     graphql++;
-    const nodes = [{ name: 'Sales', fullyQualifiedName: '[Sales]', role: 'MEASURE', dataType: 'REAL' }];
+    const nodes = [{ id: 'sales', __typename: 'ColumnField', name: 'Sales', fullyQualifiedName: '[Sales]', role: 'MEASURE', dataType: 'REAL' }];
     return Response.json({ data: { publishedDatasources: [{ fieldsConnection: { totalCount: graphql === 1 ? 2 : 1, nodes, pageInfo: { hasNextPage: false, endCursor: null } } }] },
       ...(graphql === 1 ? { errors: [{ message: 'partial' }] } : {}) });
   };
@@ -323,4 +323,35 @@ test('aggregate dependency propagation handles ambiguous names and cycles withou
   assert.equal(byName(rows, 'Inside')?.requiresUserAggHint, false);
   assert.equal(byName(rows, 'Cycle A')?.requiresUserAggHint, true);
   assert.equal(byName(rows, 'Literal braces')?.requiresUserAggHint, true);
+});
+
+test('authoritative metadata rejects malformed and repeated provider node identities before caching', async () => {
+  const { getFieldCatalog, invalidateFieldsCache } = await import('./vds-fields.js');
+  for (const mode of ['empty', 'array', 'duplicate'] as const) {
+    invalidateFieldsCache();
+    let metadata = 0;
+    globalThis.fetch = async (url, init) => {
+      if (!String(url).includes('/api/metadata/graphql')) return new Response('{}', { status: 500 });
+      metadata++;
+      const after = JSON.parse(String(init?.body)).variables.after;
+      const valid = { id: 'node-1', __typename: 'ColumnField', name: 'Sales', fullyQualifiedName: '[Sales]', role: 'MEASURE', dataType: 'REAL' };
+      const node = metadata === 1 && mode === 'empty' ? {} : metadata === 1 && mode === 'array' ? [] : valid;
+      const more = mode === 'duplicate' && metadata === 1;
+      return Response.json({ data: { publishedDatasources: [{ fieldsConnection: { totalCount: more || after ? 2 : 1, nodes: [node], pageInfo: { hasNextPage: more, endCursor: more ? 'next' : null } } }] } });
+    };
+    const owner = session();
+    await assert.rejects(getFieldCatalog(owner, 'ds', 'DS'), /incomplete/i);
+    const recovered = await getFieldCatalog(owner, 'ds', 'DS');
+    assert.equal(recovered.measures[0]?.id, 'Sales');
+    assert.ok(metadata >= 2);
+  }
+  invalidateFieldsCache();
+});
+
+test('valid future metadata field types retain optional nullable attributes', async () => {
+  globalThis.fetch = async () => Response.json({ data: { publishedDatasources: [{ fieldsConnection: {
+    totalCount: 1, nodes: [{ id: 'future-1', __typename: 'FutureField', name: 'Future', fullyQualifiedName: null, role: null, dataType: null }], pageInfo: { hasNextPage: false, endCursor: null },
+  } }] } });
+  const result = await fetchFieldsViaMetadataGraphql(session(), 'ds', { luid: 'ds', name: 'DS' });
+  assert.equal(result.dimensions[0]?.id, 'Future');
 });

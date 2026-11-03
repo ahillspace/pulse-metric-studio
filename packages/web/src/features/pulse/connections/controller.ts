@@ -28,6 +28,8 @@ interface ConnectionState {
   expireSession: (owner?: SessionOwner | null) => void;
   startAction: () => boolean;
   finishAction: () => void;
+  captureOwnerRevision: () => number;
+  adoptCommittedSession: (session: TableauSessionInfo, connectionId: string, revision: number) => Promise<boolean>;
 }
 
 export function createConnectionController(
@@ -36,7 +38,8 @@ export function createConnectionController(
   let generation = 0;
   let sourceRequest = 0;
   let accessRequest = 0;
-  return create<ConnectionState>((set, get) => ({
+  let ownerRevision = 0;
+  const store = create<ConnectionState>((set, get) => ({
     session: null,
     checked: false,
     reachable: true,
@@ -173,7 +176,19 @@ export function createConnectionController(
       return true;
     },
     finishAction: () => set({ connecting: false }),
+    captureOwnerRevision: () => ownerRevision,
+    async adoptCommittedSession(session, connectionId, revision) {
+      if (revision !== ownerRevision) return false;
+      await get().connected(session, connectionId);
+      return true;
+    },
   }));
+  let observedOwner = sessionOwnerKey(store.getState().session);
+  store.subscribe((state) => {
+    const next = sessionOwnerKey(state.session);
+    if (next !== observedOwner) { observedOwner = next; ownerRevision++; }
+  });
+  return store;
 }
 export const useConnection = createConnectionController();
 useConnection.subscribe((state) => setSessionOwner(state.session));
