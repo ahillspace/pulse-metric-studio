@@ -19,7 +19,7 @@ export interface TableauSession {
   token: string;
   /** REST API version discovered from /api/-/serverInfo at connect time. */
   apiVersion: string;
-  /** Current user's display name from `/users/current` (fullName ?? name); best-effort. */
+  /** Current user's display name from their user-ID profile (fullName ?? name); best-effort. */
   userName?: string;
   /** Verified site role from the authenticated user's own profile, when available. */
   siteRole?: string;
@@ -53,20 +53,10 @@ export function tableauProviderErrorInfo(error: TableauError, secrets: readonly 
   return { ...parsed, ...(safeTableauProviderCode(error.providerCode, secrets) ? { providerCode: safeTableauProviderCode(error.providerCode, secrets) } : {}) };
 }
 
-function extractJsonErrorCode(text: string): string | null {
-  try {
-    const parsed = JSON.parse(text) as { error?: { code?: string | number }; code?: string | number };
-    const c = parsed?.error?.code ?? parsed?.code;
-    return c != null ? String(c) : null;
-  } catch {
-    return null;
-  }
-}
-
-export function classifyStatus(status: number, bodyText: string): TableauError['kind'] {
+export function classifyStatus(status: number, bodyText: unknown): TableauError['kind'] {
   if (status === 401) return 'auth';
   if (status === 403) {
-    const code = extractJsonErrorCode(bodyText);
+    const code = parseTableauProviderError(bodyText).providerCode;
     if (code && AUTH_REJECTED_CODES.has(code)) return 'auth';
     return 'http';
   }
@@ -323,7 +313,7 @@ export async function getJson<T>(session: TableauSession, path: string, accept?:
       `GET ${path} failed (${resp.status})${validationDetail(resp)}`,
       resp.status,
       snippet,
-      classifyStatus(resp.status, snippet),
+      classifyStatus(resp.status, body),
       safeTableauProviderCode(resp.headers.get('validation_code'), [session.token]) ?? info.providerCode,
       info,
     );
@@ -355,7 +345,7 @@ export async function postJson<T>(
       `${opts.method ?? 'POST'} ${path} failed (${resp.status})${validationDetail(resp)}`,
       resp.status,
       snippet,
-      classifyStatus(resp.status, snippet),
+      classifyStatus(resp.status, respBody),
       safeTableauProviderCode(resp.headers.get('validation_code'), [session.token]) ?? info.providerCode,
       info,
     );

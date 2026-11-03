@@ -143,7 +143,10 @@ Browser development offers an explicitly selected encrypted local fallback.
 Credential mutations have operation identities so the frontend can reconcile a lost response before compensating a newly stored secret.
 Activation and disconnection use connection identity and session generation to protect a newer activation from an older request.
 Requests capture their authenticated owner before dispatch; late authentication errors and terminated receipts cannot expire a replacement session.
-Authentication and reachability are separate: temporary network, throttling, or server failures retain the session and report unavailability.
+Connection checks query the authenticated user's profile using the captured user ID.
+Profile permission denials and missing profiles do not block datasource loading; group creation remains unverified.
+Network, throttling, and server failures retain authentication and report the specific connection-check failure rather than claiming a Tableau outage.
+Status diagnostics report HTTP and provider codes or timeout and network categories without logging tokens or connection coordinates.
 First-party registry and dimension requests carry their captured expected owner for backend admission before provider work.
 A changed principal, activation generation, connection, server, or site returns a context error instead of running the queued request as another owner.
 Requests without that optional expectation retain the existing compatibility behavior.

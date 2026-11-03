@@ -33,7 +33,7 @@ async function fixture() {
       signins++;
       if (holdSignin) { signinResponse = res; heldSignins.push({ response: res, token: `token-${signins}` }); }
       else res.end(JSON.stringify({ credentials: { token: `token-${signins}`, site: { id: 'site' }, user: { id: 'user' } } }));
-    } else if (path.endsWith('/users/current')) {
+    } else if (path.endsWith('/users/user')) {
       res.statusCode = req.headers['x-tableau-auth'] === `token-${signins}` ? 200 : 401;
       res.end('{}');
     }
@@ -112,7 +112,7 @@ test('status preserves a current session on temporary provider failures', async 
       assert.equal(sessions.getSession(), failure === 401 ? null : owner);
       if (failure !== 401) {
         assert.equal(response.reachable, false);
-        assert.match(response.availabilityError, /temporarily unavailable/);
+        assert.match(response.availabilityError, failure === 'timeout' ? /timed out/ : failure === 'network' ? /could not reach/ : new RegExp(`HTTP ${failure}`));
       }
     } finally { sessions.clearSession(); await app.close(); }
   }

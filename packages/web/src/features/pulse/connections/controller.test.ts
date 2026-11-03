@@ -359,3 +359,21 @@ test("a retired datasource completion cannot clear a subsequent load indicator",
   assert.equal(store.getState().loadingDatasources, false);
   assert.equal(store.getState().datasources[0]?.luid, "new");
 });
+
+test("startup loads datasources when profile access is unknown but Tableau is reachable", async () => {
+  let sourceCalls = 0;
+  const unknown = { state: "unknown" as const, reasonCode: "profile_unavailable", message: "Group creation permission is not verified." };
+  const store = createConnectionController({
+    status: async () => ({ connected: true, reachable: true, session: { ...session, groupCreation: unknown } }),
+    disconnect: async () => ({ ok: true }),
+    datasources: async () => { sourceCalls++; return { datasources: [{ luid: "one", name: "One", projectName: "Project" }] }; },
+  });
+  await store.getState().init();
+  assert.equal(sourceCalls, 1);
+  assert.equal(store.getState().session?.userId, session.userId);
+  assert.deepEqual(store.getState().session?.groupCreation, unknown);
+  assert.equal(store.getState().reachable, true);
+  assert.equal(store.getState().error, null);
+  assert.equal(store.getState().datasources[0]?.luid, "one");
+  assert.equal(store.getState().loadingDatasources, false);
+});

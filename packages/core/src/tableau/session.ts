@@ -126,6 +126,7 @@ interface UserAccessFacts {
   siteRole?: string;
   checkedAt: number;
   verified: boolean;
+  profileUnavailable?: boolean;
 }
 const userAccess = new WeakMap<TableauSession, UserAccessFacts>();
 export interface TableauUserAccessCheck {
@@ -166,8 +167,10 @@ export function captureTableauUserAccess(session: TableauSession, payload: unkno
   return matched;
 }
 
-export function markTableauUserAccessUnavailable(session: TableauSession): void {
+export function markTableauUserAccessUnavailable(session: TableauSession, profileUnavailable = false): void {
   captureTableauUserAccess(session, null);
+  const facts = userAccess.get(session);
+  if (facts && profileUnavailable) facts.profileUnavailable = true;
 }
 
 /** Availability is advisory; the provider still authorizes every actual write. */
@@ -178,6 +181,9 @@ export function getGroupCreationAccess(session: TableauSession): TableauGroupCre
   const context = getSessionContext(session);
   if (!context || !isSessionCurrent(session)) return unknown('session_changed', 'Reconnect to verify group creation access for the current Tableau account.');
   const facts = userAccess.get(session);
+  if (facts && facts.context === context && facts.serverUrl === session.serverUrl && facts.siteId === session.siteId && facts.userId === session.userId && facts.profileUnavailable) {
+    return unknown('user_profile_unavailable', 'Tableau did not return this account profile. Group creation access is unknown; choose Follow Me or contact your administrator.', facts.checkedAt);
+  }
   if (!facts || facts.context !== context || facts.serverUrl !== session.serverUrl || facts.siteId !== session.siteId || facts.userId !== session.userId || !facts.verified) {
     return unknown('user_access_unverified', 'Group creation access could not be verified. Retry the permission check, or choose Follow Me.', facts?.checkedAt);
   }
