@@ -10,7 +10,7 @@ import { LlmBadge } from "../../components/LlmSettings";
 import { ConnectCard } from "./connections/Connect";
 import { useConnection } from "./connections/controller";
 import { activeEditor, contextMatches, useAuthor } from "./author/controller";
-import { WorkingStateNotice } from "./author/WorkingStateNotice";
+import { AuthorOperationNotice, WorkingStateNotice } from "./author/WorkingStateNotice";
 import { Activity } from "./activity/Activity";
 import { useActivity } from "./activity/controller";
 import { DatasourcePicker } from "./components/DatasourcePicker";
@@ -307,6 +307,7 @@ export default function PulseApp() {
             Checking connection...
           </p>
         )}
+        {hasDatasource && <AuthorOperationNotice />}
         <div className="pulse-workspace-content">
           <main className="pulse-main" aria-label={`${labels[area]} workspace`}>
             <fieldset

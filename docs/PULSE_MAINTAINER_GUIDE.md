@@ -181,6 +181,7 @@ Primary Metadata API discovery requires a complete field connection, consistent 
 GraphQL errors and incomplete primary responses fail discovery and do not enter the complete-catalog cache.
 Caption enrichment remains optional.
 Only dependencies outside LOD expressions propagate outer aggregation requirements; references inside LOD expressions still participate in exclusion checks.
+Metadata aggregation detection counts function arguments, distinguishes scalar MIN/MAX comparisons from aggregates, and recognizes statistical and aggregate RAWSQL functions.
 Successful Metadata fallback retains bounded diagnostics for the unsuccessful VDS attempts.
 Ordinary fallback remains usable; an explicit dimensional fork reports the VDS cause when it requires VDS metadata.
 Datasource API access and group administration are separate capabilities.
@@ -214,6 +215,9 @@ The [audit findings](ARCHITECTURE_AUDIT.md#findings-and-recommendations) identif
 Author mounts publication review only while visible and retains hidden previews in controller state.
 The dimension editor mounts rows on expansion and pages them independently from measures.
 Composer-only edits do not replace the selected table inputs.
+The hidden Metric Manager retains its controller cache and view selection without reprocessing inventory during composer edits.
+Datasource and draft navigation errors appear in both Author and Metric Manager, independently of the active draft's persistence status.
+Failed navigation keeps the previous editor available.
 
 Publication verifies the initial metric's month-to-date timeframe through Tableau reads before resolving it for follow subscriptions.
 An unexpected timeframe retains the confirmed definition and records a resolution diagnostic.

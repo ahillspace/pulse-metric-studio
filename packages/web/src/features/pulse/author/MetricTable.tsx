@@ -84,7 +84,7 @@ export function MetricTable({
             <MetricRow
               key={field.id}
               field={field}
-              metric={metrics[field.id]}
+              metric={Object.hasOwn(metrics, field.id) ? metrics[field.id] : undefined}
               catalog={catalog}
               onToggle={() => onToggle(field.id)}
               onChange={(patch) => onChange(field.id, patch)}

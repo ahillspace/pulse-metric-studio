@@ -2,17 +2,17 @@ import { useState } from "react";
 import { activeEditor, useAuthor } from "./controller";
 import { Modal } from "../components/ui";
 
-/** Persistence is automatic. Surface only failures that need a user action. */
+/** Datasource and draft navigation can fail while another editor stays usable. */
+export function AuthorOperationNotice() {
+  const error = useAuthor((state) => state.error);
+  return error ? <p role="alert" className="warning-banner">{error}</p> : null;
+}
+
+/** Persistence failures belong to the active draft independently of navigation. */
 export function WorkingStateNotice() {
   const entry = useAuthor(activeEditor);
-  const error = useAuthor((state) => state.error);
   const [reload, setReload] = useState(false);
-  if (!entry)
-    return error ? (
-      <p role="alert" className="warning-banner">
-        {error}
-      </p>
-    ) : null;
+  if (!entry) return null;
   if (entry.saveStatus !== "error" && entry.saveStatus !== "conflict")
     return null;
   return (

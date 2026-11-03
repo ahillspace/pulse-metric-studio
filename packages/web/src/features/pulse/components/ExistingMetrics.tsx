@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { activeEditor, contextMatches, useAuthor } from "../author/controller";
 import { useConnection } from "../connections/controller";
 import { registryScopeKey, useRegistry } from "../registry/controller";
@@ -43,10 +44,21 @@ export {
   registryResultHeadlines,
 } from "../registry/views";
 
-export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
-  const entry = useAuthor(activeEditor);
+export const ExistingMetrics = memo(function ExistingMetrics({ visible = true }: { visible?: boolean }) {
+  const context = useAuthor(useShallow((state) => activeEditor(state)?.record.context ?? null));
+  const datasourceName = useAuthor((state) => activeEditor(state)?.record.datasourceName ?? "");
   const session = useConnection((state) => state.session);
-  const registry = useRegistry();
+  const registry = useRegistry(useShallow((state) => ({
+    inventory: state.inventory, followState: state.followState,
+    loading: state.loading, followLoading: state.followLoading, error: state.error,
+    busy: state.busy, results: state.results, createdMetricIds: state.createdMetricIds,
+    deletePlan: state.deletePlan, deleteLoading: state.deleteLoading,
+    deleteError: state.deleteError, deleteOverridable: state.deleteOverridable,
+    mutationAvailable: state.mutationAvailable, refresh: state.refresh, fork: state.fork,
+    previewDelete: state.previewDelete, executeDelete: state.executeDelete,
+    reviewDeleteAnyway: state.reviewDeleteAnyway, cancelDelete: state.cancelDelete,
+    dismissResults: state.dismissResults,
+  })));
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [onlyFollowed, setOnlyFollowed] = useState(false);
   const [plan, setPlan] = useState<{ selectedMetricIds: string[] }>({
@@ -56,7 +68,6 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
   const [followersOf, setFollowersOf] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [variantsOpen, setVariantsOpen] = useState(false);
-  const context = entry?.record.context ?? null;
   const connected = Boolean(context && contextMatches(context, session));
   const contextKey = JSON.stringify([context, sessionOwnerKey(session)]);
   useEffect(() => {
@@ -147,39 +158,35 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
       ),
     }));
   }, [allMetrics]);
-  const visibleDefinitions = (existing?.definitions ?? [])
-    .map((definition) => ({
+  const visibilityFollowState = onlyFollowed ? registry.followState : null;
+  const displayedDefinitions = useMemo(() => (existing?.definitions ?? [])
+    .map((definition) => onlyFollowed ? {
       ...definition,
-      metrics: definition.metrics.filter(
-        (metric) =>
-          !onlyFollowed ||
-          metricIsFollowed(registry.followState, metric.metricId),
-      ),
-    }))
+      metrics: definition.metrics.filter((metric) => metricIsFollowed(visibilityFollowState, metric.metricId)),
+    } : definition)
     .filter(
       (definition) =>
         (!onlyFollowed || definition.metrics.length > 0) &&
         `${definition.name} ${definition.measure}`
           .toLowerCase()
           .includes(query.trim().toLowerCase()),
-    );
-  const displayedDefinitions = visibleDefinitions;
-  const detailIdsKey = JSON.stringify((onlyFollowed ? allMetrics : allMetrics.filter((metric) => expanded.has(metric.definitionId)))
-    .map((metric) => metric.metricId).sort());
+    ), [existing, onlyFollowed, visibilityFollowState, query]);
+  const detailIdsKey = useMemo(() => JSON.stringify((onlyFollowed ? allMetrics : allMetrics.filter((metric) => expanded.has(metric.definitionId)))
+    .map((metric) => metric.metricId).sort()), [onlyFollowed, allMetrics, expanded]);
   useEffect(() => {
     const state = useRegistry.getState();
     if (visible && connected && !registry.loading && !registry.followLoading &&
       registryScopeKey(state.context, state.owner) === registryScopeKey(context, session))
       void useRegistry.getState().ensureFollowState(JSON.parse(detailIdsKey) as string[]);
   }, [visible, contextKey, connected, detailIdsKey, registry.loading, registry.followLoading, existing]);
-  const displayedIds = displayedDefinitions.flatMap((definition) =>
+  const displayedIds = useMemo(() => displayedDefinitions.flatMap((definition) =>
     definition.metrics.map((metric) => metric.metricId),
-  );
+  ), [displayedDefinitions]);
   const registrySelection = selectionState(
     selectedMetricIds,
     displayedIds,
   );
-  const selectedSources = plan.selectedMetricIds
+  const selectedSources = useMemo(() => plan.selectedMetricIds
     .map((id) => metricById.get(id))
     .filter((metric): metric is PulseRegistryMetric => Boolean(metric))
     .map((metric) => ({
@@ -190,7 +197,7 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
         metric.metricId,
         metric.timeframeLabel ?? "",
       ),
-    }));
+    })), [plan.selectedMetricIds, metricById, definitionById]);
   const allDisplayedExpanded =
     displayedDefinitions.length > 0 &&
     displayedDefinitions.every((definition) =>
@@ -222,7 +229,7 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
       setOnlyFollowed(false);
     }
   };
-  if (!entry)
+  if (!context)
     return (
       <section className="panel">
         <div className="panel-body">
@@ -396,7 +403,7 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
         {registry.loading && !existing && (
           <p role="status">Loading Tableau definitions...</p>
         )}
-        {!registry.loading && existing && visibleDefinitions.length === 0 && (
+        {!registry.loading && existing && displayedDefinitions.length === 0 && (
           <p className="empty-note">
             {existing.truncated || existing.failures.length
               ? "No matching definitions appear in the available subset."
@@ -613,7 +620,7 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
             <>
               <p>
                 Delete exactly these reviewed resources from{" "}
-                {entry.record.datasourceName}:
+                {datasourceName}:
               </p>
               <ul className="pulse-deletion-targets">
                 {registry.deletePlan.targets.map((target) => (
@@ -662,4 +669,4 @@ export function ExistingMetrics({ visible = true }: { visible?: boolean }) {
       )}
     </section>
   );
-}
+});
