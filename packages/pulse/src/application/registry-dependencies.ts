@@ -12,6 +12,8 @@ import {
   listDefinitionsInventory,
   listMetricsInventory,
   listSubscriptionsForMetric,
+  listSubscriptionPage,
+  type SubscriptionPage,
   listTableauGroups,
   listTableauUsers,
   type FollowerCountBatchResult,
@@ -22,6 +24,8 @@ import {
 } from '../pulse/pulse-client.js';
 
 export interface PulseRegistryDependencies {
+  listSubscriptionPage?(session: TableauSession, input: { metricId?: string; userId?: string; pageToken?: string }): Promise<SubscriptionPage>;
+  siteNegativeCoverageQualified?: boolean;
   createSubscriptions?(session: TableauSession, items: SubscriptionWriteTarget[]): Promise<SubscriptionWriteResult[]>;
   listDefinitions(session: TableauSession): Promise<PulseDefinitionInventory>;
   listMetrics(
@@ -85,6 +89,7 @@ export const defaultDependencies: PulseRegistryDependencies = {
   listMetrics: listMetricsInventory,
   getMetric: getPulseMetric,
   listSubscriptions: listSubscriptionsForMetric,
+  listSubscriptionPage,
   createGroupSubscriptions: batchCreateGroupSubscriptions,
   createUserSubscriptions: batchCreateUserSubscriptions,
   deleteSubscription,
@@ -101,6 +106,8 @@ export type InventoryDependencies = Pick<
 export type SubscriptionDependencies = Pick<
   PulseRegistryDependencies,
   | 'listSubscriptions'
+  | 'listSubscriptionPage'
+  | 'siteNegativeCoverageQualified'
   | 'createSubscriptions'
   | 'createGroupSubscriptions'
   | 'createUserSubscriptions'

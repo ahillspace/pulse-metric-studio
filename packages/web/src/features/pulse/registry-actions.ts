@@ -137,15 +137,9 @@ export function forkRegistryActionItem(
       ? result.status
       : undefined);
   const status: RegistryActionStatus =
-    reconciliationStatus === "visible"
-      ? creationStatus === "existing"
-        ? "existing"
-        : creationStatus === "created"
-          ? "created"
-          : "failed"
-      : reconciliationStatus === "pending_visibility"
-        ? "pending"
-        : "failed";
+    creationStatus === "created" || creationStatus === "existing" ? creationStatus
+      : creationStatus === "unknown" ? "unknown"
+        : creationStatus === "not_attempted" ? "not_attempted" : "failed";
   return {
     key: `fork:${result.sourceMetricId}:${result.metricId ?? index}`,
     metricId: result.sourceMetricId,
@@ -189,6 +183,7 @@ export function registryActionLabel(
             : item.reconciliationStatus === "failed"
               ? "visibility verification failed"
               : "reconciliation status unavailable";
+    if (!item.reconciliationStatus) return `${shared}${creation ?? "outcome unknown"}`;
     return shared ? `${shared}${reconciliation}` : creation ? `${creation}; ${reconciliation}` : reconciliation;
   }
   if (item.status === "created")

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { clearSession, setSession } from "@pulse-metric-studio/core";
 import { registerPulseRoutes } from "@pulse-metric-studio/pulse";
+import { getPulseInventorySnapshot } from "@pulse-metric-studio/pulse/dist/application/inventory-snapshots.js";
 import { buildApp } from "./app.js";
 
 test("real subscription response redacts credential-shaped provider header diagnostics", async () => {
@@ -123,55 +124,50 @@ test("cached deletion review retains cascade names and rejects a tampered finger
     datasourceLuid: "ds",
   };
   setSession(session, { connectionId: "connection", patSecret: "" });
-  const metric = (id: string, isDefault: boolean) => ({
-    metricId: id,
-    name: `Metric ${id}`,
-    measurementPeriod: {},
-    timeframeLabel: "Custom",
-    filters: [],
-    comparison: {},
-    isDefault,
-    isScoped: !isDefault,
-    scopedState: isDefault ? ("default" as const) : ("variant" as const),
-    specification: {},
-  });
-  const definitions = ["a", "b", "c"].map((id) => ({
-    definitionId: id,
-    name: `Definition ${id}`,
-    description: "",
-    measure: "Sales",
-    aggregation: "SUM",
-    timeDimension: "Date",
-    inventoryStatus: "complete" as const,
-    metrics: [metric(`${id}-default`, true), metric(`${id}-variant`, false)],
-  }));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    assert.equal(init?.method ?? "GET", "GET");
+    const url = new URL(String(input));
+    assert.equal(url.origin, session.serverUrl);
+    if (url.pathname.endsWith("/definitions")) return Response.json({ definitions: ["a", "b", "c"].map(id => ({ metadata: { id, name: `Definition ${id}` }, specification: { datasource: { id: "ds" } } })) });
+    const definitionId = /^\/api\/-\/pulse\/definitions\/([^/]+)\/metrics$/.exec(url.pathname)?.[1];
+    assert.ok(definitionId, url.pathname);
+    return Response.json({ metrics: [true, false].map(isDefault => {
+      const id = `${definitionId}-${isDefault ? "default" : "variant"}`;
+      return { id, metadata: { name: `Metric ${id}` }, definition_id: definitionId, is_default: isDefault, specification: { filters: [], measurement_period: {}, comparison: {} } };
+    }) });
+  };
+  let reverseMetrics = false;
   const executions: unknown[] = [];
   const server = buildApp({
     registerPulseRoutes: (app) =>
       registerPulseRoutes(app, {
         deletion: {
-          inventory: async () => ({
-            totalScanned: 3,
-            truncated: false,
-            failures: [],
-            definitions,
-          }),
+          inventory: async (owner, coordinates, snapshotId) => {
+            const inventory = getPulseInventorySnapshot(owner, coordinates, snapshotId);
+            if (reverseMetrics) for (const definition of inventory.definitions) definition.metrics.reverse();
+            return inventory;
+          },
           execute: async (_session, entries) => {
             executions.push(entries);
             return {
               definitionsDeleted: 2,
               metricsDeleted: 1,
               failures: [],
-              outcomes: [],
+              outcomes: [{ definitionId: "a", status: "deleted", sent: true }, { definitionId: "b", status: "deleted", sent: true }, { metricId: "c-variant", status: "deleted", sent: true }],
             };
           },
         },
       }),
   });
   try {
+    const inventoryResponse = await server.inject("/api/pulse/existing-metrics?datasourceLuid=ds&refresh=true");
+    assert.equal(inventoryResponse.statusCode, 200, inventoryResponse.body);
+    const displayed = inventoryResponse.json();
+    const original = structuredClone(displayed);
     const selection = {
       context,
-      snapshotId: "inventory-snapshot",
+      snapshotId: displayed.snapshotId,
       definitionIds: ["a", "b"],
       metricIds: ["a-default", "a-variant", "c-variant"],
     };
@@ -187,6 +183,7 @@ test("cached deletion review retains cascade names and rejects a tampered finger
       { id: "a-default", name: "Metric a-default", followerCount: null },
       { id: "a-variant", name: "Metric a-variant", followerCount: null },
     ]);
+    reverseMetrics = true;
     const stale = await server.inject({
       method: "POST",
       url: "/api/pulse/registry/delete",
@@ -200,6 +197,12 @@ test("cached deletion review retains cascade names and rejects a tampered finger
       payload: { ...selection, previewFingerprint: plan.previewFingerprint },
     });
     assert.equal(response.statusCode, 200, response.body);
+    const patch = response.json().inventoryPatch;
+    assert.deepEqual(patch.removedDefinitionIds, ["a", "b"]);
+    assert.deepEqual(patch.removedMetricIds, ["c-variant"]);
+    assert.deepEqual(getPulseInventorySnapshot(session, context, displayed.snapshotId), original);
+    const patched = getPulseInventorySnapshot(session, context, patch.snapshotId);
+    assert.deepEqual(patched.definitions.map(definition => [definition.definitionId, definition.metrics.map(metric => metric.metricId)]), [["c", ["c-default"]]]);
     assert.deepEqual(executions[0], [
       { definitionId: "a", metricIds: [], name: "Definition a" },
       { definitionId: "b", metricIds: [], name: "Definition b" },
@@ -207,6 +210,7 @@ test("cached deletion review retains cascade names and rejects a tampered finger
     ]);
   } finally {
     await server.close();
+    globalThis.fetch = originalFetch;
     clearSession();
   }
 });

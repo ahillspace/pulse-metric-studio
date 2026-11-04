@@ -20,6 +20,7 @@ npm run tauri:dev
 
 Desktop development builds shared packages and the frontend, composes resources, and starts Tauri.
 It uses bundled frontend and backend resources rather than browser watchers.
+Tauri's built-in static development server is disabled so the window uses the permitted bundled-app origin.
 Restart desktop development after changes that need resource recomposition.
 
 For browser development, run:

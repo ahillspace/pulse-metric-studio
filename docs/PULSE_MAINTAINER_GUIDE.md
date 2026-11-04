@@ -187,16 +187,50 @@ Ordinary fallback remains usable; an explicit dimensional fork reports the VDS c
 Datasource API access and group administration are separate capabilities.
 Discovery reuses a known datasource name or an exact datasource lookup instead of listing the site for one name.
 Dimension fields, counts, and value searches share bounded context for the authenticated owner and selected sources.
-Variant execution still refreshes and validates its captured source, catalog, and value domain.
+Variant planning reuses validated source facts from the displayed inventory when their original acquisition time remains within 60 seconds.
+Missing or expired facts use shared exact reads; repeated definitions share one read.
+The opaque source context binds the connection, user, session generation, datasource, and canonical source set.
+It retains original source and catalog acquisition times; cache reuse does not extend their freshness.
+Catalog expiry follows the core catalog TTL; dimension count and value answers expire with the earlier source or catalog boundary.
+Each owned source cache retains eight contexts, and the shared dimension answer cache retains 128 entries.
+Timeframe-only variants require no field catalog or dimension discovery.
+Filtered variants acquire catalog facts lazily and validate each distinct nonempty filter clause before writing.
 [`tableauFetch`](../packages/core/src/tableau/rest-client.ts) owns registered-session checks, concurrency admission, authentication refresh, version adaptation, and bounded throttling retries.
-The per-identity concurrency limit covers provider response bodies through bounded consumption or cancellation, rather than ending when headers arrive.
+The per-identity limit of eight covers provider response bodies through bounded consumption or cancellation, rather than ending when headers arrive.
 Status-only operations discard irrelevant bodies without changing accepted mutation outcomes.
 Cancellation cleanup respects the original request deadline and aborts its request when that boundary expires.
 Read and mutation retries have different safety rules; an ambiguous write is not a confirmed rejection.
 Version negotiation makes forward progress and changes the session version only after a successful response.
-A provider's `Retry-After` minimum is respected; a deadline that cannot accommodate it returns an unavailable result without an early retry.
-The transport installs that cooldown before releasing capacity to queued requests.
+A provider's `Retry-After` remains a minimum, including when its value is zero.
+Four throttle retries use client floors of 1, 2, 4, and 8 seconds, plus nonnegative jitter up to 250 milliseconds.
+The effective wait meets both the server minimum and the client floor.
+The retry budget and deadline survive authentication and REST version adaptation.
+Queued dispatch checks its captured session ownership before using the session's current token.
+Authenticated replay retains its recovery permit while that permit's cooldown generation remains current.
+A newer cooldown sends the replay back through admission without restarting its deadline or retry budgets.
+The transport installs shared cooldown before releasing capacity to queued requests.
+After cooldown, one eligible queued request becomes the probe; the app sends no additional health request.
+A successful probe restores bounded concurrency only for its current cooldown generation.
+Older in-flight responses cannot clear a newer wait.
+Cancellation, expiry, network failure, and terminal non-success responses release the probe and retain conservative backoff before reassignment.
 Queued requests observe their original deadline and never dispatch after expiration.
+An identity-scoped `GET /api/tableau/throttle` returns local cooldown state, `retryAt`, server time, and the throttle reason without contacting Tableau.
+Its optional expected-owner fence checks the complete connection, server, site, user, and session generation.
+Owner-scoped Manager provider activity keeps local status observation active independently of the current screen or datasource.
+This activity includes inventory, relationships, counts, directories, follower details, dimension discovery, previews, and mutation requests.
+Navigation preserves observation while earlier owner work remains pending, including when the next datasource has warm inventory.
+Healthy mutation overlap remains allowed; activity tracking does not serialize commands.
+Pending work polls this endpoint at most once per second to display shared cooldown, including extensions.
+One bounded trailing local observation after the last provider request settles captures fast terminal throttles.
+Status responses require the captured owner to remain active; datasource navigation does not discard owner cooldown.
+Status polling stops when no work, trailing observation, or cooldown remains.
+New overlapping mutations are refused during known cooldown in both the interface and backend admission.
+Follow and unfollow admission runs before subscription preflight.
+Their per-target and summary receipts retain mutation dispatch and cooldown metadata.
+A throttled target stops later envelopes; unsent targets remain distinct from rejected submitted targets.
+An entirely unsent throttled response uses HTTP 429; a response containing submitted mutations uses HTTP 207.
+Structured throttle errors distinguish sent requests from local refusals and retain retry timing.
+Expiry permits eligible admitted requests to resume; it never resubmits a whole command or an ambiguous write.
 See [`getFieldCatalog`](../packages/core/src/tableau/vds-fields.ts) and [`metadata-fallback.ts`](../packages/core/src/tableau/metadata-fallback.ts).
 The [audit findings](ARCHITECTURE_AUDIT.md#findings-and-recommendations) identify response paths that bypass the common body-size limit and pagination limits that need further qualification.
 
@@ -305,23 +339,59 @@ Explicit refresh also bypasses the backend definition cache and replaces its con
 Concurrent fresh requests share their read; superseded cache fills cannot replace newer evidence.
 Normal navigation retains its cache and pending-request sharing.
 Bounded caches and pending reads include connection, principal, session generation, and datasource ownership.
+Source contexts retain only successful validated facts with their original acquisition times.
+An explicit retry reacquires missing or expired sources while preserving fresh successful sources and sharing matching pending acquisitions.
+Opaque source handles identify their canonical entry before acquisition settles, so ready handles never await unrelated pending contexts.
+A retained handle identifies its owner, canonical source set, and inventory view independently of fact freshness.
+Source and catalog renewal preserves that handle, so later count, value, and create requests can use the original browser handle.
+Source-set and inventory-view changes create separate contexts; owner changes and bounded eviction reject unavailable handles.
 Returning to a datasource in the same session joins its pending read; another session cannot reuse its snapshots or follower state.
 Relationship reads share pending work per owned metric, including overlapping expanded selections.
+The retained inventory view shares one lazily acquired subscription discovery page across expansions and selections.
+The app requests 100 records per page; this preference is not a documented Tableau maximum.
+Incomplete or unqualified site coverage falls back to requested metrics without automatically scanning the entire site.
+Each follow-state API request uses at most 20 subscription calls, including discovery and targeted pages.
+Larger interface demands use bounded batches and aggregate continuation from the currently demanded metrics rather than the last batch.
+Per-metric continuation ends when its scan completes, reaches a terminal limit, leaves the demand, or is superseded.
+A failed continuation request retains explicit retry for previously resumable metrics without treating their relationship details as confirmed.
+Explicit continuation retains progress and limits site scanning to 20 pages and 2,000 records per view.
+Targeted scans use the same page and record bounds; each owner retains eight coverage views.
+Exhausted page or record budgets disable continuation and explain the terminal local limit.
+Personal-only requests cannot upgrade retained unqualified site coverage into authoritative absence.
+Only displayed datasource metric identities enter retained relationship records.
+Absent site records remain unknown until site-negative coverage is qualified against known user and group subscriptions.
+The default backend keeps site-negative qualification disabled.
+Personal-only queries cannot establish group or all-follower absence.
+Unchanged metric IDs and group reuse existing evidence; cached group identities support local reprojection.
+Detail acquisition does not repeat batched summary counts or replace valid counts with missing fields.
+Unrecoverable authentication errors stop subscription acquisition and retain the API's authentication response instead of becoming partial coverage.
 Manual inventory refresh supersedes earlier relationship evidence; subscription reconciliation requests evidence dispatched after the relevant mutation.
 Late results cannot replace newer relationship evidence in the display, retained inventory, or pending inventory enrichment.
+Count invalidation also fences pending inventory enrichment per metric; an earlier count response cannot restore totals invalidated by a later mutation.
+Cooldown-deferred reconciliation leaves affected counts not requested until a subsequent count read completes.
 Inventory completion settles its loading flags independently of relationship merges while preserving their latest evidence.
 Automatic local persistence depends on stable context values and does not trigger a remote inventory refresh.
 The backend derives connection ownership from the active Tableau session and binds snapshots to that session generation, principal, connection, and datasource.
-Snapshots remain in memory without a time limit; each session retains its latest 32 snapshots.
+Snapshots remain in memory without a time limit, with a retention target of 32 snapshots per session.
+Active create and delete commands pin their snapshots until completion, so pinned snapshots can temporarily exceed that target.
+Inactive datasource state retires after its latest snapshot is evicted and its pending reads and mutation pins finish.
+Each owner state has an opaque lifetime identifier; its revisions increase only within that lifetime.
+A replacement owner state starts a new lifetime instead of reusing prior revision authority.
 Deletion preview uses the displayed snapshot identifier and makes no Tableau requests.
-Missing, evicted, or mismatched snapshots require an explicit inventory refresh; deletion never falls back to provider reads.
+Deletion requires explicit inventory refresh for missing, evicted, or mismatched snapshots; it never falls back to provider reads.
 Deletion submits the exact selection, snapshot identifier, and reviewed plan fingerprint.
 Execution validates those cached inputs and sends only DELETE requests, without checking concurrent external edits.
 Deleting a definition sends one definition DELETE; Tableau removes its metrics and subscriptions.
 Selected child metrics covered by that definition do not receive individual DELETE requests.
 Individual metric DELETEs run in sequential groups of up to five; definition DELETEs remain serial.
 Every request in a group, including its bounded transport retries, settles before the next group starts.
-Snapshots remain available across deletion batches, and the controller refreshes inventory one time after the operation, including partial or unknown outcomes.
+Confirmed deletions produce a cloned backend snapshot and a versioned inventory receipt without changing earlier review evidence.
+Each mutation receipt carries the complete normalized authoritative inventory, its lifetime, and revision, alongside affected identity deltas.
+Newer receipts include earlier confirmed changes, so reverse delivery cannot discard those changes.
+The renderer rejects older same-lifetime receipts and receipts from retired lifetimes without retaining an indefinite mutation journal.
+The controller removes confirmed targets and preserves failed, unknown, and unsent targets with their explicit outcomes.
+Create and delete results do not trigger automatic inventory reloads, including after local admission refusal.
+Use **Refresh metrics** to reconcile external changes or inspect uncertain outcomes after cooldown.
 A bulk selection containing defaults opens an explicit review of the affected definitions and their metrics.
 An ordinary variant selection never authorizes deleting its parent definition.
 Incomplete inventory cannot establish that a selection covers every dependent resource.
@@ -330,12 +400,34 @@ This choice never authorizes an identity absent from the displayed datasource sn
 
 Create variants inherits the Manager selection, with source editing behind Change when metrics are already selected.
 Source changes remain local to that dialog until submission.
+Opening a timeframe-only variant dialog makes no Tableau request.
+Warm variant execution uses one get-or-create request per canonical destination and one validation query per distinct nonempty filter clause.
+The resulting call budget is `F + D`, where `F` counts those clauses and `D` counts destinations; timeframe-only execution uses `D`.
+Cold or expired source and catalog acquisition remain separate conditional costs.
+Create can rebase a truly missing or evicted snapshot onto the latest safe backend snapshot for the same owner and datasource.
+This fallback validates source facts through cold reads; retained snapshots with a different owner or datasource are rejected.
+Without a safe owned base, create returns 409 and requests **Refresh metrics** before sending writes.
+The provider's validated creation Boolean and metric ID establish created or existing outcomes without metric-list propagation polling.
+Every supplied supported response coordinate must match the captured metric, definition, site, datasource, and destination specification.
+Conflicting aliases retain the known created or existing disposition and metric ID, but cannot produce mergeable inventory evidence.
+Missing display enrichment retains trusted captured facts; unknown default status remains unknown.
+Confirmed normalized rows merge by metric ID into a cloned backend snapshot and the current display.
+An existing destination does not gain creation or deletion ownership merely because a request returns its ID.
+Patches preserve unrelated selection, expansion, preview images, follower counts, and relationship evidence within the retained view.
+New metrics retain not-requested relationship evidence until explicit inspection or a relevant follow mutation acquires it.
+Owner, datasource, generation, and mutation-order checks prevent stale patch replacement and confirmed deletion resurrection.
+Concurrent manual refresh rebases confirmed patches through local cached evidence without additional Tableau reads.
+Dispatch order fences inventory authority; an older refresh completion cannot replace a newer accepted inventory.
+The owner journal retains changes only for pending refresh windows; deletion sequence fences reject older pending upserts for deleted identities.
 Follow / Unfollow's Add existing reads a fresh identity snapshot for the exact selected metrics through the existing batched follow-state endpoint.
 It merges direct user and group subscribers into the selected targets without expanding group membership, and reports incomplete identity reads.
 The directory supplies display names, not subscription evidence.
 Initial summaries request follower counts without subscriber identities or user-membership discovery.
 Visible rows and explicit actions request identity detail; not-requested information remains distinct from zero, unavailable, or complete information.
 Follow mutations retain inventory and reconcile only affected metric IDs, including partial and unknown outcomes.
+Backend coverage invalidation fences both mutation admission and completion, including failed and unknown outcomes.
+A relationship read during a write cannot remain authoritative after that write settles.
+Unsent targets preserve prior display evidence; known cooldown defers provider reconciliation until an explicit retry or refresh.
 Directory reads share bounded session-owned cache entries with an explicit refresh path.
 Group creation and removal invalidate the affected owner's target directory; ordinary subscription changes retain it.
 Backend membership reads share session/user-owned evidence until expiry or a relevant membership or group mutation.
@@ -343,7 +435,9 @@ Potentially effective writes invalidate that evidence even when their outcome is
 Subscription writes group recipients by metric and match response identities to each requested recipient.
 The 200-recipient chunk is an app request-size bound, not a published Tableau maximum.
 Missing receipt identities remain unknown, and ambiguous writes are not replayed.
-Authentication loss during post-submission confirmation leaves submitted outcomes unknown and stops unsent work.
+Authentication loss or throttling during post-submission confirmation leaves submitted outcomes unknown and stops unsent work.
+A confirmation throttle retains retry timing and submitted mutation dispatch metadata, even if the verification read was refused locally.
+Its HTTP 207 receipt distinguishes submitted unknown targets from later unsent targets; the rejected read cannot establish mutation failure.
 A direct authentication rejection of the mutation retains its definitive failure outcome.
 See the [Pulse API reference](https://help.tableau.com/current/api/rest_api/en-us/REST/rest_api_ref_pulse.htm) for the supported subscription endpoint.
 Deletion review uses names and metric identities from the immutable inventory snapshot without changing reviewed IDs or fingerprints.
@@ -359,15 +453,15 @@ PNG decoding and CRC validation use `pngjs`; resource guards reject oversized di
 Metric Manager preview images remain in memory and are discarded when the context or inventory changes.
 Publication confirmations reuse bounded owner/receipt/item-state previews when canceled; explicit refresh and relevant receipt mutations invalidate them.
 An unrelated Manager inventory replacement does not regenerate publication previews that already match their receipt and authenticated owner.
-Visibility reconciliation retains successful ownership evidence and polls only unresolved visibility evidence within the operation.
-Exact-metric or listing HTTP 404 responses and complete listings that omit the metric remain propagation evidence for visibility polling.
-Other failed reads and incomplete listings that omit the metric stop visibility polling without restarting transport retries.
+Publication retains its independent bounded default-metric resolution before following, as described in the publication workflow.
 Sources that converge to the same definition and destination specification share one creation; aliases do not gain duplicate creation or undo ownership.
 Final destination identity includes retained filters and the selected or inherited timeframe; selecting another source never merges different destination specifications.
-Variant writes and visibility confirmation run in sequential groups of up to five destinations, including each request's bounded transport retries.
+Variant writes run in sequential groups of up to five destinations, including each request's bounded transport retries.
 Source reads retain their bounded worker pool.
 Explicit validation, authentication, permission, conflict, and throttling rejections are failed creations; timeouts, connection failures, server errors, and missing identifiers remain unknown.
-Creation and visibility outcomes appear separately, and shared destinations retain their source mappings without multiplying destination counts.
+Unsent local refusals remain distinct from failed or unknown writes.
+Shared destinations retain their source mappings without multiplying destination counts.
+Publication default-metric resolution, receipts, and undo remain independent of Manager variant patches.
 The card uses the unique successful BAN summary sparkline, one successful period-over-period insight, and the highest-scored successful supporting insight.
 Tableau supplies the chart, facts, and markup.
 Springboard requests specify bundle version `1`; card image requests use Tableau's default locale.
@@ -528,10 +622,24 @@ The [audit recommendation](ARCHITECTURE_AUDIT.md#findings-and-recommendations) s
 
 ## Diagnose failures
 
-Desktop and backend log files each retain one 1 MiB active file and two 1 MiB archives.
+Backend logs retain one 16 MiB active file and two 16 MiB archives.
+Desktop logs retain one 1 MiB active file and two 1 MiB archives.
 Fixed-size pipe readers bound continuous backend output; startup also bounds oversized files from older versions.
-This limits the two managed log sets to 6 MiB combined without retaining entire output lines in memory.
+This limits the two managed log sets to 51 MiB combined without retaining entire output lines in memory.
 Logging failures do not stop pipe consumption, and shutdown bounds the wait for reader threads.
+
+Tableau request diagnostics run at info level regardless of the configured log level.
+Core owns request context propagation and a single allowlist for diagnostic fields.
+Every outbound attempt records its endpoint, HTTP method, status, duration, attempt number, and retry reason.
+Request paths omit query strings and redact dynamic path segments except opaque resource identifiers.
+The diagnostics exclude credentials, tokens, request and response bodies, filter values, and arbitrary error text.
+Throttle events distinguish Tableau responses, shared cooldown waits, and local rejections that never reach Tableau.
+Pulse adds bounded counts and operation labels for inventory, dimensions, subscriptions, metric creation, and reconciliation.
+Server request IDs connect these events to the API request that triggered them.
+Successful routine health and local cooldown polls omit their API completion line; failed polls remain visible.
+Actual outbound Tableau attempts remain recorded independently of local polling.
+The larger backend budget preserves substantially more working-session history while retaining a fixed disk limit.
+See the [Tableau diagnostics test procedure](TABLEAU_REQUEST_DIAGNOSTICS.md) for build instructions, measurement steps, and log locations.
 
 For OpenCode, reproduce the same model with an ordinary CLI invocation before diagnosing account access.
 Reproduce the configured executable and prefix options before diagnosing native configuration, provider access, or tool permissions.

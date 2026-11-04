@@ -1,7 +1,11 @@
 import type { TableauSession } from '@pulse-metric-studio/core';
 import {
   getFieldCatalog,
+  assertTableauMutationAdmission,
+  getSessionContext,
+  isSessionCurrent,
   TableauError,
+  withTableauOperation,
 } from '@pulse-metric-studio/core';
 import type {
   PulseVariantRequestV1,
@@ -15,12 +19,13 @@ import {
   type CatalogField,
   type DatasourceCatalog,
 } from '@pulse-metric-studio/shared';
+import { mutationMetadata, latestThrottle } from '../application/mutation-metadata.js';
+import { exactMetricVariant } from '../application/inventory.js';
+import { patchPulseInventory, beginInventoryMutation, endInventoryMutation, resolveInventoryMutationBase } from '../application/inventory-snapshots.js';
+import { defaultSourceNamespace, resolveSourceContext, resolveSourceCatalog, type SourceContext } from './source-context.js';
 import { timeframeMeasurementPeriod } from '../domain/variants.js';
 import { pulseOperationErrorMessage, vdsCatalogFailureMessage } from './operation-errors.js';
 import { mergePulseStringFilter } from './dimensional-fork-service.js';
-import {
-  diagnosticMessage,
-} from './provider-diagnostics.js';
 import {
   getOrCreatePulseMetric,
   getPulseDefinition,
@@ -32,10 +37,7 @@ import {
 import {
   metricDefinitionId,
   metricSpecification,
-  reconcileMetricOwnership,
-  createMetricReconciliationOperation,
-  type MetricReconciliationResult,
-} from './reconciliation.js';
+} from './metric-facts.js';
 
 const PROVIDER_CONCURRENCY = 5;
 const providerFailureCount = Symbol('providerFailureCount');
@@ -75,23 +77,18 @@ export interface PulseForkPlanDependencies {
   getOrCreate(
     session: TableauSession,
     input: { definitionId: string; specification: Record<string, unknown> },
-  ): Promise<{ metricId: string | null; created: boolean }>;
-  reconcile(
-    session: TableauSession,
-    input: { metricId: string; definitionId: string; datasourceLuid: string },
-  ): Promise<MetricReconciliationResult>;
+  ): Promise<{ metricId: string | null; created: boolean; raw?: unknown }>;
+
 }
 
 const defaultDependencies: PulseForkPlanDependencies = {
   getMetric: getPulseMetric,
   getDefinition: getPulseDefinition,
   getCatalog: async (session, datasourceLuid) => {
-    // Execution revalidates the current field catalog and selected domain before any write.
-    return getFieldCatalog(session, datasourceLuid, undefined, { refresh: true });
+    return getFieldCatalog(session, datasourceLuid);
   },
   queryValues: queryPulseDimensionValues,
   getOrCreate: getOrCreatePulseMetric,
-  reconcile: reconcileMetricOwnership,
 };
 
 interface ResolvedSource {
@@ -134,41 +131,35 @@ export class PulseForkPlanService {
     input: unknown,
   ): Promise<PulseForkPlanSummary> {
     const request = canonicalizeForkPlanRequest(input);
-    const reconcile = this.dependencies === defaultDependencies
-      ? createMetricReconciliationOperation(session)
-      : (expected: Parameters<PulseForkPlanDependencies['reconcile']>[1]) => this.dependencies.reconcile(session, expected);
-    const requiresAllowedDimensions = request.clauses.length > 0;
-    const definitionPromises = new Map<string, Promise<PulseDefinition>>();
+    assertTableauMutationAdmission(session);
+    const sessionContext = getSessionContext(session);
+    const capturedSiteId = session.siteId;
+    const capturedCoordinates = JSON.stringify([session.serverUrl, session.siteId, session.userId]);
+    const current = () => getSessionContext(session) === sessionContext && JSON.stringify([session.serverUrl, session.siteId, session.userId]) === capturedCoordinates && (!sessionContext || isSessionCurrent(session));
+    const commandOwner = isRecord(input) && isRecord(input.context) ? input.context as import('@pulse-metric-studio/shared').PulseDraftContext : undefined;
+    const admittedSnapshotId = request.snapshotId && commandOwner ? resolveInventoryMutationBase(session, commandOwner, request.snapshotId) : undefined;
+    const admittedSequence = admittedSnapshotId && commandOwner ? beginInventoryMutation(session, commandOwner, admittedSnapshotId) : undefined;
+    try {
+    let sourceContext: SourceContext | undefined;
     const resolved: ResolvedSource[] = [];
     const failures: FailedResult[] = [];
 
-    const sourceOutcomes = await mapWithConcurrency(
-      request.sourceMetricIds,
-      PROVIDER_CONCURRENCY,
-      async (sourceMetricId): Promise<ResolvedSource | FailedResult> => {
-        try {
-          return await this.resolveSource(
-            session,
-            sourceMetricId,
-            definitionPromises,
-            requiresAllowedDimensions,
-          );
-        } catch (error) {
-          rethrowAuth(error);
-          return failedResult(
-            sourceMetricId,
-            error,
-            error instanceof TableauError,
-          );
-        }
-      },
-    );
+    let sourceOutcomes: Array<ResolvedSource | FailedResult>;
+    try {
+      sourceContext = await resolveSourceContext(session, request.sourceMetricIds, request, this.dependencies, this.dependencies === defaultDependencies ? defaultSourceNamespace : this.dependencies);
+      sourceOutcomes = [...sourceContext.sources, ...sourceContext.failures.map(failure => { rethrowAuth(failure.error); return failedResult(failure.metricId, failure.error, failure.error instanceof TableauError); })];
+    } catch (error) {
+      rethrowAuth(error);
+      sourceOutcomes = request.sourceMetricIds.map(id => failedResult(id, error, error instanceof TableauError));
+    }
+
     for (const outcome of sourceOutcomes) {
       if ('result' in outcome) failures.push(outcome);
       else resolved.push(outcome);
     }
 
     if (resolved.length === 0) return summarize(failures);
+
 
     const datasourceLuids = [
       ...new Set(resolved.map((source) => source.datasourceLuid)),
@@ -203,7 +194,7 @@ export class PulseForkPlanService {
         session,
         datasourceLuids[0]!,
         resolved,
-        request,
+        request, sourceContext,
       );
     } catch (error) {
       rethrowAuth(error);
@@ -274,13 +265,13 @@ export class PulseForkPlanService {
     };
     const planned = [...plans.values()];
     const createDestination = async ({ source, specification }: typeof planned[number]): Promise<PulseForkPlanResult | FailedResult> => {
-      let response: { metricId: string | null; created: boolean } | undefined;
+      let response: { metricId: string | null; created: boolean; raw?: unknown } | undefined;
       try {
         response = await this.dependencies.getOrCreate(session, {
           definitionId: source.definitionId,
           specification,
         });
-        if (!response.metricId) {
+        if (typeof response.created !== 'boolean' || typeof response.metricId !== 'string' || !response.metricId.trim()) {
           return failedResult(
             source.metricId,
             new Error(
@@ -293,18 +284,29 @@ export class PulseForkPlanService {
             { creationStatus: 'unknown' },
           );
         }
-        const reconciliation = await reconcile({
-          metricId: response.metricId,
-          definitionId: source.definitionId,
-          datasourceLuid: source.datasourceLuid,
-        });
-        return reconciledResult(
-          source.metricId,
-          response.metricId,
-          response.created,
-          specification,
-          reconciliation,
-        );
+        const creationStatus = response.created ? 'created' as const : 'existing' as const;
+        const raw = response.raw;
+        const providerMetric = isRecord(raw) && isRecord(raw.metric) ? raw.metric as PulseExactMetric : undefined;
+        try {
+          if (typeof response.created !== 'boolean' || typeof response.metricId !== 'string' || !response.metricId.trim()) throw new Error('Tableau returned invalid creation fields.');
+          if (providerMetric) {
+            if ((providerMetric.id !== undefined && providerMetric.id !== response.metricId) || (providerMetric.metadata?.id !== undefined && providerMetric.metadata.id !== response.metricId)) throw new Error('Tableau returned conflicting metric identifiers.');
+            const definitions = [providerMetric.definition_id, providerMetric.specification_reference?.definition_id, providerMetric.definition?.metadata?.id];
+            const sites = [providerMetric.site_id, providerMetric.site?.id];
+            if (definitions.some(id => id !== undefined && id !== source.definitionId) || sites.some(id => id !== undefined && id !== capturedSiteId)) throw new Error('Tableau returned conflicting metric ownership.');
+            for (const actualSpecification of [providerMetric.specification, providerMetric.metric_specification]) {
+              if (actualSpecification === undefined) continue;
+              if (!isRecord(actualSpecification)) throw new Error('Tableau returned an invalid metric specification.');
+              const actualDatasource = isRecord(actualSpecification.datasource) ? actualSpecification.datasource.id : undefined;
+              if (actualDatasource !== undefined && actualDatasource !== source.datasourceLuid) throw new Error('Tableau returned conflicting metric ownership.');
+              const comparable = structuredClone(actualSpecification); delete comparable.datasource;
+              if (canonicalDestination(comparable) !== canonicalDestination(specification)) throw new Error('Tableau returned a conflicting metric specification.');
+            }
+          }
+        } catch (error) { return failedResult(source.metricId, error, false, specification, response.metricId, 'ownership_mismatch', { creationStatus }); }
+        const metric = exactMetricVariant(response.metricId, {}, { ...providerMetric, id: response.metricId, definition_id: source.definitionId, specification: structuredClone(specification) });
+        return { sourceMetricId: source.metricId, definitionId: source.definitionId, status: creationStatus, creationStatus, sent: true, metricId: response.metricId, metric, requestedSpecification: specification };
+
       } catch (error) {
         if (error instanceof TableauError && error.kind === 'auth')
           mutationControl.stopped = true;
@@ -320,8 +322,8 @@ export class PulseForkPlanService {
               ? response.created
                 ? 'created'
                 : 'existing'
-              : confirmedCreationRejection(error) ? 'failed' : 'unknown',
-            ...(response?.metricId ? { reconciliationStatus: 'failed' } : {}),
+              : isUnsent(error) ? 'not_attempted' : confirmedCreationRejection(error) ? 'failed' : 'unknown',
+
           },
         );
       }
@@ -330,7 +332,7 @@ export class PulseForkPlanService {
     for (let offset = 0; offset < planned.length; offset += PROVIDER_CONCURRENCY) {
       created.push(...await Promise.all(
         planned.slice(offset, offset + PROVIDER_CONCURRENCY).map(plan =>
-          mutationControl.stopped ? mutationControl.notStarted(plan) : createDestination(plan)),
+          mutationControl.stopped || !current() ? mutationControl.notStarted(plan) : createDestination(plan)),
       ));
     }
 
@@ -357,78 +359,14 @@ export class PulseForkPlanService {
     }
     const summary = summarizeResults(results, providerFailures);
     if (mutationControl.stopped) summary.terminated = true;
+    if (admittedSnapshotId && commandOwner && current()) {
+      const upserts = results.flatMap(result => result.metric && result.definitionId && !result.sharedWithSourceMetricId ? [{ definitionId: result.definitionId, metric: result.metric }] : []);
+      if (upserts.length) summary.inventoryPatch = patchPulseInventory(session, commandOwner, admittedSnapshotId, { upserts, removedMetricIds: [], removedDefinitionIds: [] }, admittedSequence);
+    }
     return summary;
-  }
-
-  private async resolveSource(
-    session: TableauSession,
-    sourceMetricId: string,
-    definitionPromises: Map<string, Promise<PulseDefinition>>,
-    requiresAllowedDimensions: boolean,
-  ): Promise<ResolvedSource> {
-    const metric = await this.dependencies.getMetric(session, sourceMetricId);
-    const returnedMetricId = String(
-      metric.id ?? metric.metadata?.id ?? '',
-    ).trim();
-    if (returnedMetricId && returnedMetricId !== sourceMetricId) {
-      throw new Error(
-        `Exact metric endpoint returned ${returnedMetricId} for ${sourceMetricId}.`,
-      );
+    } finally {
+      if (admittedSnapshotId && commandOwner && admittedSequence !== undefined) endInventoryMutation(session, commandOwner, admittedSnapshotId);
     }
-    const sourceSiteId = metric.site_id ?? metric.site?.id;
-    if (sourceSiteId && sourceSiteId !== session.siteId) {
-      throw new Error(
-        `Exact source metric belongs to site ${sourceSiteId}, not ${session.siteId}.`,
-      );
-    }
-    const definitionId = metricDefinitionId(metric);
-    const specification = metricSpecification(metric);
-    if (!definitionId)
-      throw new Error('Exact source metric has no definition identifier.');
-    if (!specification)
-      throw new Error('Exact source metric has no specification.');
-
-    let definitionPromise = definitionPromises.get(definitionId);
-    if (!definitionPromise) {
-      definitionPromise = this.dependencies.getDefinition(
-        session,
-        definitionId,
-      );
-      definitionPromises.set(definitionId, definitionPromise);
-    }
-    const definition = await definitionPromise;
-    const returnedDefinitionId = String(definition.metadata?.id ?? '').trim();
-    if (returnedDefinitionId && returnedDefinitionId !== definitionId) {
-      throw new Error(
-        `Tableau returned definition ${returnedDefinitionId} for ${definitionId}.`,
-      );
-    }
-    const datasourceLuid = String(
-      definition.specification?.datasource?.id ?? '',
-    ).trim();
-    if (!datasourceLuid)
-      throw new Error(
-        `Definition ${definitionId} has no datasource identifier.`,
-      );
-    const allowedDimensions = definition.extension_options?.allowed_dimensions;
-    if (requiresAllowedDimensions && !Array.isArray(allowedDimensions)) {
-      throw new Error(
-        `Definition ${definitionId} has no allowed_dimensions catalog.`,
-      );
-    }
-    return {
-      metricId: sourceMetricId,
-      definitionId,
-      datasourceLuid,
-      allowedDimensions: new Set(
-        Array.isArray(allowedDimensions)
-          ? allowedDimensions.filter(
-              (value): value is string => typeof value === 'string',
-            )
-          : [],
-      ),
-      specification,
-    };
   }
 
   private async resolveClauses(
@@ -436,9 +374,10 @@ export class PulseForkPlanService {
     datasourceLuid: string,
     sources: ResolvedSource[],
     request: PulseForkPlanRequestV1,
+    sourceContext?: SourceContext,
   ): Promise<ResolvedClause[]> {
     if (request.clauses.length === 0) return [];
-    const catalog = await this.dependencies.getCatalog(session, datasourceLuid);
+    const catalog = sourceContext ? await resolveSourceCatalog(session, sourceContext, this.dependencies) : await withTableauOperation('fork_catalog', () => this.dependencies.getCatalog(session, datasourceLuid));
     if (catalog.source !== 'vds') {
       throw new Error(
         vdsCatalogFailureMessage(catalog),
@@ -464,12 +403,12 @@ export class PulseForkPlanService {
       // Validate the selected values with a targeted set-filter query bounded by
       // the selection size, not the domain size. This confirms values from
       // large (search-required) dimensions that lie beyond any bounded listing.
-      const rows = await this.dependencies.queryValues(session, {
+      const rows = await withTableauOperation('fork_filter_validation', () => this.dependencies.queryValues(session, {
         datasourceLuid,
         fieldName: clause.fieldName,
         rowLimit: clause.values.length,
         matchValues: clause.values,
-      });
+      }));
       const present = normalizedDomain(rows);
       if (clause.values.some((value) => !present.has(value))) {
         throw new Error(
@@ -573,6 +512,8 @@ export function canonicalizeForkPlanRequest(
   return {
     version: 1,
     sourceMetricIds,
+    ...(typeof input.snapshotId === 'string' ? { snapshotId: input.snapshotId } : {}),
+    ...(typeof input.sourceContextId === 'string' ? { sourceContextId: input.sourceContextId } : {}),
     ...(timeframe ? { timeframe } : {}),
     clauses: [...clausesByField.entries()]
       .sort(([left], [right]) => compareCanonicalStrings(left, right))
@@ -589,7 +530,8 @@ export function canonicalizeForkPlanRequest(
 
 export function forkPlanHttpStatus(
   summary: PulseForkPlanSummary,
-): 200 | 207 | 422 | 502 {
+): 200 | 207 | 422 | 429 | 502 {
+  if (summary.throttle && summary.results.every(result => result.sent === false)) return 429;
   if (summary.failed === 0) return 200;
   if (summary.created + summary.existing > 0) return 207;
   const destinations = summary.results.filter(result => !result.sharedWithSourceMetricId).length;
@@ -624,61 +566,6 @@ function eligibleFieldsById(
   );
 }
 
-function reconciledResult(
-  sourceMetricId: string,
-  metricId: string,
-  created: boolean,
-  requestedSpecification: Record<string, unknown>,
-  reconciliation: MetricReconciliationResult,
-): PulseForkPlanResult | FailedResult {
-  const creationStatus = created ? ('created' as const) : ('existing' as const);
-  const resultContext = {
-    creationStatus,
-    reconciliationStatus: reconciliation.status,
-  };
-  if (reconciliation.status === 'ownership_mismatch') {
-    return failedResult(
-      sourceMetricId,
-      new Error(
-        reconciliation.diagnostic?.message ??
-          'Metric ownership does not match the requested source.',
-      ),
-      false,
-      requestedSpecification,
-      metricId,
-      'ownership_mismatch',
-      resultContext,
-    );
-  }
-  if (reconciliation.status === 'failed') {
-    return failedResult(
-      sourceMetricId,
-      new Error(
-        reconciliation.diagnostic
-          ? reconciliationError(reconciliation.diagnostic)
-          : 'Metric reconciliation failed.',
-      ),
-      true,
-      requestedSpecification,
-      metricId,
-      'failed',
-      resultContext,
-    );
-  }
-  return {
-    sourceMetricId,
-    status: reconciliation.status,
-    ...resultContext,
-    metricId,
-    requestedSpecification,
-  };
-}
-
-function reconciliationError(diagnostic: import('./provider-diagnostics.js').PulseProviderDiagnostic): string {
-  if (diagnostic.status === undefined) return diagnosticMessage(diagnostic);
-  return pulseOperationErrorMessage(new TableauError(diagnostic.message, diagnostic.status, diagnostic.detail, diagnostic.kind ?? 'http', diagnostic.providerCode), 'visibility');
-}
-
 function failedResult(
   sourceMetricId: string,
   error: unknown,
@@ -686,15 +573,14 @@ function failedResult(
   requestedSpecification: Record<string, unknown> = {},
   metricId?: string,
   status: 'failed' | 'ownership_mismatch' = 'failed',
-  context: Pick<
-    PulseForkPlanResult,
-    'creationStatus' | 'reconciliationStatus'
-  > = {},
+  context: Pick<PulseForkPlanResult, 'creationStatus' | 'reconciliationStatus'> = {},
 ): FailedResult {
   return {
     result: {
       sourceMetricId,
       status,
+      creationStatus: 'not_attempted',
+      ...mutationMetadata(error, context.creationStatus === undefined || context.creationStatus === 'not_attempted'),
       ...context,
       ...(metricId ? { metricId } : {}),
       requestedSpecification,
@@ -719,7 +605,9 @@ function summarizeResults(
     compareCanonicalStrings(left.sourceMetricId, right.sourceMetricId),
   );
   const destinations = ordered.filter(result => !result.sharedWithSourceMetricId);
+  const throttle = latestThrottle(destinations);
   const summary: InternalPulseForkPlanSummary = {
+    ...(throttle ? { throttle, sent: destinations.some(result => result.sent === true) } : {}),
     attempted: ordered.length,
     notAttempted: destinations.filter(
       (result) => result.creationStatus === 'not_attempted',
@@ -880,3 +768,5 @@ function invalidRequest(message: string): PulseForkPlanError {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
+
+function isUnsent(error: unknown): boolean { return error !== null && typeof error === 'object' && 'sent' in error && error.sent === false; }

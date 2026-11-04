@@ -77,3 +77,14 @@ test('reactivation at identical coordinates reloads the definition inventory for
   await loadPulseInventory(session, owner.datasourceLuid);
   assert.equal(reads - before, 3);
 });
+
+
+test('owner-state eviction starts a unique revision lifetime', async () => {
+  const first = await loadPulseInventory(session, owner.datasourceLuid);
+  for (let index = 0; index < 32; index++) await loadPulseInventory(session, `other-datasource-${index}`);
+  const replacement = await loadPulseInventory(session, owner.datasourceLuid);
+  assert.ok(first.lifetimeId);
+  assert.ok(replacement.lifetimeId);
+  assert.notEqual(first.lifetimeId, replacement.lifetimeId);
+  assert.equal(replacement.revision, 1);
+});

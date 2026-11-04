@@ -1,7 +1,7 @@
 import { PNG } from 'pngjs';
 import { postJson, TableauError, type TableauSession } from '@pulse-metric-studio/core';
 import type { PulseDefinition, PulseExactMetric } from './pulse-client.js';
-import { metricSpecification } from './reconciliation.js';
+import { metricSpecification } from './metric-facts.js';
 
 const MAX_BUNDLE_BYTES = 4 * 1024 * 1024;
 const MAX_PNG_BYTES = 4 * 1024 * 1024;

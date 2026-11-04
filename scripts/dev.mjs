@@ -35,7 +35,8 @@ export function resolveNpmInvocation(env = process.env) {
 export function resolveTauriInvocation(rootDir = root) {
   return {
     command: process.execPath,
-    argsPrefix: [path.join(rootDir, 'node_modules', '@tauri-apps', 'cli', 'tauri.js')],
+    // Desktop navigation and IPC trust the bundled asset origin in every build.
+    args: [path.join(rootDir, 'node_modules', '@tauri-apps', 'cli', 'tauri.js'), 'dev', '--no-dev-server'],
   };
 }
 
@@ -105,10 +106,7 @@ async function runDesktop() {
     path.join(root, 'scripts', 'copy-resources.mjs'),
   ]);
   const tauri = resolveTauriInvocation();
-  await runAndWait('tauri', tauri.command, [
-    ...tauri.argsPrefix,
-    'dev',
-  ]);
+  await runAndWait('tauri', tauri.command, tauri.args);
 }
 
 function runWatcher(name, workspace, script) {

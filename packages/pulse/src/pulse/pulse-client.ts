@@ -1,6 +1,6 @@
 interface PulseDefinitionResponse { definition?: { metadata?: { id?: string; name?: string } } }
 import type { TableauSession } from '@pulse-metric-studio/core';
-import { TableauError,TableauResponseSizeError,apiPath,deleteReq,getJson,isPastEndError,postJson } from '@pulse-metric-studio/core';
+import { TableauError,TableauResponseSizeError,apiPath,deleteReq,getJson,isPastEndError,postJson,logTableauEvent,withTableauOperation } from '@pulse-metric-studio/core';
 import { boundedProviderDiagnostic,type PulseProviderDiagnostic } from './provider-diagnostics.js';
 import { pulseOperationErrorMessage } from './operation-errors.js';
 
@@ -248,13 +248,15 @@ export async function getOrCreatePulseMetric(
     definition_id: input.definitionId,
     specification: input.specification,
   };
-  const data = await postJson<any>(session, `${PULSE}/metrics:getOrCreate`, body, {
+  const data = await withTableauOperation('get_or_create', () => postJson<any>(session, `${PULSE}/metrics:getOrCreate`, body, {
     accept: 'application/vnd.tableau.metricqueryservice.v1.GetOrCreateMetricResponse+json',
     contentType: 'application/vnd.tableau.metricqueryservice.v1.GetOrCreateMetricRequest+json',
-  });
+  }));
   const created = requireMetricCreatedFlag(data);
+  const metricId = data?.metric?.metadata?.id ?? data?.metric?.id ?? null;
+  logTableauEvent({ event: 'tableau.get_or_create', metricId, isMetricCreated: created });
   return {
-    metricId: data?.metric?.metadata?.id ?? data?.metric?.id ?? null,
+    metricId,
     metricApiName: data?.metric?.metadata?.name ?? data?.metric?.name,
     created,
     raw: data,
@@ -402,6 +404,7 @@ function hasVdsError(error: unknown): boolean {
 export type PulseFollowerType = 'USER' | 'GROUP' | 'UNKNOWN';
 
 export interface SubscriptionRecord {
+  metricId?: string;
   id?: string;
   follower: {
     id: string;
@@ -415,26 +418,32 @@ export function normalizeSubscriptionEnvelope(data: unknown): SubscriptionRecord
   return records.map((record, index) => normalizeSubscriptionRecord(record, index));
 }
 
+export interface SubscriptionPage { subscriptions: SubscriptionRecord[]; nextPageToken: string | null }
+export async function listSubscriptionPage(session: TableauSession, input: { metricId?: string; userId?: string; pageToken?: string }): Promise<SubscriptionPage> {
+  const query = new URLSearchParams({ page_size: '100' });
+  if (input.metricId) query.set('metric_id', input.metricId);
+  if (input.userId) query.set('user_id', input.userId);
+  if (input.pageToken) query.set('page_token', input.pageToken);
+  const data = await withTableauOperation('subscriptions', () => getJson<unknown>(session, `${PULSE}/subscriptions?${query}`));
+  const subscriptions = normalizeSubscriptionEnvelope(data);
+  const next = isRecord(data) ? data.next_page_token : undefined;
+  if (next !== undefined && next !== '' && (typeof next !== 'string' || !next.trim())) throw new TableauError('Pulse follower inventory has an invalid continuation.', 502);
+  if (!input.metricId && subscriptions.some(record => !record.metricId)) throw new TableauError('Site subscriptions require metric identifiers.', 502);
+  return { subscriptions: subscriptions.map(record => input.metricId ? { ...record, metricId: record.metricId ?? input.metricId } : record), nextPageToken: typeof next === 'string' && next ? next : null };
+}
 export async function listSubscriptionsForMetric(session: TableauSession, metricId: string): Promise<SubscriptionRecord[]> {
-  const subscriptions: SubscriptionRecord[] = [];
-  const seenTokens = new Set<string>();
-  let token = '';
-  for (let page = 0; page < 1000; page++) {
-    const query = new URLSearchParams({ metric_id: metricId });
-    if (token) query.set('page_token', token);
-    const data = await getJson<unknown>(session, `${PULSE}/subscriptions?${query}`);
-    const records = normalizeSubscriptionEnvelope(data);
-    subscriptions.push(...records);
-    const next = isRecord(data) ? data.next_page_token : undefined;
-    if (next === undefined || next === '') return subscriptions;
-    if (typeof next !== 'string' || !next.trim() || seenTokens.has(next) || !records.length)
-      throw new TableauError('Pulse follower inventory has an invalid continuation.', 502);
-    if (subscriptions.length > 100000)
-      throw new TableauError('Pulse follower inventory exceeds the local read limit.', 502);
-    seenTokens.add(next);
-    token = next;
+  const subscriptions: SubscriptionRecord[] = [], tokens = new Set<string>();
+  let pageToken: string | undefined;
+  for (let page = 0; page < 20; page++) {
+    const result = await listSubscriptionPage(session, { metricId, pageToken });
+    subscriptions.push(...result.subscriptions);
+    logTableauEvent({ event: 'tableau.subscriptions_page', metricId, page: page + 1, recordCount: result.subscriptions.length, hasNextPage: Boolean(result.nextPageToken) });
+    if (!result.nextPageToken) return subscriptions;
+    if (tokens.has(result.nextPageToken) || !result.subscriptions.length) throw new TableauError('Pulse follower inventory has an invalid continuation.', 502);
+    if (subscriptions.length >= 2000) throw new TableauError('Pulse follower inventory is partial at the local record limit.', 502);
+    tokens.add(result.nextPageToken); pageToken = result.nextPageToken;
   }
-  throw new TableauError('Pulse follower inventory continuation exceeds the local read limit.', 502);
+  throw new TableauError('Pulse follower inventory is partial at the local page limit.', 502);
 }
 
 export interface SubscriptionWriteTarget {
@@ -443,6 +452,8 @@ export interface SubscriptionWriteTarget {
   targetType: 'USER' | 'GROUP';
 }
 export interface SubscriptionWriteResult {
+  sent?: boolean;
+  throttle?: import('@pulse-metric-studio/shared').TableauThrottleMetadata;
   metricId: string;
   targetId: string;
   targetType?: 'USER' | 'GROUP';
@@ -452,6 +463,7 @@ export interface SubscriptionWriteResult {
   error?: string;
 }
 export class SubscriptionBatchInterrupted extends TableauError {
+  readonly throttle?: import('@pulse-metric-studio/shared').TableauThrottleMetadata;
   readonly failed: { metricId: string; targetId: string };
   constructor(
     cause: TableauError,
@@ -460,7 +472,8 @@ export class SubscriptionBatchInterrupted extends TableauError {
     public readonly failedTargets: SubscriptionWriteTarget[] = [],
     public readonly phase: 'submission' | 'confirmation' = 'submission',
   ) {
-    super(cause.message, cause.status, cause.bodySnippet, cause.kind, cause.providerCode, cause.providerInfo);
+    super(cause.message, cause.status, cause.bodySnippet, cause.kind, cause.providerCode, cause.providerInfo, cause.sent);
+    if ('throttle' in cause) this.throttle = (cause as TableauError & { throttle: import('@pulse-metric-studio/shared').TableauThrottleMetadata }).throttle;
     this.failed = failed;
   }
 }
@@ -491,6 +504,7 @@ export async function batchCreateSubscriptions(session: TableauSession, items: S
         try { records = normalizeSubscriptionEnvelope({ subscriptions: subscriptionRecords(data).filter((record) => record.metric_id === undefined || record.metric_id === metricId) }); }
         catch { records = []; }
       } catch (error) {
+        if (error instanceof TableauError && error.status === 429) throw new SubscriptionBatchInterrupted(error, results, batch[0]!, batch);
         if (!(error instanceof TableauError) || error.kind === 'auth' || error.kind === 'network' || error.status >= 500) {
           const cause = error instanceof TableauError ? error : new TableauError('Subscription batch outcome is unknown.', 502);
           throw new SubscriptionBatchInterrupted(cause, results, batch[0]!, batch);
@@ -503,7 +517,7 @@ export async function batchCreateSubscriptions(session: TableauSession, items: S
           // A conflict says nothing about the other submitted identities. Read evidence, never replay writes.
           try { records = await listSubscriptionsForMetric(session, metricId); alreadyExists = true; }
           catch (verificationError) {
-            if (verificationError instanceof TableauError && verificationError.kind === 'auth')
+            if (verificationError instanceof TableauError && (verificationError.kind === 'auth' || verificationError.status === 429))
               throw new SubscriptionBatchInterrupted(verificationError, results, batch[0]!, batch, 'confirmation');
             records = [];
           }
@@ -776,6 +790,7 @@ function normalizeSubscriptionRecord(record: Record<string, unknown>, index: num
   );
   return {
     ...(subscriptionId ? { id: subscriptionId } : {}),
+    ...(stringValue(record.metric_id ?? nestedSubscription?.metric_id ?? (isRecord(record.metric) ? record.metric.id ?? (isRecord(record.metric.metadata) ? record.metric.metadata.id : undefined) : undefined)) ? { metricId: stringValue(record.metric_id ?? nestedSubscription?.metric_id ?? (isRecord(record.metric) ? record.metric.id ?? (isRecord(record.metric.metadata) ? record.metric.metadata.id : undefined) : undefined)) } : {}),
     follower: { id, type, ...(name ? { name } : {}) },
   };
 }

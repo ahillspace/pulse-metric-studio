@@ -6,6 +6,7 @@ import { assertSafeLlmEndpoint, UnsafeLlmEndpointError } from './network-policy.
 import { guardedFetch } from './guarded-fetch.js';
 import { resolveProfileHeaders, resolveProfileSecret } from './credential.js';
 import { readProviderErrorDetail, withProviderDetail } from './error-detail.js';
+import { readProviderBodyChunk } from './response-body.js';
 
 type Fetch = typeof fetch;
 type EndpointPolicy = (endpoint: string, allowPrivateNetwork: boolean) => Promise<void>;
@@ -112,19 +113,19 @@ export class HttpLlmProvider {
 
     let data: any;
     try {
+      const timeout = AbortSignal.timeout(opts.timeoutMs ?? LLM_REQUEST_TIMEOUT_MS);
+      const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
       // The default client re-checks every resolved address when it connects.
       const send = this.fetchImpl ?? guardedFetch(this.profile.allowPrivateNetwork ?? false);
       const response = await send(url, {
         method: 'POST',
         headers,
         body: JSON.stringify(requestBody(this.profile, opts)),
-        signal: opts.signal
-          ? AbortSignal.any([opts.signal, AbortSignal.timeout(opts.timeoutMs ?? LLM_REQUEST_TIMEOUT_MS)])
-          : AbortSignal.timeout(opts.timeoutMs ?? LLM_REQUEST_TIMEOUT_MS),
+        signal,
         redirect: 'error',
       });
-      if (!response.ok) throw httpProviderError(response, await readProviderErrorDetail(response, [token, ...Object.values(extraHeaders)]), this.id, this.profile.model, this.label);
-      data = await readJsonResponse(response, this.id, this.profile.model);
+      if (!response.ok) throw httpProviderError(response, await readProviderErrorDetail(response, [token, ...Object.values(extraHeaders)], signal), this.id, this.profile.model, this.label);
+      data = await readJsonResponse(response, this.id, this.profile.model, signal);
     } catch (error) {
       opts.signal?.throwIfAborted();
       if (error instanceof LlmProviderError) throw error;
@@ -246,15 +247,16 @@ function httpProviderError(response: Response, detail: string | undefined, provi
   });
 }
 
-async function readJsonResponse(response: Response, provider: string, model: string): Promise<any> {
+async function readJsonResponse(response: Response, provider: string, model: string, signal: AbortSignal): Promise<any> {
   const maxBytes = 2_000_000;
   const reader = response.body?.getReader();
+  if (!reader) signal.throwIfAborted();
   const chunks: Uint8Array[] = [];
   let bytes = 0;
   if (reader) {
     try {
       while (true) {
-        const { done, value } = await reader.read();
+        const { done, value } = await readProviderBodyChunk(reader, signal);
         if (done) break;
         bytes += value.byteLength;
         if (bytes > maxBytes) {
@@ -263,7 +265,7 @@ async function readJsonResponse(response: Response, provider: string, model: str
         chunks.push(value);
       }
     } catch (error) {
-      await reader.cancel().catch(() => undefined);
+      void reader.cancel().catch(() => undefined);
       throw error;
     } finally {
       reader.releaseLock();

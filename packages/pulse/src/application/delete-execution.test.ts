@@ -113,6 +113,7 @@ test('reviewed metric deletion waits for each group of five before sending the n
 
 test('reviewed metric deletion keeps throttling retries inside the current group', async () => {
   const retry = deferred();
+  const retryStarted = deferred();
   const attempts = new Map<string, number>();
   const start = await reviewedDeletion();
   globalThis.fetch = async (input, init) => {
@@ -125,13 +126,14 @@ test('reviewed metric deletion keeps throttling retries inside the current group
     attempts.set(id, attempt);
     if (id === metricIds[0]) {
       if (attempt === 1) return new Response('{}', { status: 429, headers: { 'Retry-After': '0' } });
+      retryStarted.resolve();
       await retry.promise;
     }
     return new Response(null, { status: 204 });
   };
   const operation = start();
   try {
-    await setImmediate();
+    await retryStarted.promise;
     assert.equal(attempts.get(metricIds[0]), 2, 'A provider-rejected DELETE must still retry.');
     assert.deepEqual([...attempts.keys()], metricIds.slice(0, 5));
     retry.resolve();

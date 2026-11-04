@@ -18,10 +18,14 @@ test('development accepts workspace or desktop mode and rejects extra arguments'
   assert.throws(() => parseDevArgs(['--unknown']), /Usage:/);
 });
 
-test('desktop launch invokes the local Tauri CLI through Node', () => {
+test('desktop launch serves bundled assets through the local Tauri CLI without a dev server', () => {
   const invocation = resolveTauriInvocation(root);
   assert.equal(invocation.command, process.execPath);
-  assert.equal(invocation.argsPrefix[0], path.join(root, 'node_modules', '@tauri-apps', 'cli', 'tauri.js'));
+  assert.deepEqual(invocation.args, [
+    path.join(root, 'node_modules', '@tauri-apps', 'cli', 'tauri.js'),
+    'dev',
+    '--no-dev-server',
+  ]);
 });
 
 test('Tauri packaging references existing icons and includes the bundled runtime', () => {

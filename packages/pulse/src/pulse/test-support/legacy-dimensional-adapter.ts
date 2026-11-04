@@ -10,7 +10,6 @@ import {
   fingerprintValues,
   type PulseDimensionalForkDependencies as QueryDependencies,
 } from '../dimensional-fork-service.js';
-import type { MetricReconciliationResult } from '../reconciliation.js';
 const providerFailureCount = Symbol('providerFailureCount');
 type InternalDimensionalForkSummary = DimensionalForkSummary & {
   [providerFailureCount]?: number;
@@ -24,10 +23,7 @@ export interface PulseDimensionalForkDependencies extends QueryDependencies {
     metricApiName?: string;
     created: boolean;
   }>;
-  reconcile(
-    session: TableauSession,
-    input: { metricId: string; definitionId: string; datasourceLuid: string },
-  ): Promise<MetricReconciliationResult>;
+
 }
 export class PulseDimensionalForkService extends DimensionQueries {
   constructor(
@@ -92,10 +88,6 @@ export class PulseDimensionalForkService extends DimensionQueries {
           ? { createdApiName: responseNames.get(result.metricId) }
           : {}),
         requestedSpecification: result.requestedSpecification,
-        reconciliationStatus: result.reconciliationStatus,
-        ownershipVerified: result.reconciliationStatus === 'visible',
-        exactMetricResolved: result.reconciliationStatus === 'visible',
-        inventoryVisible: result.reconciliationStatus === 'visible',
         ...(result.error ? { error: result.error } : {}),
       })),
     };

@@ -1,16 +1,28 @@
 import type { FollowState } from './registry/view-types';
 
+/** Coverage belongs to the retained metrics, never to the last completed batch. */
+function withFollowCoverage(state: FollowState, requested = Boolean(state.coverage)): FollowState {
+  const metrics = Object.values(state.availabilityByMetricId ?? {});
+  if (!requested && !metrics.some(metric => metric.canLoadMore !== undefined)) return state;
+  const statuses = metrics.map(metric => metric.relationshipStatus ?? metric.status);
+  return { ...state, coverage: {
+    status: statuses.every(status => status === 'available') ? 'available'
+      : statuses.length && statuses.every(status => status === 'unavailable') ? 'unavailable' : 'partial',
+    canLoadMore: metrics.some(metric => metric.canLoadMore === true),
+  } };
+}
+
 /** Restrict evidence before merging it so an obsolete overlapping metric cannot leak through. */
 export function selectFollowMetrics(state: FollowState, metricIds: string[]): FollowState {
   const selected = new Set(metricIds);
   const select = <T>(values: Record<string, T> | undefined): Record<string, T> =>
     Object.fromEntries(Object.entries(values ?? {}).filter(([id]) => selected.has(id)));
-  return { ...state,
+  return withFollowCoverage({ ...state,
     userFollowsByMetricId: select(state.userFollowsByMetricId), groupFollowsByMetricId: select(state.groupFollowsByMetricId),
     userFollowerIdsByMetricId: select(state.userFollowerIdsByMetricId), groupFollowerIdsByMetricId: select(state.groupFollowerIdsByMetricId),
     followerCountsByMetricId: select(state.followerCountsByMetricId), availabilityByMetricId: select(state.availabilityByMetricId),
     errors: state.errors.filter(error => metricIds.some(id => error.startsWith(`${id}:`))),
-  };
+  });
 }
 
 /** A failed targeted replacement must not leave old identities looking current. */
@@ -27,6 +39,19 @@ export function replaceFollowMetrics(previous: FollowState | null, replacement: 
   }
   retained.errors = retained.errors.filter((error) => !metricIds.some((id) => error.startsWith(`${id}:`)));
   return mergeFollowStates([retained, replacement]);
+}
+
+/** Detail-only reads never erase independently acquired summary counts. */
+export function replaceFollowDetails(previous: FollowState | null, replacement: FollowState, metricIds: string[]): FollowState {
+  const result = replaceFollowMetrics(previous, replacement, metricIds);
+  if (!previous) return result;
+  for (const id of metricIds) {
+    if (replacement.availabilityByMetricId?.[id]?.followerCountStatus !== 'not_requested') continue;
+    if (Object.hasOwn(previous.followerCountsByMetricId, id)) result.followerCountsByMetricId[id] = previous.followerCountsByMetricId[id]!;
+    const availability = result.availabilityByMetricId?.[id];
+    if (availability) result.availabilityByMetricId![id] = { ...availability, followerCountStatus: previous.availabilityByMetricId?.[id]?.followerCountStatus ?? 'not_requested' };
+  }
+  return result;
 }
 
 export function mergeFollowStates(states: FollowState[]): FollowState {
@@ -48,7 +73,7 @@ export function mergeFollowStates(states: FollowState[]): FollowState {
     merged.errors.push(...state.errors);
     merged.groupContextUnavailable ||= state.groupContextUnavailable;
   }
-  return merged;
+  return withFollowCoverage(merged, states.some(state => Boolean(state.coverage)));
 }
 
 export function metricIsFollowed(followState: FollowState | null, metricId: string): boolean {
@@ -74,7 +99,7 @@ export function followStateLabel(followState: FollowState | null, metricId: stri
       ? 'You follow'
       : groupFollows
         ? 'Group follows'
-        : relationshipStatus === 'not_requested'
+        : (relationshipStatus === 'not_requested' || !relationshipStatus)
           ? 'Follow details not loaded'
         : relationshipStatus === 'unavailable'
           ? 'Follow state unavailable'

@@ -14,12 +14,18 @@ function profile(baseUrl: string, id = 'fixture-http'): StoredLlmProfile {
 async function fixture(t: TestContext, handle: (res: http.ServerResponse) => void) {
   let requests = 0;
   let received!: () => void;
-  const headersReceived = new Promise<void>(resolve => { received = resolve; });
+  let failed!: (error: unknown) => void;
+  const headersReceived = new Promise<void>((resolve, reject) => { received = resolve; failed = reject; });
+  // Some tests observe only the operation; their readiness failure is still handled.
+  void headersReceived.catch(() => {});
   const server = http.createServer((_req, res) => { requests++; handle(res); });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); });
   const configured = profile(`http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}`);
-  const provider = new HttpLlmProvider(configured, async (url, init) => { const response = await fetch(url, init); received(); return response; }, async () => {});
+  const provider = new HttpLlmProvider(configured, async (url, init) => {
+    try { const response = await fetch(url, init); received(); return response; }
+    catch (error) { failed(error); throw error; }
+  }, async () => {});
   return { provider, headersReceived, requests: () => requests };
 }
 
@@ -28,6 +34,59 @@ function partial(res: http.ServerResponse) {
   res.flushHeaders();
   res.write('{"choices":[');
 }
+
+test('fixture readiness rejects when a request times out before response headers', { timeout: 3000 }, async (t) => {
+  const f = await fixture(t, () => {});
+  const operation = f.provider.complete({ messages: [], timeoutMs: 100 });
+  const [ready, completed] = await Promise.allSettled([f.headersReceived, operation]);
+  assert.equal(f.requests(), 1);
+  assert.equal(ready.status, 'rejected');
+  assert.equal(completed.status, 'rejected');
+  if (ready.status !== 'rejected' || completed.status !== 'rejected') return;
+  assert.ok(completed.reason instanceof LlmProviderError);
+  assert.equal(completed.reason.code, 'provider_timeout');
+  assert.equal(completed.reason.cause, ready.reason, 'readiness reports the actual fetch failure');
+  assert.equal(ready.reason.name, 'TimeoutError');
+});
+
+for (const [status, code] of [[200, 'provider_timeout'], [401, 'provider_authentication'], [429, 'provider_quota']] as const) {
+  test(`HTTP ${status} body obeys the operation deadline when the fetch adapter does not propagate abort`, { timeout: 3000 }, async () => {
+    let cancelled = false;
+    const response = new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new TextEncoder().encode('{')); },
+      cancel() { cancelled = true; return new Promise(() => {}); },
+    }), { status, headers: { 'request-id': 'fixture-request' } });
+    const provider = new HttpLlmProvider(profile('https://fixture.example.test'), async () => response, async () => {});
+    await assert.rejects(provider.complete({ messages: [], timeoutMs: 30 }), (error: unknown) => {
+      assert.ok(error instanceof LlmProviderError);
+      assert.equal(error.code, code);
+      if (status !== 200) assert.equal(error.reference, 'fixture-request');
+      return true;
+    });
+    assert.equal(cancelled, true);
+    assert.equal(response.body?.locked, false, 'deadline cleanup releases the reader without waiting for adapter cancellation');
+  });
+}
+
+test('caller cancellation wins during an abort-ignoring error body and preserves its reason', { timeout: 3000 }, async () => {
+  let reading!: () => void;
+  const bodyStarted = new Promise<void>(resolve => { reading = resolve; });
+  let cancelled = false;
+  const response = new Response(new ReadableStream({
+    start(controller) { controller.enqueue(new TextEncoder().encode('{')); },
+    pull() { reading(); },
+    cancel() { cancelled = true; return new Promise(() => {}); },
+  }), { status: 401 });
+  const provider = new HttpLlmProvider(profile('https://fixture.example.test'), async () => response, async () => {});
+  const controller = new AbortController();
+  const reason = new Error('The caller canceled this operation.');
+  const rejected = assert.rejects(provider.complete({ messages: [], signal: controller.signal }), (error: unknown) => error === reason);
+  await bodyStarted;
+  controller.abort(reason);
+  await rejected;
+  assert.equal(cancelled, true);
+  assert.equal(response.body?.locked, false);
+});
 
 test('a successful-header body timeout is a typed provider timeout', async (t) => {
   const f = await fixture(t, partial);
@@ -40,8 +99,7 @@ test('a successful-header body timeout is a typed provider timeout', async (t) =
     assert.equal(error.retryable, true);
     return true;
   });
-  await f.headersReceived;
-  await rejected;
+  await Promise.all([f.headersReceived, rejected]);
   assert.equal(f.requests(), 1);
 });
 
@@ -82,9 +140,7 @@ test('caller cancellation wins over a known error status', async (t) => {
   const reason = new Error('The caller canceled this operation.');
   const operation = f.provider.complete({ messages: [], timeoutMs: 3000, signal: controller.signal });
   const rejected = assert.rejects(operation, (error: unknown) => error === reason);
-  await f.headersReceived;
-  controller.abort(reason);
-  await rejected;
+  await Promise.all([f.headersReceived.then(() => controller.abort(reason)), rejected]);
   assert.equal(f.requests(), 1);
 });
 
@@ -94,9 +150,7 @@ test('caller cancellation during body consumption retains its original reason', 
   const reason = new Error('The caller canceled this operation.');
   const operation = f.provider.complete({ messages: [], timeoutMs: 3000, signal: controller.signal });
   const rejected = assert.rejects(operation, (error: unknown) => error === reason);
-  await f.headersReceived;
-  controller.abort(reason);
-  await rejected;
+  await Promise.all([f.headersReceived.then(() => controller.abort(reason)), rejected]);
   assert.equal(f.requests(), 1);
 });
 

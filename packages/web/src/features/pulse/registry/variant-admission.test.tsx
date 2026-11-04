@@ -45,7 +45,8 @@ test("variant controls use the workspace dialog host and recover after closing i
       selectedMetricIds: ["metric"], busy, onClose() {}, onCreate: async () => {},
     }) as any;
     assert.equal(portal.containerInfo, host);
-    assert.equal(portal.children.props.children.props.disabled, busy);
+    const fieldset = React.Children.toArray(portal.children.props.children).find(child => React.isValidElement(child) && child.type === "fieldset") as ReactElement<any>;
+    assert.equal(fieldset.props.disabled, busy);
     assert.equal(primary(portal.children.props.actions)?.props.disabled, busy);
   }
 });

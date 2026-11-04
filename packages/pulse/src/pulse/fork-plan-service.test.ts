@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { after,test } from 'node:test';
+import { after,beforeEach,test } from 'node:test';
 import {
 canonicalizeForkPlanRequest,
 forkPlanHttpStatus,
@@ -19,6 +19,7 @@ type PulseForkPlanDependencies,
 type PulseForkPlanSummary
 } from './fork-plan-service.js';
 import { registerPulseRoutes } from './routes.js';
+import { getPulseInventorySnapshot, loadPulseInventory } from '../application/inventory-snapshots.js';
 import { PulseDimensionalForkService } from './dimensional-fork-service.js';
 import { getOrCreatePulseMetric, getPulseDefinition, getPulseMetric } from './pulse-client.js';
 
@@ -34,6 +35,9 @@ const session: TableauSession = {
   token: 'token',
   apiVersion: '3.27',
 };
+
+let ownerSequence = 0;
+beforeEach(() => { session.userId = `user-${++ownerSequence}`; setSession(session, { connectionId: 'fixture', patSecret: '' }); });
 
 const catalog: DatasourceCatalog = {
   datasourceLuid: 'datasource-1',
@@ -103,14 +107,6 @@ function dependencies(overrides: Partial<PulseForkPlanDependencies> = {}): Pulse
       ? [['East'], ['West']]
       : [['Office Supplies'], ['Technology']],
     getOrCreate: async () => ({ metricId: 'fork-1', created: true }),
-    reconcile: async (_session, input) => ({
-      metricId: input.metricId,
-      status: 'visible',
-      exactMetricResolved: true,
-      inventoryVisible: true,
-      ownershipVerified: true,
-      attempts: 1,
-    }),
     ...overrides,
   };
 }
@@ -183,9 +179,11 @@ test('builds one canonical combined specification per exact source metric', asyn
     pendingVisibility: 0,
     results: [{
       sourceMetricId: 'metric-1',
-      status: 'visible',
+      status: 'created',
       creationStatus: 'created',
-      reconciliationStatus: 'visible',
+      sent: true,
+      definitionId: 'definition-1',
+      metric: summary.results[0]!.metric,
       metricId: 'fork-1',
       requestedSpecification: requests[0]!.specification,
     }],
@@ -211,11 +209,8 @@ test('fork route waits for in-flight work after auth termination and preserves c
       started.push(id);
       if (id === 'b') { await authGate; throw new TableauError('Session ended', 401, '', 'auth'); }
       if (id !== 'a') await flightGate;
+      if (id === 'a') completedA();
       return { metricId: `fork-${id}`, created: true };
-    },
-    reconcile: async (session, input) => {
-      if (input.metricId === 'fork-a') completedA();
-      return base.reconcile(session, input);
     },
   }));
   const app = Fastify();
@@ -248,16 +243,12 @@ test('fork route waits for in-flight work after auth termination and preserves c
   }
 });
 
-test('fork preserves a confirmed metric when reconciliation throws terminal authentication', async () => {
-  const summary = await new PulseForkPlanService(dependencies({
-    reconcile: async () => { throw new TableauError('Expired during reconciliation', 401, '', 'auth'); },
-  })).forkMetrics(session, { version: 1, sourceMetricIds: ['a'], timeframe: { key: 'LAST_MONTH' }, clauses: [] });
+test('confirmed response returns without post-write provider reads', async () => {
+  const summary = await new PulseForkPlanService(dependencies()).forkMetrics(session, { version: 1, sourceMetricIds: ['a'], timeframe: { key: 'LAST_MONTH' }, clauses: [] });
   assert.equal(summary.results[0]?.metricId, 'fork-1');
-  assert.equal(summary.results[0]?.creationStatus, 'created');
-  assert.equal(summary.results[0]?.reconciliationStatus, 'failed');
-  assert.equal(summary.created, 1);
-  assert.equal(summary.terminated, true);
-  assert.equal(forkPlanHttpStatus(summary), 207);
+  assert.equal(summary.results[0]?.status, 'created');
+  assert.equal(summary.results[0]?.metric?.isDefault, null);
+  assert.equal(forkPlanHttpStatus(summary), 200);
 });
 
 test('date-only plans do not require dimensional metadata', async () => {
@@ -282,7 +273,7 @@ test('date-only plans do not require dimensional metadata', async () => {
   assert.equal(summary.created, 1);
   assert.equal(summary.failed, 0);
   assert.equal(summary.results[0]?.creationStatus, 'created');
-  assert.equal(summary.results[0]?.reconciliationStatus, 'visible');
+  assert.equal(summary.results[0]?.status, 'created');
 });
 
 test('rejects a stale domain value before any get-or-create request', async () => {
@@ -310,14 +301,6 @@ test('preserves partial results when one exact source cannot resolve', async () 
       if (metricId === 'metric-bad') throw new Error('Exact source metric is unavailable.');
       return dependencies().getMetric(session, metricId);
     },
-    reconcile: async (_session, input) => ({
-      metricId: input.metricId,
-      status: 'pending_visibility',
-      exactMetricResolved: true,
-      inventoryVisible: false,
-      ownershipVerified: true,
-      attempts: 5,
-    }),
   })).forkMetrics(session, {
     version: 1,
     sourceMetricIds: ['metric-good', 'metric-bad'],
@@ -328,25 +311,16 @@ test('preserves partial results when one exact source cannot resolve', async () 
   assert.equal(summary.attempted, 2);
   assert.equal(summary.created, 1);
   assert.equal(summary.failed, 1);
-  assert.equal(summary.pendingVisibility, 1);
-  assert.deepEqual(summary.results.map((result) => result.status), ['failed', 'pending_visibility']);
+  assert.equal(summary.pendingVisibility, 0);
+  assert.deepEqual(summary.results.map((result) => result.status), ['failed', 'created']);
   assert.equal(summary.results[1]?.creationStatus, 'created');
-  assert.equal(summary.results[1]?.reconciliationStatus, 'pending_visibility');
+  assert.equal(summary.results[1]?.metric?.metricId, 'fork-1');
   assert.equal(forkPlanHttpStatus(summary), 207);
 });
 
-test('preserves creation disposition when reconciliation rejects a returned metric', async () => {
+test('conflicting get-or-create ownership preserves disposition but refuses its row', async () => {
   const summary = await new PulseForkPlanService(dependencies({
-    getOrCreate: async () => ({ metricId: 'fork-1', created: false }),
-    reconcile: async (_session, input) => ({
-      metricId: input.metricId,
-      status: 'ownership_mismatch',
-      exactMetricResolved: true,
-      inventoryVisible: false,
-      ownershipVerified: false,
-      attempts: 1,
-      diagnostic: { message: 'Metric belongs to another definition.' },
-    }),
+    getOrCreate: async () => ({ metricId: 'fork-1', created: false, raw: { metric: { id: 'fork-1', definition_id: 'another-definition' } } }),
   })).forkMetrics(session, {
     version: 1,
     sourceMetricIds: ['metric-1'],
@@ -358,7 +332,7 @@ test('preserves creation disposition when reconciliation rejects a returned metr
   assert.equal(summary.failed, 1);
   assert.equal(summary.results[0]?.status, 'ownership_mismatch');
   assert.equal(summary.results[0]?.creationStatus, 'existing');
-  assert.equal(summary.results[0]?.reconciliationStatus, 'ownership_mismatch');
+  assert.equal(summary.results[0]?.metric, undefined);
 });
 
 test('classifies a complete provider failure as 502', async () => {
@@ -376,6 +350,23 @@ test('classifies a complete provider failure as 502', async () => {
   assert.equal(summary.failed, 1);
   assert.equal(forkPlanHttpStatus(summary), 502);
   assert.match(summary.results[0]!.error ?? '', /invalid specification/);
+});
+
+for (const aliases of [
+  { definition_id: 'definition-1', specification_reference: { definition_id: 'foreign' } },
+  { definition_id: 'definition-1', definition: { metadata: { id: 'foreign' } } },
+  { site_id: 'site-id', site: { id: 'foreign' } },
+  { specification: { filters: [] }, metric_specification: { filters: [{ unexpected: true }] } },
+]) test(`real getOrCreate adapter rejects conflicting supplied aliases ${JSON.stringify(aliases)}`, async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => Response.json({ is_metric_created: true, metric: { id: 'fork-1', ...aliases, ...('specification' in aliases ? { specification: JSON.parse(String(init?.body)).specification } : {}) } });
+  try {
+    const summary = await new PulseForkPlanService(dependencies({ getOrCreate: getOrCreatePulseMetric })).forkMetrics(session, { version: 1, sourceMetricIds: ['metric-1'], timeframe: { key: 'LAST_30_DAYS' }, clauses: [] });
+    assert.equal(summary.results[0]?.status, 'ownership_mismatch');
+    assert.equal(summary.results[0]?.creationStatus, 'created');
+    assert.equal(summary.results[0]?.metric, undefined);
+    assert.equal(summary.inventoryPatch, undefined);
+  } finally { globalThis.fetch = originalFetch; }
 });
 
 test('validates and canonicalizes the combined request', () => {
@@ -512,30 +503,42 @@ test('dimension routes read every source from POST bodies and reject invalid inp
 });
 
 test('cached deletion accepts reordered metrics but rejects a tampered fingerprint', async () => {
+  const originalFetch = globalThis.fetch;
   let reversed = false;
   let deletes = 0;
   const app = Fastify();
   const context = { connectionId: 'delete-order-test', serverUrl: session.serverUrl, siteId: session.siteId, datasourceLuid: 'datasource-1' };
   registerPulseRoutes(app, { deletion: {
-    inventory: async () => ({ totalScanned: 1, truncated: false, failures: [], definitions: [{
-      definitionId: 'definition', name: 'Sales', description: '', measure: 'Sales', aggregation: 'SUM', timeDimension: 'Date', inventoryStatus: 'complete',
-      metrics: (reversed ? ['b', 'a'] : ['a', 'b']).map(metricId => ({ metricId, name: metricId, measurementPeriod: {}, timeframeLabel: 'Custom', filters: [], comparison: {}, isDefault: false, isScoped: false, scopedState: 'variant', specification: { comparison: 'original' } })),
-    }] }),
-    execute: async () => { deletes++; return { definitionsDeleted: 1, metricsDeleted: 0, failures: [], outcomes: [] }; },
+    inventory: async (owner, coordinates, snapshotId) => {
+      const inventory = getPulseInventorySnapshot(owner, coordinates, snapshotId);
+      if (reversed) for (const definition of inventory.definitions) definition.metrics.reverse();
+      return inventory;
+    },
+    execute: async () => { deletes++; return { definitionsDeleted: 1, metricsDeleted: 0, failures: [], outcomes: [{ definitionId: 'definition', status: 'deleted', sent: true }] }; },
   } });
   setSession(session, { connectionId: context.connectionId, patSecret: 'test' });
-  const selection = { context, snapshotId: 'snapshot', definitionIds: ['definition'], metricIds: [] };
+  globalThis.fetch = async input => {
+    const pathname = new URL(String(input)).pathname;
+    if (pathname.endsWith('/definitions')) return Response.json({ definitions: [{ metadata: { id: 'definition', name: 'Sales' }, specification: { datasource: { id: context.datasourceLuid } } }] });
+    assert.ok(pathname.endsWith('/definitions/definition/metrics'), pathname);
+    return Response.json({ metrics: ['a', 'b'].map(id => ({ id, definition_id: 'definition', is_default: false, specification: { filters: [] } })) });
+  };
   try {
+    const displayed = await loadPulseInventory(session, context.datasourceLuid, { refresh: true });
+    const selection = { context, snapshotId: displayed.snapshotId, definitionIds: ['definition'], metricIds: [] };
     const preview = await app.inject({ method: 'POST', url: '/api/pulse/registry/delete-preview', payload: selection });
     assert.equal(preview.statusCode, 200, preview.body);
     reversed = true;
     const accepted = await app.inject({ method: 'POST', url: '/api/pulse/registry/delete', payload: { ...selection, previewFingerprint: preview.json().previewFingerprint } });
     assert.equal(accepted.statusCode, 200, accepted.body);
+    assert.deepEqual(accepted.json().inventoryPatch.removedDefinitionIds, ['definition']);
+    assert.equal(getPulseInventorySnapshot(session, context, accepted.json().inventoryPatch.snapshotId).definitions.length, 0);
+    assert.equal(getPulseInventorySnapshot(session, context, displayed.snapshotId).definitions.length, 1, 'The reviewed snapshot remains immutable.');
     const rejected = await app.inject({ method: 'POST', url: '/api/pulse/registry/delete', payload: { ...selection, previewFingerprint: 'tampered' } });
     assert.equal(rejected.statusCode, 409, rejected.body);
     assert.equal(rejected.json().code, 'delete_plan_changed');
     assert.equal(deletes, 1);
-  } finally { clearSession(); await app.close(); }
+  } finally { globalThis.fetch = originalFetch; clearSession(); await app.close(); }
 });
 
 test('draft and proposal routes preserve prototype-named fields through validated JSON documents', async () => {
@@ -631,60 +634,17 @@ function forkGate() {
   return { promise, resolve };
 }
 
-test('variant groups wait for transport retries and visibility confirmation before sending the next five destinations', async () => {
-  const ids = Array.from({ length: 12 }, (_, index) => `source-${String(index).padStart(2, '0')}`);
-  const retry = forkGate();
-  const verification = new Map([ids[1]!, ids[5]!].map(id => [id, forkGate()]));
-  const retryStarted = forkGate();
-  const attempts = new Map<string, number>();
-  const originalFetch = globalThis.fetch;
-  const base = dependencies();
-  setSession(session, { connectionId: 'variant-groups', patSecret: '' });
-  globalThis.fetch = async (input, init) => {
-    assert.equal(new URL(String(input)).pathname, '/api/-/pulse/metrics:getOrCreate');
-    assert.equal(init?.method, 'POST');
-    const { definition_id: id } = JSON.parse(String(init.body));
-    const attempt = (attempts.get(id) ?? 0) + 1;
-    attempts.set(id, attempt);
-    if (id === ids[0]) {
-      if (attempt === 1) return new Response('{}', { status: 429, headers: { 'Retry-After': '0' } });
-      retryStarted.resolve();
-      await retry.promise;
-    }
-    return Response.json({ metric: { id: `destination-${id}` }, is_metric_created: true });
-  };
+test('variant groups await writes before sending the next five destinations', async () => {
+  const gate = forkGate(); const started: string[] = []; const base = dependencies();
   const service = new PulseForkPlanService(dependencies({
     getMetric: async (owner, id) => ({ ...await base.getMetric(owner, id), definition_id: id }),
     getDefinition: async (owner, id) => ({ ...await base.getDefinition(owner, id), metadata: { id } }),
-    getOrCreate: getOrCreatePulseMetric,
-    reconcile: async (owner, input) => {
-      await verification.get(input.definitionId)?.promise;
-      return base.reconcile(owner, input);
-    },
+    getOrCreate: async (_owner, input) => { started.push(input.definitionId); if (started.length <= 5) await gate.promise; return { metricId: `fork-${input.definitionId}`, created: true }; },
   }));
+  const ids = Array.from({ length: 12 }, (_, index) => `source-${index}`);
   const operation = service.forkMetrics(session, { version: 1, sourceMetricIds: ids, timeframe: { key: 'YEAR_TO_DATE' }, clauses: [] });
-  try {
-    await retryStarted.promise;
-    await new Promise<void>(done => setImmediate(done));
-    assert.equal(attempts.get(ids[0]!), 2);
-    assert.deepEqual([...attempts.keys()], ids.slice(0, 5));
-    retry.resolve();
-    await new Promise<void>(done => setImmediate(done));
-    assert.deepEqual([...attempts.keys()], ids.slice(0, 5), 'Visibility confirmation also belongs to the current group.');
-    verification.get(ids[1]!)!.resolve();
-    await new Promise<void>(done => setImmediate(done));
-    assert.deepEqual([...attempts.keys()], ids.slice(0, 10));
-    verification.get(ids[5]!)!.resolve();
-    const summary = await operation;
-    assert.deepEqual([...attempts.keys()], ids);
-    assert.equal(summary.created, ids.length);
-  } finally {
-    retry.resolve();
-    for (const gate of verification.values()) gate.resolve();
-    await operation;
-    globalThis.fetch = originalFetch;
-    clearSession();
-  }
+  try { await new Promise<void>(done => setImmediate(done)); assert.equal(started.length, 5); gate.resolve(); assert.equal((await operation).created, 12); }
+  finally { gate.resolve(); await operation; }
 });
 
 for (const status of [400, 401, 403, 404, 409, 422, 429]) {
@@ -736,14 +696,13 @@ test('a get-or-create response without an identifier keeps the destination outco
 });
 
 for (const created of [true, false]) {
-  test(`visibility throttling retains confirmed ${created ? 'creation' : 'reuse'}`, async () => {
+  test(`response-only confirmation retains ${created ? 'creation' : 'reuse'}`, async () => {
     const summary = await new PulseForkPlanService(dependencies({
       getOrCreate: async () => ({ metricId: 'destination', created }),
-      reconcile: async () => { throw new TableauError('Read throttled.', 429); },
     })).forkMetrics(session, { version: 1, sourceMetricIds: ['source'], timeframe: { key: 'YEAR_TO_DATE' }, clauses: [] });
     assert.equal(summary.results[0]?.creationStatus, created ? 'created' : 'existing');
     assert.equal(summary.results[0]?.metricId, 'destination');
-    assert.equal(summary.results[0]?.reconciliationStatus, 'failed');
+    assert.equal(summary.results[0]?.status, created ? 'created' : 'existing');
   });
 }
 
@@ -804,4 +763,66 @@ test('variant routes deduplicate final destinations while preserving different t
       } finally { await app.close(); }
     }
   } finally { globalThis.fetch = originalFetch; clearSession(); }
+});
+
+
+for (const concurrent of [false, true]) test(`dimension browser handle survives fact renewal through filtered create, concurrent=${concurrent}`, async () => {
+  const originalFetch = globalThis.fetch, originalNow = Date.now; let now = originalNow(); Date.now = () => now;
+  let version = 1, metricReads = 0, definitionReads = 0, metadataReads = 0, writes = 0;
+  const calls: string[] = [], created: Array<Record<string, any>> = [];
+  let release!: () => void, started!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; }), renewing = new Promise<void>(resolve => { started = resolve; });
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(String(input)); calls.push(url.pathname);
+    if (url.pathname.endsWith('/metrics/source')) {
+      metricReads++;
+      if (version === 2 && concurrent) { started(); await held; }
+      return Response.json({ metric: { id: 'source', definition_id: 'definition', specification: { filters: [], preserved: { version } } } });
+    }
+    if (url.pathname.endsWith('/definitions/definition')) { definitionReads++; return Response.json({ definition: { metadata: { id: 'definition' }, specification: { datasource: { id: 'datasource-1' } }, extension_options: { allowed_dimensions: ['Region', version === 1 ? 'OldOnly' : 'NewOnly'] } } }); }
+    if (url.pathname.endsWith('/datasources/datasource-1')) return Response.json({ datasource: { id: 'datasource-1', name: 'Orders' } });
+    if (url.pathname.endsWith('/read-metadata')) { metadataReads++; return Response.json({ data: ['Region', version === 1 ? 'OldOnly' : 'NewOnly'].map(fieldName => ({ fieldName, dataType: 'STRING', fieldRole: 'DIMENSION' })) }); }
+    if (url.pathname.endsWith('/query-datasource')) { const body = JSON.parse(String(init?.body)); return Response.json({ data: body.query.fields[0].function === 'COUNTD' ? [[version]] : [[version === 1 ? 'West' : 'East']] }); }
+    if (url.pathname.endsWith('/metrics:getOrCreate')) { writes++; created.push(JSON.parse(String(init?.body))); return Response.json({ is_metric_created: true, metric: { id: 'destination' } }); }
+    throw new Error(`Unexpected fake endpoint ${url.pathname}`);
+  };
+  const app = Fastify(); registerPulseRoutes(app);
+  const post = (url: string, payload: unknown) => app.inject({ method: 'POST', url, payload: JSON.stringify(payload), headers: { 'content-type': 'application/json' } });
+  try {
+    const fields = await post('/api/pulse/dimensions', { sourceMetricIds: ['source'] });
+    assert.equal(fields.statusCode, 200, fields.body);
+    const handle = fields.json().sourceContextId;
+    const input = { sourceMetricIds: ['source'], sourceContextId: handle, fieldId: 'Region' };
+    const initialCount = await post('/api/pulse/dimensions/count', input), initialValues = await post('/api/pulse/dimensions/values', input);
+    assert.equal(initialCount.json().count, 1); assert.deepEqual(initialValues.json().values.map((row: { value: string }) => row.value), ['West']);
+    version = 2; now += 61_000; const beforeRenewal = calls.length;
+    let count, values;
+    if (concurrent) {
+      const counting = post('/api/pulse/dimensions/count', input); const counted = counting.then(response => response);
+      await renewing;
+      const listing = post('/api/pulse/dimensions/values', input); const listed = listing.then(response => response);
+      await new Promise(resolve => setImmediate(resolve)); assert.equal(metricReads, 2);
+      release(); [count, values] = await Promise.all([counted, listed]);
+    } else { count = await post('/api/pulse/dimensions/count', input); values = await post('/api/pulse/dimensions/values', input); }
+    assert.equal(count.statusCode, 200, count.body); assert.equal(values.statusCode, 200, values.body);
+    assert.equal(count.json().count, 2); assert.deepEqual(values.json().values.map((row: { value: string }) => row.value), ['East']);
+    assert.equal(calls.length - beforeRenewal, 6, 'One shared source, definition, datasource, metadata renewal and two fresh answer queries.');
+    assert.deepEqual([metricReads, definitionReads, metadataReads], [2, 2, 2]);
+    const warmStart = calls.length;
+    const renewedFields = await post('/api/pulse/dimensions', { sourceMetricIds: ['source'], sourceContextId: handle });
+    assert.equal(renewedFields.json().sourceContextId, handle);
+    assert.deepEqual(renewedFields.json().fields.map((field: { name: string }) => field.name).sort(), ['NewOnly', 'Region']);
+    assert.equal((await post('/api/pulse/dimensions/count', { ...input, fieldId: 'OldOnly' })).statusCode, 422);
+    await post('/api/pulse/dimensions/count', input); await post('/api/pulse/dimensions/values', input);
+    assert.equal(calls.length, warmStart, 'Fresh answers and field eligibility stay local.');
+    const request = { version: 1, context: { connectionId: 'fixture', serverUrl: session.serverUrl, siteId: session.siteId, datasourceLuid: 'datasource-1' }, sourceMetricIds: ['source'], sourceContextId: handle, timeframe: { key: 'LAST_30_DAYS' }, clauses: [{ fieldId: 'Region', selection: { mode: 'VALUES', exclude: false, values: ['East'] } }] };
+    const result = await post('/api/pulse/metrics/fork', request);
+    assert.equal(result.statusCode, 200, result.body); assert.equal(result.json().created, 1);
+    assert.equal(calls.length - warmStart, 2, 'Healthy filtered create remains one validation query and one write.');
+    assert.equal(created[0]!.specification.preserved.version, 2);
+    assert.deepEqual(created[0]!.specification.filters[0].categorical_values, [{ string_value: 'East' }]);
+    const stale = await post('/api/pulse/metrics/fork', { ...request, clauses: [{ fieldId: 'Region', selection: { mode: 'VALUES', exclude: false, values: ['West'] } }] });
+    assert.equal(stale.json().failed, 1); assert.equal(writes, 1, 'Expired values cannot pass fresh filtered validation.');
+    assert.equal(calls.length - warmStart, 3);
+  } finally { release(); globalThis.fetch = originalFetch; Date.now = originalNow; await app.close(); clearSession(); }
 });

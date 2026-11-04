@@ -1,9 +1,12 @@
 import type { TableauSession } from "@pulse-metric-studio/core";
 import {
   TableauError,
+  TableauThrottleError,
+  assertTableauMutationAdmission,
   apiPath,
   getJson,
   isPastEndError,
+  withTableauOperation,
 } from "@pulse-metric-studio/core";
 import type {
   PulseFollowOperation,
@@ -42,7 +45,9 @@ import {
   defaultDependencies,
   type SubscriptionDependencies,
 } from "./registry-dependencies.js";
+import { mutationMetadata } from './mutation-metadata.js';
 import { pulseOperationErrorMessage } from '../pulse/operation-errors.js';
+import { subscriptionCoverage, invalidateSubscriptionCoverage } from './subscription-coverage.js';
 import { sessionCacheKey } from './session-cache-key.js';
 import { cachedUserGroupMemberships, clearUserGroupMemberships } from '../pulse/user-group-memberships.js';
 const PROVIDER_CONCURRENCY = 5;
@@ -65,7 +70,7 @@ export async function getFollowState(
   userId: string,
   userGroupIds: string[],
   metricIds: string[],
-  options: { selectedGroupId?: string; groupContextUnavailable?: boolean; detail?: boolean } = {},
+  options: { selectedGroupId?: string; groupContextUnavailable?: boolean; detail?: boolean; snapshotId?: string; continueCoverage?: boolean; personalOnly?: boolean } = {},
   dependencies: SubscriptionDependencies = defaultDependencies,
 ): Promise<FollowStateResult> {
   const uniqueMetricIds = canonicalIds(metricIds);
@@ -83,9 +88,9 @@ export async function getFollowState(
   };
   if (uniqueMetricIds.length === 0) return result;
 
-  let countResult: FollowerCountBatchResult;
-  try {
-    countResult = await dependencies.followerCounts(session, uniqueMetricIds);
+  let countResult: FollowerCountBatchResult = { countsByMetricId: {}, errorsByMetricId: {} };
+  if (options.detail !== true) try {
+    countResult = await withTableauOperation('follow_state', () => dependencies.followerCounts(session, uniqueMetricIds));
   } catch (error) {
     if (error instanceof TableauError && error.kind === "auth") throw error;
     const message = diagnosticMessage(boundedProviderDiagnostic(error));
@@ -113,28 +118,9 @@ export async function getFollowState(
     return result;
   }
 
-  const subscriptionResults = await mapWithConcurrency(
-    uniqueMetricIds,
-    PROVIDER_CONCURRENCY,
-    async (metricId) => {
-      try {
-        return {
-          metricId,
-          subscriptions: await dependencies.listSubscriptions(
-            session,
-            metricId,
-          ),
-        };
-      } catch (error) {
-        if (error instanceof TableauError && error.kind === "auth") throw error;
-        return {
-          metricId,
-          subscriptions: null,
-          diagnostic: boundedProviderDiagnostic(error),
-        };
-      }
-    },
-  );
+  const loaded = await subscriptionCoverage(session, uniqueMetricIds, options, dependencies);
+  const subscriptionResults = loaded.entries;
+  result.coverage = loaded.coverage;
 
   const groupIds = new Set(
     selectedGroupId ? [selectedGroupId] : canonicalIds(userGroupIds),
@@ -168,19 +154,19 @@ export async function getFollowState(
           subscription.follower.type === "GROUP" &&
           groupIds.has(subscription.follower.id),
       );
-      if (userFollows || !hasUnknownFollowerType) {
+      if (userFollows || (entry.complete && !hasUnknownFollowerType)) {
         result.userFollowsByMetricId[entry.metricId] = userFollows;
       }
       if (
-        !result.groupContextUnavailable &&
-        (groupFollows || !hasUnknownFollowerType)
+        !options.personalOnly && !result.groupContextUnavailable &&
+        (groupFollows || (entry.complete && !hasUnknownFollowerType))
       ) {
         result.groupFollowsByMetricId[entry.metricId] = groupFollows;
       }
       // Distinct group followers for the row summary. This is independent of the
       // current user's group membership, so a group the user is not in still
       // counts, and the count updates as followers are added or removed.
-      result.groupFollowerIdsByMetricId[entry.metricId] = [
+      if (!options.personalOnly) result.groupFollowerIdsByMetricId[entry.metricId] = [
         ...new Set(
           entry.subscriptions
             .filter((subscription) => subscription.follower.type === "GROUP")
@@ -204,11 +190,11 @@ export async function getFollowState(
     const relationshipStatus: MetricAvailability["relationshipStatus"] =
       !subscriptionAvailable
         ? "unavailable"
-        : result.groupContextUnavailable || hasUnknownFollowerType
+        : result.groupContextUnavailable || hasUnknownFollowerType || !entry.complete || options.personalOnly
           ? "partial"
           : "available";
     const followerCountStatus: MetricAvailability["followerCountStatus"] =
-      countAvailable ? "available" : "unavailable";
+      countAvailable ? "available" : options.detail === true ? "not_requested" : "unavailable";
     const status: MetricAvailability["status"] =
       relationshipStatus === "available" && countAvailable
         ? "available"
@@ -218,8 +204,9 @@ export async function getFollowState(
     result.availabilityByMetricId[entry.metricId] = {
       status,
       relationshipStatus,
-      followerIdsStatus: !subscriptionAvailable ? "unavailable" : hasUnknownFollowerType ? "partial" : "available",
+      followerIdsStatus: !subscriptionAvailable ? "unavailable" : hasUnknownFollowerType || !entry.complete || options.personalOnly ? "partial" : "available",
       followerCountStatus,
+      canLoadMore: entry.canLoadMore,
       diagnostics,
     };
     result.errors.push(
@@ -310,216 +297,227 @@ export async function followTargets(
   dependencies: SubscriptionDependencies = defaultDependencies,
 ): Promise<FollowTargetOperationResult[]> {
   const operations = canonicalFollowOperations(input.operations);
-  const results = new Map<string, FollowTargetOperationResult>();
-  const subscriptionsByMetricId = new Map<
-    string,
-    SubscriptionRecord[] | null
-  >();
-  const metricIds = [
-    ...new Set(operations.map((operation) => operation.metricId)),
-  ];
-
+  const admission = followAdmission(session, operations);
+  if (admission) return admission;
+  const affectedIds = operations.map(operation => operation.metricId);
+  invalidateSubscriptionCoverage(session, affectedIds);
   try {
-    await mapWithConcurrency(
-      metricIds,
-      PROVIDER_CONCURRENCY,
-      async (metricId) => {
-        try {
-          subscriptionsByMetricId.set(
-            metricId,
-            await dependencies.listSubscriptions(session, metricId),
-          );
-        } catch (error) {
-          if (error instanceof TableauError && error.kind === "auth")
-            throw error;
-          subscriptionsByMetricId.set(metricId, null);
-        }
-      },
-    );
-  } catch (error) {
-    if (!(error instanceof TableauError) || error.kind !== "auth") throw error;
-    return operations.map((operation) => ({
-      ...operationResult(
-        operation,
-        "not_attempted",
-        false,
-        "The Tableau session ended before subscriptions could be checked.",
-      ),
-      code: "authentication_required",
-    }));
-  }
+    const results = new Map<string, FollowTargetOperationResult>();
+    const subscriptionsByMetricId = new Map<
+      string,
+      SubscriptionRecord[] | null
+    >();
+    const metricIds = [
+      ...new Set(operations.map((operation) => operation.metricId)),
+    ];
 
-  const pending = operations.filter((operation) => {
-    const subscriptions = subscriptionsByMetricId.get(operation.metricId);
-    const alreadyFollowed = subscriptions?.some(
-      (subscription) =>
-        subscription.follower.id === operation.target.id &&
-        subscription.follower.type === operation.target.kind,
-    );
-    if (!alreadyFollowed) return true;
-    results.set(
-      followOperationKey(operation),
-      operationResult(operation, "already_followed", true),
-    );
-    return false;
-  });
-
-  let terminated = false;
-  const kinds = dependencies.createSubscriptions ? ['MIXED'] as const : ['GROUP', 'USER'] as const;
-  for (const kind of kinds) {
-    if (terminated) break;
-    const kindOperations = pending.filter(
-      (operation) => kind === 'MIXED' || operation.target.kind === kind,
-    );
-    for (
-      let index = 0;
-      index < kindOperations.length;
-      index += FOLLOW_OPERATION_BATCH_LIMIT
-    ) {
-      const batch = kindOperations.slice(
-        index,
-        index + FOLLOW_OPERATION_BATCH_LIMIT,
-      );
-      try {
-        const created: import('../pulse/pulse-client.js').SubscriptionWriteResult[] =
-          kind === 'MIXED'
-            ? await dependencies.createSubscriptions!(session, batch.map((operation) => ({ metricId: operation.metricId, targetId: operation.target.id, targetType: operation.target.kind })))
-            : kind === "GROUP"
-            ? await dependencies.createGroupSubscriptions(
-                session,
-                batch.map((operation) => ({
-                  metricId: operation.metricId,
-                  groupId: operation.target.id,
-                })),
-              )
-            : await dependencies.createUserSubscriptions(
-                session,
-                batch.map((operation) => ({
-                  metricId: operation.metricId,
-                  userId: operation.target.id,
-                })),
-              );
-        const createdByKey = new Map(
-          created.map((result) => [
-            followOperationKeyParts(result.metricId, result.targetType ?? (kind === 'MIXED' ? 'USER' : kind), result.targetId),
-            result,
-          ]),
-        );
-        for (const operation of batch) {
-          const createdResult = createdByKey.get(followOperationKey(operation));
-          if (!createdResult) {
-            results.set(
-              followOperationKey(operation),
-              operationResult(
-                operation,
-                "unknown",
-                false,
-                "Tableau returned no result for this metric and target.",
-              ),
+    try {
+      await mapWithConcurrency(
+        metricIds,
+        PROVIDER_CONCURRENCY,
+        async (metricId) => {
+          try {
+            subscriptionsByMetricId.set(
+              metricId,
+              await dependencies.listSubscriptions(session, metricId),
             );
-          } else if (createdResult.ok) {
-            results.set(
-              followOperationKey(operation),
-              operationResult(
-                operation,
-                createdResult.alreadyExists ? "already_followed" : "followed",
-                true,
-              ),
-            );
-          } else {
-            results.set(
-              followOperationKey(operation),
-              operationResult(
-                operation,
-                createdResult.unknown ? "unknown" : "failed",
-                false,
-                createdResult.error ?? "Tableau rejected the follow request.",
-              ),
-            );
+          } catch (error) {
+            if (error instanceof TableauError && (error.kind === "auth" || error.status === 429))
+              throw error;
+            subscriptionsByMetricId.set(metricId, null);
           }
-        }
-      } catch (error) {
-        const message = pulseOperationErrorMessage(error, 'follow', [session.token]);
-        if (
-          error instanceof SubscriptionBatchInterrupted ||
-          (error instanceof TableauError && error.kind === "auth")
-        ) {
-          terminated = true;
-          const completed =
-            error instanceof SubscriptionBatchInterrupted
-              ? error.completed
-              : [];
-          for (const item of completed) {
-            const operation = batch.find(
-              (candidate) =>
-                candidate.metricId === item.metricId &&
-                candidate.target.id === item.targetId &&
-                (!item.targetType || candidate.target.kind === item.targetType),
-            );
-            if (operation)
+        },
+      );
+    } catch (error) {
+      if (error instanceof TableauError && error.status === 429) return operations.map(operation => throttleFollowResult(session, operation, error, false));
+      if (!(error instanceof TableauError) || error.kind !== "auth") throw error;
+      return operations.map((operation) => ({
+        ...operationResult(
+          operation,
+          "not_attempted",
+          false,
+          "The Tableau session ended before subscriptions could be checked.",
+        ),
+        code: "authentication_required",
+      }));
+    }
+
+    const pending = operations.filter((operation) => {
+      const subscriptions = subscriptionsByMetricId.get(operation.metricId);
+      const alreadyFollowed = subscriptions?.some(
+        (subscription) =>
+          subscription.follower.id === operation.target.id &&
+          subscription.follower.type === operation.target.kind,
+      );
+      if (!alreadyFollowed) return true;
+      results.set(
+        followOperationKey(operation),
+        { ...operationResult(operation, "already_followed", true), sent: false },
+      );
+      return false;
+    });
+
+    let terminated = false;
+    let throttleError: TableauError | undefined;
+    const kinds = dependencies.createSubscriptions ? ['MIXED'] as const : ['GROUP', 'USER'] as const;
+    for (const kind of kinds) {
+      if (terminated) break;
+      const kindOperations = pending.filter(
+        (operation) => kind === 'MIXED' || operation.target.kind === kind,
+      );
+      for (
+        let index = 0;
+        index < kindOperations.length;
+        index += FOLLOW_OPERATION_BATCH_LIMIT
+      ) {
+        if (terminated) break;
+        const batch = kindOperations.slice(
+          index,
+          index + FOLLOW_OPERATION_BATCH_LIMIT,
+        );
+        try {
+          const created: import('../pulse/pulse-client.js').SubscriptionWriteResult[] =
+            kind === 'MIXED'
+              ? await dependencies.createSubscriptions!(session, batch.map((operation) => ({ metricId: operation.metricId, targetId: operation.target.id, targetType: operation.target.kind })))
+              : kind === "GROUP"
+              ? await dependencies.createGroupSubscriptions(
+                  session,
+                  batch.map((operation) => ({
+                    metricId: operation.metricId,
+                    groupId: operation.target.id,
+                  })),
+                )
+              : await dependencies.createUserSubscriptions(
+                  session,
+                  batch.map((operation) => ({
+                    metricId: operation.metricId,
+                    userId: operation.target.id,
+                  })),
+                );
+          const createdByKey = new Map(
+            created.map((result) => [
+              followOperationKeyParts(result.metricId, result.targetType ?? (kind === 'MIXED' ? 'USER' : kind), result.targetId),
+              result,
+            ]),
+          );
+          for (const operation of batch) {
+            const createdResult = createdByKey.get(followOperationKey(operation));
+            if (!createdResult) {
               results.set(
                 followOperationKey(operation),
                 operationResult(
                   operation,
-                  item.ok
-                    ? item.alreadyExists
-                      ? "already_followed"
-                      : "followed"
-                    : item.unknown ? "unknown" : "failed",
-                  item.ok,
-                  item.error,
+                  "unknown",
+                  false,
+                  "Tableau returned no result for this metric and target.",
                 ),
               );
+            } else {
+              results.set(followOperationKey(operation), followWriteResult(operation, createdResult));
+              if (createdResult.throttle) { terminated = true; throttleError = new TableauThrottleError(createdResult.throttle); }
+            }
+          }
+        } catch (error) {
+          const message = pulseOperationErrorMessage(error, 'follow', [session.token]);
+          if (error instanceof TableauError && error.status === 429) {
+            terminated = true; throttleError = error;
+            const completed = error instanceof SubscriptionBatchInterrupted ? error.completed : [];
+            for (const item of completed) {
+              const operation = batch.find(candidate => candidate.metricId === item.metricId && candidate.target.id === item.targetId && (!item.targetType || candidate.target.kind === item.targetType));
+              if (operation) results.set(followOperationKey(operation), followWriteResult(operation, item));
+            }
+            for (const operation of batch) {
+              if (results.has(followOperationKey(operation))) continue;
+              const submitted = !(error instanceof SubscriptionBatchInterrupted) || error.failedTargets.some(item => item.metricId === operation.metricId && item.targetId === operation.target.id && item.targetType === operation.target.kind);
+              const confirmation = error instanceof SubscriptionBatchInterrupted && error.phase === 'confirmation';
+              const result = throttleFollowResult(session, operation, error, submitted && (confirmation || error.sent !== false));
+              if (submitted && confirmation) result.status = 'unknown';
+              results.set(followOperationKey(operation), result);
+            }
+            break;
+          }
+
+          if (
+            error instanceof SubscriptionBatchInterrupted ||
+            (error instanceof TableauError && error.kind === "auth")
+          ) {
+            terminated = true;
+            const completed =
+              error instanceof SubscriptionBatchInterrupted
+                ? error.completed
+                : [];
+            for (const item of completed) {
+              const operation = batch.find(
+                (candidate) =>
+                  candidate.metricId === item.metricId &&
+                  candidate.target.id === item.targetId &&
+                  (!item.targetType || candidate.target.kind === item.targetType),
+              );
+              if (operation)
+                results.set(
+                  followOperationKey(operation),
+                  operationResult(
+                    operation,
+                    item.ok
+                      ? item.alreadyExists
+                        ? "already_followed"
+                        : "followed"
+                      : item.unknown ? "unknown" : "failed",
+                    item.ok,
+                    item.error,
+                  ),
+                );
+            }
+            for (const operation of batch) {
+              if (results.has(followOperationKey(operation))) continue;
+              const submitted =
+                error instanceof SubscriptionBatchInterrupted &&
+                (error.failedTargets.length
+                  ? error.failedTargets.some((item) => item.metricId === operation.metricId && item.targetId === operation.target.id && item.targetType === operation.target.kind)
+                  : error.failed.metricId === operation.metricId && error.failed.targetId === operation.target.id);
+              const authentication = error.kind === "auth";
+              const writeRejected = authentication && (!(error instanceof SubscriptionBatchInterrupted) || error.phase === 'submission');
+              results.set(followOperationKey(operation), {
+                ...operationResult(
+                  operation,
+                  submitted
+                    ? writeRejected
+                      ? "failed"
+                      : "unknown"
+                    : "not_attempted",
+                  false,
+                  message,
+                ),
+                code: authentication
+                  ? "authentication_required"
+                  : "subscription_interrupted",
+              });
+            }
+            break;
           }
           for (const operation of batch) {
-            if (results.has(followOperationKey(operation))) continue;
-            const submitted =
-              error instanceof SubscriptionBatchInterrupted &&
-              (error.failedTargets.length
-                ? error.failedTargets.some((item) => item.metricId === operation.metricId && item.targetId === operation.target.id && item.targetType === operation.target.kind)
-                : error.failed.metricId === operation.metricId && error.failed.targetId === operation.target.id);
-            const authentication = error.kind === "auth";
-            const writeRejected = authentication && (!(error instanceof SubscriptionBatchInterrupted) || error.phase === 'submission');
-            results.set(followOperationKey(operation), {
-              ...operationResult(
-                operation,
-                submitted
-                  ? writeRejected
-                    ? "failed"
-                    : "unknown"
-                  : "not_attempted",
-                false,
-                message,
-              ),
-              code: authentication
-                ? "authentication_required"
-                : "subscription_interrupted",
-            });
+            results.set(
+              followOperationKey(operation),
+              operationResult(operation, "failed", false, message),
+            );
           }
-          break;
-        }
-        for (const operation of batch) {
-          results.set(
-            followOperationKey(operation),
-            operationResult(operation, "failed", false, message),
-          );
         }
       }
     }
-  }
 
-  return operations.map(
-    (operation) =>
-      results.get(followOperationKey(operation)) ??
-      operationResult(
-        operation,
-        terminated ? "not_attempted" : "failed",
-        false,
-        terminated
-          ? "The batch stopped before this follow was sent."
-          : "The follow operation did not produce a result.",
-      ),
-  );
+    return operations.map(
+      (operation) =>
+        results.get(followOperationKey(operation)) ??
+        (throttleError ? throttleFollowResult(session, operation, throttleError, false) : operationResult(
+          operation,
+          terminated ? "not_attempted" : "failed",
+          false,
+          terminated
+            ? "The batch stopped before this follow was sent."
+            : "The follow operation did not produce a result.",
+        )),
+    );
+  } finally { invalidateSubscriptionCoverage(session, affectedIds); }
 }
 
 export async function unfollowTargets(
@@ -528,80 +526,110 @@ export async function unfollowTargets(
   dependencies: SubscriptionDependencies = defaultDependencies,
 ): Promise<FollowTargetOperationResult[]> {
   const operations = canonicalFollowOperations(input.operations);
-  const results: FollowTargetOperationResult[] = [];
-  const subscriptionsByMetricId = new Map<string, SubscriptionRecord[]>();
-  let terminated = false;
-  for (const operation of operations) {
-    if (terminated) {
-      results.push(
-        operationResult(
-          operation,
-          "not_attempted",
-          false,
-          "The batch stopped before this unfollow was sent.",
-        ),
-      );
-      continue;
-    }
-    let attempted = false;
-    try {
-      let subscriptions = subscriptionsByMetricId.get(operation.metricId);
-      if (!subscriptions) {
-        subscriptions = await dependencies.listSubscriptions(
-          session,
-          operation.metricId,
-        );
-        subscriptionsByMetricId.set(operation.metricId, subscriptions);
-      }
-      const matches = subscriptions.filter(
-        (subscription) =>
-          subscription.follower.id === operation.target.id &&
-          subscription.follower.type === operation.target.kind,
-      );
-      if (!matches.length) {
-        results.push(operationResult(operation, "not_followed", true));
-        continue;
-      }
-      if (matches.some((subscription) => !subscription.id)) {
+  const admission = followAdmission(session, operations);
+  if (admission) return admission;
+  const affectedIds = operations.map(operation => operation.metricId);
+  invalidateSubscriptionCoverage(session, affectedIds);
+  try {
+    const results: FollowTargetOperationResult[] = [];
+    const subscriptionsByMetricId = new Map<string, SubscriptionRecord[]>();
+    let terminated = false;
+    let throttleError: TableauError | undefined;
+    for (const operation of operations) {
+      if (terminated) {
         results.push(
-          operationResult(
+          throttleError ? throttleFollowResult(session, operation, throttleError, false) : operationResult(
             operation,
-            "failed",
+            "not_attempted",
             false,
-            "A matching subscription has no deletable subscription identifier.",
+            "The batch stopped before this unfollow was sent.",
           ),
         );
         continue;
       }
-      for (const subscription of matches) {
-        attempted = true;
-        await dependencies.deleteSubscription(session, subscription.id!);
+      let attempted = false;
+      let completedDeletes = 0;
+      try {
+        let subscriptions = subscriptionsByMetricId.get(operation.metricId);
+        if (!subscriptions) {
+          subscriptions = await dependencies.listSubscriptions(
+            session,
+            operation.metricId,
+          );
+          subscriptionsByMetricId.set(operation.metricId, subscriptions);
+        }
+        const matches = subscriptions.filter(
+          (subscription) =>
+            subscription.follower.id === operation.target.id &&
+            subscription.follower.type === operation.target.kind,
+        );
+        if (!matches.length) {
+          results.push({ ...operationResult(operation, "not_followed", true), sent: false });
+          continue;
+        }
+        if (matches.some((subscription) => !subscription.id)) {
+          results.push(
+            { ...operationResult(
+              operation,
+              "failed",
+              false,
+              "A matching subscription has no deletable subscription identifier.",
+            ), sent: false },
+          );
+          continue;
+        }
+        for (const subscription of matches) {
+          attempted = true;
+          await dependencies.deleteSubscription(session, subscription.id!);
+          completedDeletes++;
+        }
+        results.push(operationResult(operation, "unfollowed", true));
+      } catch (error) {
+        if (error instanceof TableauError && error.status === 429) {
+          terminated = true; throttleError = error;
+          results.push(throttleFollowResult(session, operation, error, completedDeletes > 0 || (attempted && error.sent !== false), 'unfollow'));
+          continue;
+        }
+        const auth = error instanceof TableauError && error.kind === "auth";
+        const unknown =
+          attempted &&
+          (!(error instanceof TableauError) ||
+            error.kind === "network" ||
+            error.status >= 500);
+        terminated = auth || unknown;
+        results.push({
+          ...operationResult(
+            operation,
+            unknown ? "unknown" : auth && !attempted ? "not_attempted" : "failed",
+            false,
+            pulseOperationErrorMessage(error, 'unfollow', [session.token]),
+          ),
+          ...mutationMetadata(error, !attempted),
+          ...(auth
+            ? { code: "authentication_required" }
+            : unknown
+              ? { code: "subscription_interrupted" }
+              : {}),
+        });
       }
-      results.push(operationResult(operation, "unfollowed", true));
-    } catch (error) {
-      const auth = error instanceof TableauError && error.kind === "auth";
-      const unknown =
-        attempted &&
-        (!(error instanceof TableauError) ||
-          error.kind === "network" ||
-          error.status >= 500);
-      terminated = auth || unknown;
-      results.push({
-        ...operationResult(
-          operation,
-          unknown ? "unknown" : auth && !attempted ? "not_attempted" : "failed",
-          false,
-          pulseOperationErrorMessage(error, 'unfollow', [session.token]),
-        ),
-        ...(auth
-          ? { code: "authentication_required" }
-          : unknown
-            ? { code: "subscription_interrupted" }
-            : {}),
-      });
     }
+    return results;
+  } finally { invalidateSubscriptionCoverage(session, affectedIds); }
+}
+
+function followWriteResult(operation: FollowTargetOperation, item: import('../pulse/pulse-client.js').SubscriptionWriteResult): FollowTargetOperationResult {
+  return { ...operationResult(operation, item.ok ? item.alreadyExists ? 'already_followed' : 'followed' : item.sent === false ? 'not_attempted' : item.unknown ? 'unknown' : 'failed', item.ok, item.error), sent: item.sent ?? true, ...(item.throttle ? { throttle: item.throttle, code: 'tableau_throttled' } : {}) };
+}
+function followAdmission(session: TableauSession, operations: FollowTargetOperation[]): FollowTargetOperationResult[] | undefined {
+  try { assertTableauMutationAdmission(session); }
+  catch (error) {
+    if (!(error instanceof TableauThrottleError)) throw error;
+    return operations.map(operation => throttleFollowResult(session, operation, error, false));
   }
-  return results;
+}
+function throttleFollowResult(session: TableauSession, operation: FollowTargetOperation, error: TableauError, sent: boolean, action: 'follow' | 'unfollow' = 'follow'): FollowTargetOperationResult {
+  const metadata = mutationMetadata(error, !sent);
+  return { ...operationResult(operation, sent ? 'failed' : 'not_attempted', false, pulseOperationErrorMessage(error, action, [session.token])), sent, ...(metadata.throttle ? { throttle: { ...metadata.throttle, sent } } : {}), code: 'tableau_throttled' };
 }
 
 export type FollowersDetail = PulseFollowersDetail;
@@ -703,7 +731,7 @@ export async function getFollowersDetail(
           const name = await cachedUserName(session, follower.id, dependencies);
           resolvedNames.set(key, { name: name ?? follower.id });
         } catch (error) {
-          if (error instanceof TableauError && error.kind === "auth")
+          if (error instanceof TableauError && (error.kind === "auth" || error.status === 429))
             throw error;
           resolvedNames.set(key, {
             name: follower.id,

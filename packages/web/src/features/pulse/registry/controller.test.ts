@@ -6,10 +6,11 @@ import type {
   PulseVariantSummary,
 } from "@pulse-metric-studio/shared";
 import { createRegistryController } from "./controller";
+import { applyInventoryPatch } from "./inventory-patch";
 import { deferred, draft, inventory, session } from "../testing/fixtures";
 import { unavailableFollowState } from "../follow-state";
-import type { RegistryApi } from "../api/registry";
-import { PulseApiError, type PulseApi } from "../api/client";
+import { decodeVariantResponse, registryApi, type RegistryApi } from "../api/registry";
+import { pulseApi, PulseApiError, type PulseApi } from "../api/client";
 
 function fixture(
   overrides: Partial<RegistryApi> = {},
@@ -217,8 +218,8 @@ test("deletion review freezes cached names and known follower counts without add
 
 test("selection-scoped follower refresh batches exact IDs and preserves inventory state", async () => {
   const requests: string[][] = [];
-  const store = fixture({ followState: async (ids) => {
-    requests.push(ids);
+  const store = fixture({ followState: async (ids, detail) => {
+    if (detail) requests.push(ids);
     if (ids.includes("m200")) throw new Error("subscription read failed");
     return { ...unavailableFollowState(ids, "partial"), selectedGroupId: null,
       groupFollowerIdsByMetricId: {}, groupContextUnavailable: false, availabilityByMetricId: {},
@@ -310,7 +311,7 @@ test("reviewed deletion chunks all 1001 selected variants without omissions", as
   assert.deepEqual(previews, [1000, 1]);
   assert.deepEqual(deleted, ids);
   assert.equal(store.getState().results?.items.length, 1001);
-  assert.equal(reads, 2, "all deletion batches share one final refresh");
+  assert.equal(reads, 1, "deletion does not reload inventory or summary counts");
 });
 
 test("mixed bulk review removes covered children before splitting and retains earlier outcomes when a later plan changes", async () => {
@@ -397,10 +398,10 @@ test("mixed bulk review removes covered children before splitting and retains ea
   );
   assert.equal(results.at(-1)?.status, "not_attempted");
   assert.match(results.at(-1)?.detail ?? "", /Review again/);
-  assert.equal(reads, 2, "a later rejected batch refreshes once after earlier deletions");
+  assert.equal(reads, 1, "a rejected batch does not reload inventory");
 });
 
-test("uncertain bulk deletion stops unsent batches and refreshes inventory exactly once", async () => {
+test("uncertain bulk deletion stops unsent batches without reloading inventory", async () => {
   const ids = Array.from({ length: 2001 }, (_, index) => `variant-${index}`);
   let reads = 0;
   let executions = 0;
@@ -426,7 +427,7 @@ test("uncertain bulk deletion stops unsent batches and refreshes inventory exact
   assert.equal(reads, 1);
   await store.getState().executeDelete();
   assert.equal(executions, 2);
-  assert.equal(reads, 2);
+  assert.equal(reads, 1);
   const items = store.getState().results!.items;
   assert.equal(items.filter((item) => item.status === "removed").length, 1000);
   assert.equal(items.filter((item) => item.status === "unknown").length, 1);
@@ -434,7 +435,7 @@ test("uncertain bulk deletion stops unsent batches and refreshes inventory exact
   assert.equal(items.at(-1)?.metricId, "variant-2000");
 });
 
-test("navigation joins the deletion refresh already in progress", async () => {
+test("navigation retains the owned inventory after deletion without a refresh", async () => {
   const refreshed = deferred<PulseInventoryResponse>();
   let reads = 0;
   const store = fixture({ inventory: async () => ++reads === 1 ? inventory() : refreshed.promise });
@@ -445,7 +446,7 @@ test("navigation joins the deletion refresh already in progress", async () => {
   await new Promise((resolve) => setTimeout(resolve, 0));
   const navigation = store.getState().ensureLoaded();
   try {
-    assert.equal(reads, 2, "navigation must not start a second final refresh");
+    assert.equal(reads, 1, "deletion and navigation retain the owned inventory");
   } finally {
     refreshed.resolve(inventory("new"));
     await Promise.all([deletion, navigation]);
@@ -668,7 +669,7 @@ test("explicit whole-definition previews retain the backend blast radius and par
   );
 });
 
-test("denied cached deletion records errors only in results and keeps one final refresh", async () => {
+test("denied cached deletion records errors only in results without refreshing", async () => {
   const calls: string[] = [];
   const store = fixture({
     inventory: async () => { calls.push("inventory"); return inventory(); },
@@ -692,7 +693,7 @@ test("denied cached deletion records errors only in results and keeps one final 
   await store.getState().previewDelete(["metric"], []);
   assert.deepEqual(calls, ["inventory", "counts", "cached-preview"], "review performs no new provider reads");
   await store.getState().executeDelete();
-  assert.deepEqual(calls, ["inventory", "counts", "cached-preview", "DELETE metric", "inventory", "counts"]);
+  assert.deepEqual(calls, ["inventory", "counts", "cached-preview", "DELETE metric"]);
   assert.equal(store.getState().deletePlan, null);
   assert.equal(store.getState().deleteError, null, "recorded execution errors must not reopen deletion review");
   assert.equal(store.getState().results?.items[0].status, "failed");
@@ -1075,7 +1076,7 @@ test("initial counts defer identities and following one of 405 metrics refreshes
   requests.length = 0;
   await store.getState().follow("follow", [{ metricId: "m200", target: { kind: "USER", id: "person" } }], [], []);
   assert.equal(inventories, 1);
-  assert.deepEqual(requests, [{ ids: ["m200"], detail: true }]);
+  assert.deepEqual(requests, [{ ids: ["m200"], detail: true }, { ids: ["m200"], detail: false }]);
   assert.equal(store.getState().followState?.followerCountsByMetricId.m199, 1);
   assert.equal(store.getState().followState?.followerCountsByMetricId.m200, 2);
   requests.length = 0;
@@ -1101,11 +1102,12 @@ test("follow directory shares mounts but explicit refresh and new session reload
 test("a slow initial count response cannot erase newer targeted mutation reconciliation", async () => {
   const oldCounts = deferred<Awaited<ReturnType<RegistryApi["followState"]>>>();
   const countStarted = deferred<void>();
+  let countReads = 0;
   const fresh = { ...unavailableFollowState(["metric"], "fresh"), selectedGroupId: null, groupContextUnavailable: false,
     userFollowerIdsByMetricId: { metric: ["person"] }, groupFollowerIdsByMetricId: {},
     followerCountsByMetricId: { metric: 2 }, availabilityByMetricId: { metric: { status: "available" as const, relationshipStatus: "available" as const, followerCountStatus: "available" as const, diagnostics: [] } } };
   const store = fixture({
-    followState: async (_ids, detail) => { if (!detail) { countStarted.resolve(); return oldCounts.promise; } return fresh; },
+    followState: async (_ids, detail) => { if (!detail && ++countReads === 1) { countStarted.resolve(); return oldCounts.promise; } return fresh; },
     follow: async () => ({ results: [{ metricId: "metric", targetKind: "USER", targetId: "person", status: "followed", ok: true }] }),
   });
   const initial = store.getState().activateContext(draft().context, "A", session);
@@ -1140,4 +1142,292 @@ test("manual refresh passes explicit freshness without changing navigation reque
   await store.getState().ensureLoaded();
   await store.getState().refresh();
   assert.deepEqual(options, [undefined, { refresh: true }]);
+});
+
+function inventoryPatch(revision: number, upserts: import("@pulse-metric-studio/shared").PulseInventoryPatch["upserts"] = [], removedMetricIds: string[] = []): import("@pulse-metric-studio/shared").PulseInventoryPatch {
+  return { version: 1, baseSnapshotId: "snapshot-metric", snapshotId: `patched-${revision}`, viewId: "owned-view", revision, upserts, removedMetricIds, removedDefinitionIds: [] };
+}
+
+function completeCounts(ids: string[], detail: boolean): Awaited<ReturnType<RegistryApi["followState"]>> {
+  return { userFollowsByMetricId: detail ? Object.fromEntries(ids.map(id => [id, true])) : {}, groupFollowsByMetricId: {},
+    userFollowerIdsByMetricId: {}, groupFollowerIdsByMetricId: {}, followerCountsByMetricId: detail ? {} : Object.fromEntries(ids.map(id => [id, 7])),
+    availabilityByMetricId: Object.fromEntries(ids.map(id => [id, { status: "available", relationshipStatus: detail ? "available" : "not_requested", followerIdsStatus: detail ? "available" : "not_requested", followerCountStatus: detail ? "not_requested" : "available", diagnostics: [] }])),
+    errors: [], selectedGroupId: null, groupContextUnavailable: false };
+}
+
+test("confirmed and duplicate variants patch once by ID with no inventory or follower reload", async () => {
+  let reads = 0, writes = 0;
+  const followReads: Array<{ ids: string[]; detail: boolean }> = [];
+  const row = { ...inventory().definitions[0].metrics[0], metricId: "new", isDefault: null };
+  const store = fixture({
+    inventory: async () => { reads++; return { ...inventory(), viewId: "owned-view", revision: 1 }; },
+    followState: async (ids, detail = true) => { followReads.push({ ids, detail }); return completeCounts(ids, detail); },
+    fork: async (_context, _request, _owner, options) => {
+      assert.equal(options?.snapshotId, writes ? "patched-2" : "snapshot-metric");
+      writes++;
+      return { attempted: 1, created: writes === 1 ? 1 : 0, existing: writes === 1 ? 0 : 1, failed: 0, pendingVisibility: 0,
+        results: [{ sourceMetricId: "metric", metricId: "new", status: writes === 1 ? "created" : "existing", creationStatus: writes === 1 ? "created" : "existing", requestedSpecification: {} }],
+        inventoryPatch: inventoryPatch(writes + 1, [{ definitionId: "definition-metric", metric: row }]) };
+    },
+  });
+  store.getState().setContext(draft().context, "A", session);
+  await store.getState().load();
+  await store.getState().ensureFollowState(["metric"]);
+  const evidence = structuredClone(store.getState().followState);
+  const command = { version: 1 as const, sourceMetricIds: ["metric"], clauses: [] };
+  await store.getState().fork(command, new Map());
+  assert.equal(store.getState().results?.items[0].status, "created");
+  await store.getState().fork(command, new Map());
+  assert.equal(store.getState().results?.items[0].status, "existing");
+  assert.equal(reads, 1);
+  assert.deepEqual(followReads, [{ ids: ["metric"], detail: false }, { ids: ["metric"], detail: true }]);
+  assert.equal(store.getState().inventory?.definitions[0].metrics.filter(metric => metric.metricId === "new").length, 1);
+  assert.equal(store.getState().inventory?.definitions[0].metrics.find(metric => metric.metricId === "new")?.isDefault, null);
+  assert.equal(store.getState().followState?.followerCountsByMetricId.metric, 7);
+  assert.equal(store.getState().followState?.userFollowsByMetricId.metric, evidence?.userFollowsByMetricId.metric);
+  assert.equal(store.getState().followState?.availabilityByMetricId?.new?.relationshipStatus, "not_requested");
+  assert.equal(store.getState().followState?.followerCountsByMetricId.new, undefined);
+  await store.getState().ensureFollowState(["metric"]);
+  assert.equal(followReads.length, 2, "existing relationship evidence survives both patches");
+  await store.getState().ensureFollowState(["new"]);
+  assert.deepEqual(followReads.slice(2), [{ ids: ["new"], detail: true }, { ids: ["new"], detail: false }]);
+});
+
+test("a pending older refresh cannot lose a confirmed create or replace its snapshot", async () => {
+  const refresh = deferred<PulseInventoryResponse>();
+  let reads = 0;
+  const row = { ...inventory().definitions[0].metrics[0], metricId: "new" };
+  const store = fixture({
+    inventory: async () => ++reads === 1 ? { ...inventory(), revision: 1, viewId: "initial" } : refresh.promise,
+    fork: async () => ({ attempted: 1, created: 1, existing: 0, failed: 0, pendingVisibility: 0,
+      results: [{ sourceMetricId: "metric", metricId: "new", status: "created", creationStatus: "created", requestedSpecification: {} }],
+      inventoryPatch: inventoryPatch(3, [{ definitionId: "definition-metric", metric: row }]) }),
+  });
+  store.getState().setContext(draft().context);
+  await store.getState().load();
+  const refreshing = store.getState().refresh();
+  await store.getState().fork({ version: 1, sourceMetricIds: ["metric"], clauses: [] }, new Map());
+  refresh.resolve({ ...inventory(), revision: 2, viewId: "refresh" });
+  await refreshing;
+  assert.equal(reads, 2, "only the explicit refresh reads inventory");
+  assert.equal(store.getState().inventory?.snapshotId, "patched-3");
+  assert.ok(store.getState().inventory?.definitions[0].metrics.some(metric => metric.metricId === "new"));
+});
+
+test("partial deletion patches only confirmed removals and an older refresh cannot resurrect them", async () => {
+  const refresh = deferred<PulseInventoryResponse>();
+  let reads = 0;
+  const source = inventory();
+  source.definitions[0].metrics.push({ ...source.definitions[0].metrics[0], metricId: "unknown" });
+  const store = fixture({ inventory: async () => ++reads === 1 ? { ...source, revision: 1 } : refresh.promise }, {
+    delete: async () => ({ definitionsDeleted: 0, metricsDeleted: 1, failures: ["Lost second response"],
+      outcomes: [{ metricId: "metric", status: "deleted" }, { metricId: "unknown", status: "unknown" }], inventoryPatch: inventoryPatch(3, [], ["metric"]) }),
+  });
+  store.getState().setContext(draft().context);
+  await store.getState().load();
+  await store.getState().previewDelete(["metric", "unknown"], []);
+  const refreshing = store.getState().refresh();
+  await store.getState().executeDelete();
+  assert.deepEqual(store.getState().results?.items.map(item => item.status), ["removed", "unknown"]);
+  refresh.resolve({ ...source, revision: 2 }); await refreshing;
+  assert.deepEqual(store.getState().inventory?.definitions[0].metrics.map(metric => metric.metricId), ["unknown"]);
+  assert.equal(reads, 2);
+});
+
+test("local throttle refusals remain unsent without inventory refresh and cooldown status is owner fenced", async () => {
+  let reads = 0, statusReads = 0;
+  const status = deferred<Awaited<ReturnType<NonNullable<RegistryApi["throttle"]>>>>();
+  const store = fixture({
+    inventory: async () => { reads++; return inventory(); },
+    fork: async () => { throw new PulseApiError("Wait for Tableau cooldown", 429, undefined, undefined, { retryAt: 36_000, serverTime: 0, reason: "throttle", sent: false }); },
+    throttle: async () => { statusReads++; return status.promise; },
+  });
+  store.getState().setContext(draft().context, "A", session); await store.getState().load();
+  await store.getState().fork({ version: 1, sourceMetricIds: ["metric"], clauses: [] }, new Map());
+  assert.equal(store.getState().results?.items[0].status, "not_attempted");
+  assert.equal(reads, 1);
+  assert.equal(store.getState().cooldown?.remainingSeconds, 36);
+  store.getState().setContext(draft("b").context, "B", session);
+  assert.equal(store.getState().cooldown?.remainingSeconds, 36, "same-owner datasource changes retain the identity-wide wait");
+  const polling = store.getState().pollCooldown();
+  store.getState().setContext(draft().context, "A", { ...session, sessionGeneration: 2 });
+  status.resolve({ throttled: true, retryAt: 36_000, serverTime: 0, reason: "throttle" }); await polling;
+  assert.equal(statusReads, 1); assert.equal(store.getState().cooldown, null);
+});
+
+
+test("sent throttle receipts show cooldown after fast failure and reject older unthrottled polls", async () => {
+  const initialStatus = deferred<Awaited<ReturnType<NonNullable<RegistryApi["throttle"]>>>>();
+  const now = Date.now();
+  const throttle = { retryAt: now + 40_000, serverTime: now, reason: "throttle" as const, sent: true };
+  const summary = decodeVariantResponse({ ok: false, status: 502 }, {
+    attempted: 1, created: 0, existing: 0, failed: 1, pendingVisibility: 0, throttle, sent: true,
+    results: [{ sourceMetricId: "metric", status: "failed", creationStatus: "failed", sent: true, requestedSpecification: {}, error: "HTTP 429" }],
+  });
+  const store = fixture({ fork: async () => summary, throttle: async () => initialStatus.promise });
+  store.getState().setContext(draft().context, "A", session);
+  const poll = store.getState().pollCooldown();
+  await store.getState().fork({ version: 1, sourceMetricIds: ["metric"], clauses: [] }, new Map());
+  assert.equal(store.getState().busy, null);
+  assert.equal(store.getState().cooldown?.remainingSeconds, 40, "A valid failed receipt must seed the banner after a fast terminal response.");
+  assert.match(store.getState().results?.summary ?? "", /Tableau is limiting requests/);
+  initialStatus.resolve({ throttled: false, retryAt: null, serverTime: now, reason: null }); await poll;
+  assert.equal(store.getState().cooldown?.retryAt, throttle.retryAt, "A status read started before the receipt cannot erase its newer throttle.");
+  let overlappingWrites = 0;
+  const blocked = fixture({ fork: async () => { overlappingWrites++; return summary; } });
+  blocked.getState().setContext(draft().context, "A", session);
+  blocked.setState({ cooldown: store.getState().cooldown });
+  await blocked.getState().fork({ version: 1, sourceMetricIds: ["metric"], clauses: [] }, new Map());
+  assert.equal(overlappingWrites, 0);
+});
+
+
+for (const kind of ["follow", "unfollow"] as const) for (const sent of [true, false]) test(`real ${kind} ${sent ? "sent partial" : "unsent admission"} receipt retains its throttle`, async (t) => {
+  const throttle = { retryAt: 36_000, serverTime: 0, reason: "throttle" as const, sent };
+  let providerFollowReads = 0, writes = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    writes++;
+    return Response.json({ stopped: true, sent, throttle, results: [
+      { metricId: "metric", targetId: "user", targetKind: "USER", status: sent ? "failed" : "not_attempted", ok: false, sent, throttle },
+    ] }, { status: sent ? 207 : 429 });
+  });
+  const store = fixture({ [kind]: registryApi[kind], followState: async () => { providerFollowReads++; return completeCounts(["metric"], true); } });
+  store.getState().setContext(draft().context, "A", session);
+  const operations = Array.from({ length: 201 }, (_, index) => ({ metricId: index ? `other-${index}` : "metric", target: { kind: "USER" as const, id: "user" } }));
+  await store.getState().follow(kind, operations, [], []);
+  assert.equal(store.getState().cooldown?.remainingSeconds, 36);
+  assert.equal(store.getState().busy, null);
+  assert.equal(store.getState().results?.items[0].status, sent ? "failed" : "not_attempted");
+  assert.equal(store.getState().results?.items.at(-1)?.status, "not_attempted");
+  assert.equal(writes, 1, "known throttle prevents dispatching a second batch");
+  assert.equal(providerFollowReads, 0, "known cooldown prevents automatic relationship reads");
+});
+
+
+test("a new backend owner lifetime replaces retired local receipts without journal replay", async () => {
+  const base = { ...inventory(), lifetimeId: "retired", revision: 1 };
+  const created = { ...structuredClone(base), snapshotId: "patched-2", viewId: "owned-view", revision: 2 };
+  created.definitions[0].metrics.push({ ...created.definitions[0].metrics[0], metricId: "retired-local" });
+  let reads = 0;
+  const store = fixture({
+    inventory: async () => ++reads === 1 ? base : { ...inventory(), lifetimeId: "replacement", revision: 1 },
+    fork: async () => ({ attempted: 1, created: 1, existing: 0, failed: 0, pendingVisibility: 0, results: [],
+      inventoryPatch: { ...inventoryPatch(2, [{ definitionId: "definition-metric", metric: created.definitions[0].metrics[1] }]), lifetimeId: "retired", inventory: created } }),
+  });
+  store.getState().setContext(draft().context, "A", session);
+  await store.getState().load();
+  await store.getState().fork({ version: 1, sourceMetricIds: ["metric"], clauses: [] }, new Map());
+  await store.getState().refresh();
+  assert.deepEqual(store.getState().inventory?.definitions[0].metrics.map(row => row.metricId), ["metric"]);
+  assert.equal((store.getState().inventory as any)?.lifetimeId, "replacement");
+  assert.equal(store.getState().inventory?.revision, 1);
+});
+
+test("reverse mutation receipts retain every confirmed create after A B A navigation", async () => {
+  const first = deferred<PulseVariantSummary>();
+  const second = deferred<PulseVariantSummary>();
+  const base = { ...inventory(), lifetimeId: "owner-lifetime", revision: 1 };
+  const snapshot = (revision: number, ids: string[]) => ({ ...structuredClone(base), snapshotId: `patched-${revision}`, viewId: "owned-view", revision,
+    definitions: base.definitions.map(definition => ({ ...definition, metrics: [...definition.metrics, ...ids.map(metricId => ({ ...definition.metrics[0], metricId }))] })) });
+  const receipt = (revision: number, ids: string[]): PulseVariantSummary => ({ attempted: 1, created: 1, existing: 0, failed: 0, pendingVisibility: 0, results: [],
+    inventoryPatch: { ...inventoryPatch(revision, [{ definitionId: "definition-metric", metric: { ...base.definitions[0].metrics[0], metricId: ids.at(-1)! } }]), lifetimeId: base.lifetimeId, inventory: snapshot(revision, ids) } as any });
+  let writes = 0;
+  const store = fixture({ inventory: async () => base, fork: async () => ++writes === 1 ? first.promise : second.promise });
+  store.getState().setContext(draft().context, "A", session);
+  await store.getState().load();
+  const command = { version: 1 as const, sourceMetricIds: ["metric"], clauses: [] };
+  const one = store.getState().fork(command, new Map());
+  store.getState().setContext(draft("b").context, "B", session);
+  store.getState().setContext(draft().context, "A", session);
+  const two = store.getState().fork(command, new Map());
+  second.resolve(receipt(3, ["one", "two"])); await two;
+  first.resolve(receipt(2, ["one"])); await one;
+  assert.deepEqual(store.getState().inventory?.definitions[0].metrics.map(row => row.metricId), ["metric", "one", "two"]);
+  assert.equal(store.getState().inventory?.revision, 3);
+});
+
+test("provider read errors retain structured cooldown and fence pending work by owner", async () => {
+  const held = deferred<never>();
+  const store = fixture();
+  store.getState().setContext(draft().context, "A", session);
+  const read = store.getState().trackProviderOperation(() => held.promise).catch(() => undefined);
+  assert.equal(store.getState().pendingProviderOperations, 1);
+  store.getState().setContext(draft("b").context, "B", session);
+  assert.equal(store.getState().pendingProviderOperations, 1, "same-owner work remains visible across datasources");
+  held.reject(new PulseApiError("Wait", 429, undefined, undefined, { retryAt: 50_000, serverTime: 0, reason: "throttle", sent: true }));
+  await read;
+  assert.equal(store.getState().cooldown?.remainingSeconds, 50);
+  assert.equal(store.getState().pendingProviderOperations, 0);
+  const stale = deferred<never>();
+  const old = store.getState().trackProviderOperation(() => stale.promise).catch(() => undefined);
+  store.getState().setContext(draft().context, "New owner", { ...session, sessionGeneration: 2 });
+  assert.equal(store.getState().pendingProviderOperations, 0);
+  stale.reject(new PulseApiError("Old wait", 429, undefined, undefined, { retryAt: 90_000, serverTime: 0, reason: "throttle", sent: true }));
+  await old;
+  assert.equal(store.getState().cooldown, null);
+});
+
+test("late mutation from a retired backend lifetime cannot replace a new authoritative read", async () => {
+  const held = deferred<PulseVariantSummary>();
+  const base = { ...inventory(), lifetimeId: "retired", revision: 1 };
+  const replacement = { ...inventory("replacement"), lifetimeId: "new", revision: 1 };
+  let reads = 0;
+  const store = fixture({ inventory: async () => ++reads === 1 ? base : replacement, fork: async () => held.promise });
+  store.getState().setContext(draft().context, "A", session);
+  await store.getState().load();
+  const mutation = store.getState().fork({ version: 1, sourceMetricIds: ["metric"], clauses: [] }, new Map());
+  await store.getState().refresh();
+  held.resolve({ attempted: 1, created: 1, existing: 0, failed: 0, pendingVisibility: 0, results: [{ sourceMetricId: "metric", metricId: "retired-local", status: "created", creationStatus: "created", requestedSpecification: {} }],
+    inventoryPatch: { ...inventoryPatch(2), lifetimeId: "retired", inventory: { ...base, revision: 2 } } });
+  await mutation;
+  assert.deepEqual(store.getState().inventory, replacement);
+  assert.equal(store.getState().results?.items[0].status, "created", "the confirmed receipt remains inspectable even though its retired snapshot is rejected");
+});
+
+test("real deletion partial receipt retains its sent throttle after completion", async (t) => {
+  const throttle = { retryAt: 36_000, serverTime: 0, reason: "throttle", sent: true };
+  t.mock.method(globalThis, "fetch", async () => Response.json({ throttle, sent: true,
+    definitionsDeleted: 0, metricsDeleted: 0, failures: ["HTTP 429"], outcomes: [{ metricId: "metric", status: "failed", sent: true, throttle }],
+  }, { status: 207 }));
+  const store = fixture({}, { delete: pulseApi.delete });
+  store.getState().setContext(draft().context, "A", session);
+  await store.getState().load();
+  await store.getState().previewDelete(["metric"], []);
+  await store.getState().executeDelete();
+  assert.equal(store.getState().cooldown?.remainingSeconds, 36);
+  assert.equal(store.getState().busy, null);
+  assert.equal(store.getState().results?.items[0].status, "failed");
+});
+
+test("complete receipt coordinates must match the normalized snapshot envelope", () => {
+  const base = { ...inventory(), lifetimeId: "owner", revision: 1, viewId: "owned-view" };
+  const patch = { ...inventoryPatch(2), lifetimeId: "owner", inventory: { ...base, snapshotId: "patched-2", revision: 2 } };
+  for (const conflict of [{ snapshotId: "wrong" }, { viewId: "wrong" }, { lifetimeId: "wrong" }, { revision: 3 }]) {
+    assert.equal(applyInventoryPatch(base, { ...patch, inventory: { ...patch.inventory, ...conflict } }), base);
+  }
+  assert.equal(applyInventoryPatch(base, patch), patch.inventory);
+});
+
+for (const replacementOwner of [false, true]) test(`owner activity permits healthy overlap and fences old completions (${replacementOwner ? "replacement owner" : "same owner"})`, async () => {
+  const first = deferred<PulseVariantSummary>(), second = deferred<PulseVariantSummary>();
+  let writes = 0;
+  const store = fixture({ fork: async () => ++writes === 1 ? first.promise : second.promise });
+  store.getState().setContext(draft().context, "A", session);
+  const command = { version: 1 as const, sourceMetricIds: ["metric"], clauses: [] };
+  const a = store.getState().fork(command, new Map());
+  assert.equal(store.getState().pendingProviderOperations, 1);
+  store.getState().setContext(draft("b").context, "B", replacementOwner ? { ...session, sessionGeneration: 2 } : session);
+  assert.equal(store.getState().busy, null);
+  const b = store.getState().fork(command, new Map());
+  assert.equal(writes, 2, "owner activity observes healthy work without adding mutation serialization");
+  assert.equal(store.getState().pendingProviderOperations, replacementOwner ? 1 : 2);
+  first.resolve({ attempted: 0, created: 0, existing: 0, failed: 0, pendingVisibility: 0, results: [] });
+  await a;
+  assert.equal(store.getState().pendingProviderOperations, 1, "old completion cannot decrement another pending owner's work");
+  assert.equal(store.getState().busy, "fork", "old completion cannot clear a newer visible mutation's busy state");
+  second.resolve({ attempted: 0, created: 0, existing: 0, failed: 0, pendingVisibility: 0, results: [] });
+  await b;
+  assert.equal(store.getState().pendingProviderOperations, 0);
+  assert.equal(store.getState().busy, null);
+  assert.equal(Object.keys(store.getState().outcomes).length, 2);
 });

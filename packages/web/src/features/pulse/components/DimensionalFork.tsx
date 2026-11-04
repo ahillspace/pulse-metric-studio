@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { pulseDimensionalForkApi } from "../dimensional-fork-api";
+import { pulseDimensionalForkApi, type DimensionContext } from "../dimensional-fork-api";
+import { useRegistry } from "../registry/controller";
 import { createRequestSequencer } from "../dimensional-fork-requests";
 import {
   applyDomainToggle,
@@ -35,6 +36,8 @@ export interface InheritedDimensionFilter {
 }
 
 interface DimensionalForkProps {
+  context?: DimensionContext;
+  onSourceContextResolved?(id: string | undefined): void;
   sources: SourceMetric[];
   clauses: StagedDimensionClause[];
   /** Source filters; editing one starts from its current values. */
@@ -55,6 +58,8 @@ interface DimensionalForkProps {
 const VALUE_GRID_MAX = 1500;
 
 export function DimensionalFork({
+  context = {},
+  onSourceContextResolved,
   sources,
   clauses,
   inherited = [],
@@ -67,6 +72,10 @@ export function DimensionalFork({
     [sources],
   );
   const sourceContextKey = sourceMetricIds.join("\u0000");
+  const [filtersRequested, setFiltersRequested] = useState(false);
+  const sourceContextId = useRef<string | undefined>();
+  const requestContext = () => ({ ...context, sourceContextId: sourceContextId.current });
+  const read = <T,>(request: () => Promise<T>) => useRegistry.getState().trackProviderOperation(request, context.owner);
   const [fields, setFields] = useState<PulseFilterDimensionField[]>([]);
   const [fieldId, setFieldId] = useState("");
   const [valueContext, setValueContext] = useState("");
@@ -106,13 +115,16 @@ export function DimensionalFork({
     // Invalidate any prior in-flight fields request even when we early-return
     // (e.g. selection cleared), so its late response cannot repopulate state.
     const token = fieldsSeqRef.current.next();
-    if (sourceMetricIds.length === 0) return;
+    sourceContextId.current = undefined;
+    onSourceContextResolved?.(undefined);
+    if (!filtersRequested || sourceMetricIds.length === 0) return;
 
     setFieldsLoading(true);
-    void pulseDimensionalForkApi
-      .fields(sourceMetricIds)
+    void read(() => pulseDimensionalForkApi.fields(sourceMetricIds, requestContext()))
       .then((response) => {
         if (!fieldsSeqRef.current.isLatest(token)) return;
+        sourceContextId.current = response.sourceContextId;
+        onSourceContextResolved?.(response.sourceContextId);
         setFields(response.fields);
         onCompatibilityResolved(sourceContextKey, response.fields);
       })
@@ -125,7 +137,7 @@ export function DimensionalFork({
       .finally(() => {
         if (fieldsSeqRef.current.isLatest(token)) setFieldsLoading(false);
       });
-  }, [sourceContextKey]);
+  }, [sourceContextKey, filtersRequested]);
 
   // Field select: count the distinct members first, then either fetch the whole
   // domain (small) or wait for the user to search (large). One monotonic token
@@ -152,10 +164,11 @@ export function DimensionalFork({
     setValuesLoading(true);
     void (async () => {
       try {
-        const { count } = await pulseDimensionalForkApi.count(
+        const { count } = await read(() => pulseDimensionalForkApi.count(
           sourceMetricIds,
           fieldId,
-        );
+          requestContext(),
+        ));
         if (!valuesSeqRef.current.isLatest(token)) return;
         const mode = chooseValueMode(count);
         setMemberCount(count);
@@ -166,11 +179,12 @@ export function DimensionalFork({
         setExclude(existingClause?.exclude ?? false);
 
         if (mode !== "fetch-all") return;
-        const page = await pulseDimensionalForkApi.values(
+        const page = await read(() => pulseDimensionalForkApi.values(
           sourceMetricIds,
           fieldId,
           "",
-        );
+          requestContext(),
+        ));
         if (!valuesSeqRef.current.isLatest(token)) return;
         const values = uniqueDimensionValues(page.values);
         setDomain(values);
@@ -212,8 +226,7 @@ export function DimensionalFork({
     setValuesLoading(true);
     setValuesError(null);
     const timer = window.setTimeout(() => {
-      void pulseDimensionalForkApi
-        .values(sourceMetricIds, fieldId, search.trim())
+      void read(() => pulseDimensionalForkApi.values(sourceMetricIds, fieldId, search.trim(), requestContext()))
         .then((page) => {
           if (!searchSeqRef.current.isLatest(token)) return;
           const values = uniqueDimensionValues(page.values);
@@ -350,8 +363,7 @@ export function DimensionalFork({
     searchLoadingRef.current = false;
     setAllLoading(true);
     setValuesError(null);
-    void pulseDimensionalForkApi
-      .values(sourceMetricIds, fieldId, "", { all: true })
+    void read(() => pulseDimensionalForkApi.values(sourceMetricIds, fieldId, "", { ...requestContext(), all: true }))
       .then((page) => {
         if (!valuesSeqRef.current.isLatest(token)) return;
         const values = uniqueDimensionValues(page.values);
@@ -463,7 +475,8 @@ export function DimensionalFork({
         </div>
       )}
 
-      <div className="dimension-fork-controls">
+      {!filtersRequested && <button className="btn small" type="button" disabled={!sourceMetricIds.length} onClick={() => setFiltersRequested(true)}>Add filters</button>}
+      {filtersRequested && <div className="dimension-fork-controls">
         <label>
           <span>Dimension field</span>
           <select
@@ -497,7 +510,7 @@ export function DimensionalFork({
             onChange={(event) => setSearch(event.target.value)}
           />
         </label>
-      </div>
+      </div>}
 
       {sourceMetricIds.length === 0 && (
         <p className="section-hint">Select metrics to create variants.</p>
@@ -507,7 +520,7 @@ export function DimensionalFork({
           Fields could not load: {fieldsError}
         </div>
       )}
-      {!fieldsLoading &&
+      {filtersRequested && !fieldsLoading &&
         sourceMetricIds.length > 0 &&
         !fieldsError &&
         fields.length === 0 && (

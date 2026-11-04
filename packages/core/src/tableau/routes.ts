@@ -1,4 +1,5 @@
 import '@fastify/sensible';
+import { z } from 'zod';
 import { credentialOperationFingerprint } from '../db/crypto.js';
 import type { FastifyInstance } from 'fastify';
 import {
@@ -6,9 +7,10 @@ import {
   CredentialBrokerError,
   type CredentialBrokerClient,
 } from './credential-broker.js';
-import { apiPath, classifyStatus, DEFAULT_MAX_RESPONSE_BYTES, readBoundedBody, parseTableauProviderError, TableauError, type TableauSession } from './rest-client.js';
+import { apiPath, classifyStatus, DEFAULT_MAX_RESPONSE_BYTES, getTableauThrottleStatus, readBoundedBody, parseTableauProviderError, TableauError, type TableauSession } from './rest-client.js';
 import { invalidateFieldsCache, listDatasources } from './vds-fields.js';
 import { discoverRestApiVersion, patSignin } from './signin.js';
+import { createTableauCallTrace, observedTableauFetch, finishObservedTableauResponse, type TableauCallTrace } from './telemetry.js';
 import {
   clearSession,
   beginTableauUserAccessCheck,
@@ -47,6 +49,14 @@ export interface TableauRouteDependencies {
   patSignin?: typeof patSignin;
   fetchImpl?: typeof fetch;
 }
+
+const ThrottleOwnerSchema = z.object({
+  connectionId: z.string().min(1).max(512),
+  serverUrl: z.string().url().max(2048),
+  siteId: z.string().min(1).max(512),
+  userId: z.string().min(1).max(512),
+  sessionGeneration: z.number().int().nonnegative(),
+}).strict();
 
 function currentStatusAfterSwitch() {
   const current = getSession();
@@ -109,6 +119,25 @@ export function registerTableauRoutes(
   app: FastifyInstance,
   dependencies: TableauRouteDependencies = {},
 ): void {
+  app.get<{ Querystring: { expectedOwner?: string } }>('/api/tableau/throttle', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const session = getSession();
+    const encodedOwner = request.query.expectedOwner;
+    if (encodedOwner !== undefined) {
+      let owner: z.infer<typeof ThrottleOwnerSchema>;
+      try {
+        if (typeof encodedOwner !== 'string' || encodedOwner.length > 8192) throw new Error();
+        owner = ThrottleOwnerSchema.parse(JSON.parse(encodedOwner));
+      } catch { return reply.badRequest('expectedOwner must be a valid session owner.'); }
+      const context = session && getSessionContext(session);
+      if (!session || !context || !isSessionCurrent(session) || owner.connectionId !== context.connectionId ||
+        owner.sessionGeneration !== context.generation || owner.serverUrl !== session.serverUrl ||
+        owner.siteId !== session.siteId || owner.userId !== session.userId)
+        return reply.code(409).send({ error: 'The Tableau session changed before checking request cooldown.', code: 'tableau_context_changed' });
+    }
+    if (!session) return reply.unauthorized('Connect to Tableau before checking request cooldown.');
+    return getTableauThrottleStatus(session);
+  });
   const broker = dependencies.credentialBroker ?? createCredentialBrokerClient();
   const discoverVersion = dependencies.discoverRestApiVersion ?? discoverRestApiVersion;
   const signIn = dependencies.patSignin ?? patSignin;
@@ -231,16 +260,18 @@ export function registerTableauRoutes(
     return latest && latest.check !== check ? latest.result : currentStatusAfterSwitch();
   }
 
-  async function checkCurrentSessionStatus(session: TableauSession, check: TableauUserAccessCheck, retried = false): Promise<TableauStatusResult> {
+  async function checkCurrentSessionStatus(session: TableauSession, check: TableauUserAccessCheck, retried = false, trace: TableauCallTrace = createTableauCallTrace()): Promise<TableauStatusResult> {
+    if (retried) trace.retryReason = 'authentication';
     const checkedToken = session.token;
+    let response: Response | undefined;
     try {
-      const response = await fetchImpl(
+      response = await observedTableauFetch(
         `${session.serverUrl}${apiPath(session, `/sites/${encodeURIComponent(session.siteId)}/users/${encodeURIComponent(session.userId)}`)}`,
         {
           headers: { 'X-Tableau-Auth': checkedToken, Accept: 'application/json' },
           redirect: 'error',
           signal: AbortSignal.timeout(10_000),
-        },
+        }, trace, fetchImpl,
       );
       if (!response.ok) {
         const body = await readBoundedBody(response, DEFAULT_MAX_RESPONSE_BYTES, 10_000).catch(() => '');
@@ -248,17 +279,18 @@ export function registerTableauRoutes(
         throw new TableauError('Tableau profile check failed.', response.status, '', classifyStatus(response.status, body), info.providerCode, info);
       }
       const payload = await readBoundedBody(response, DEFAULT_MAX_RESPONSE_BYTES, 10_000).then(text => JSON.parse(text)).catch(() => null);
+      finishObservedTableauResponse(response);
       if (!isTableauUserAccessCheckCurrent(session, check)) return supersededStatus(session, check);
       if (session.token !== checkedToken) return retried
         ? { connected: true, reachable: true, restored: false, session: publicSession(session) }
-        : checkCurrentSessionStatus(session, check, true);
+        : checkCurrentSessionStatus(session, check, true, trace);
       captureCurrentUserName(session, payload);
       return { connected: true, reachable: true, restored: false, session: publicSession(session) };
     } catch (error) {
       if (!isTableauUserAccessCheckCurrent(session, check)) return supersededStatus(session, check);
       if (session.token !== checkedToken) return retried
         ? { connected: true, reachable: true, restored: false, session: publicSession(session) }
-        : checkCurrentSessionStatus(session, check, true);
+        : checkCurrentSessionStatus(session, check, true, trace);
       if (error instanceof TableauError && error.kind === 'auth') {
         clearSession();
         return { connected: false, hasStoredProfile: getStoredConnection() != null };
@@ -277,7 +309,7 @@ export function registerTableauRoutes(
       const detail = status ? `failed (HTTP ${status}${code ? `, code ${code}` : ''})` : timeout ? 'timed out' : 'could not reach the server';
       return { connected: true, reachable: false, session: publicSession(session),
         availabilityError: `The Tableau account profile check ${detail}. Retry connection status to check again.` };
-    }
+    } finally { finishObservedTableauResponse(response); }
   }
 
   app.get('/api/tableau/connections', async () => ({ connections: listConnections() }));
@@ -433,13 +465,8 @@ export function registerTableauRoutes(
 
   app.get('/api/datasources', async () => {
     const session = requireSession();
-    try {
-      const datasources = await listDatasources(session);
-      return { datasources };
-    } catch (error) {
-      app.log.warn({ err: error }, 'listDatasources failed');
-      throw error;
-    }
+    const datasources = await listDatasources(session);
+    return { datasources };
   });
 
   app.get('/api/datasources/:luid/fields', async (req) => {
@@ -783,14 +810,15 @@ async function ensureCurrentUserName(
   fetchImpl: typeof fetch,
 ): Promise<void> {
   const check = beginTableauUserAccessCheck(session);
+  let response: Response | undefined;
   try {
-    const response = await fetchImpl(
+    response = await observedTableauFetch(
       `${session.serverUrl}${apiPath(session, `/sites/${encodeURIComponent(session.siteId)}/users/${encodeURIComponent(session.userId)}`)}`,
       {
         headers: { 'X-Tableau-Auth': session.token, Accept: 'application/json' },
         redirect: 'error',
         signal: AbortSignal.timeout(10_000),
-      },
+      }, createTableauCallTrace(), fetchImpl,
     );
     if (!response.ok) {
       if (isTableauUserAccessCheckCurrent(session, check)) markTableauUserAccessUnavailable(session, response.status === 403 || response.status === 404);
@@ -801,5 +829,5 @@ async function ensureCurrentUserName(
   } catch {
     if (isTableauUserAccessCheckCurrent(session, check)) markTableauUserAccessUnavailable(session);
     // display name is best-effort; the picker falls back to a generic "(you)" label
-  }
+  } finally { finishObservedTableauResponse(response); }
 }

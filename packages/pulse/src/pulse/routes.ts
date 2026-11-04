@@ -1,4 +1,4 @@
-import { getSession, getSessionContext, isSessionCurrent, TableauError, type TableauSession } from "@pulse-metric-studio/core";
+import { getSession, getSessionContext, isSessionCurrent, TableauError, TableauThrottleError, type TableauSession } from "@pulse-metric-studio/core";
 import {
   PulseFollowCommandSchema,
   PulseVariantCommandSchema,
@@ -30,18 +30,21 @@ import {
   pulseForkPlanService,
   type PulseForkPlanService,
 } from "./fork-plan-service.js";
+import { latestThrottle } from '../application/mutation-metadata.js';
 import { pulseOperationErrorMessage } from './operation-errors.js';
 
 async function dimensionOperation<T>(session: TableauSession, operation: () => Promise<T>): Promise<T> {
   try { return await operation(); }
   catch (error) {
-    if (!(error instanceof TableauError)) throw error;
+    if (!(error instanceof TableauError) || error instanceof TableauThrottleError) throw error;
     throw new PulseDimensionalForkError(pulseOperationErrorMessage(error, 'dimension-fields', [session.token]), error.kind === 'auth' ? 401 : 502);
   }
 }
 
 const DimensionSourcesSchema = z.object({
   sourceMetricIds: z.array(z.string().trim().min(1).max(512)).min(1),
+  snapshotId: z.string().min(1).max(512).optional(),
+  sourceContextId: z.string().min(1).max(512).optional(),
 }).strict();
 const DimensionFieldSchema = DimensionSourcesSchema.extend({
   fieldId: z.string().min(1).max(1024).refine((value) => value.trim().length > 0),
@@ -122,7 +125,7 @@ export function registerPulseRoutes(
     if (!body.success) throw new PulseDimensionalForkError(body.error.message, 400);
     return dimensionOperation(session, () => dimensions.listEligibleDimensions(
       session,
-      body.data.sourceMetricIds,
+      body.data.sourceMetricIds, body.data,
     ));
   });
 
@@ -150,14 +153,14 @@ export function registerPulseRoutes(
 
   app.post("/api/pulse/follow-state", async (req) => {
     const session = requireSession(req);
-    const body = req.body as { metricIds?: string[]; selectedGroupId?: string; detail?: boolean };
+    const body = req.body as { metricIds?: string[]; selectedGroupId?: string; detail?: boolean; snapshotId?: string; continueCoverage?: boolean; personalOnly?: boolean };
     if (!Array.isArray(body.metricIds))
       throw app.httpErrors.badRequest("metricIds array required");
     const selectedGroupId = String(body.selectedGroupId ?? "").trim();
     let groups: Array<{ id: string; name: string }> = [];
     let groupContextUnavailable = false;
     if (body.detail !== undefined && typeof body.detail !== 'boolean') throw app.httpErrors.badRequest('detail must be a boolean');
-    if (body.detail !== false && !selectedGroupId) {
+    if (body.detail !== false && !body.personalOnly && !selectedGroupId) {
       try {
         groups = await listUserGroupIds(session, session.userId);
       } catch (error) {
@@ -174,6 +177,9 @@ export function registerPulseRoutes(
         selectedGroupId: selectedGroupId || undefined,
         groupContextUnavailable,
         detail: body.detail,
+        snapshotId: body.snapshotId,
+        continueCoverage: body.continueCoverage,
+        personalOnly: body.personalOnly,
       },
     );
   });
@@ -190,13 +196,17 @@ export function registerPulseRoutes(
     return getFollowTargets(session);
   });
 
-  app.post("/api/pulse/follow", async (req) => {
+  app.post("/api/pulse/follow", async (req, reply) => {
     const parsed = PulseFollowCommandSchema.safeParse(req.body);
     if (!parsed.success) throw app.httpErrors.badRequest(parsed.error.message);
     const session = requirePulseOwner(parsed.data.context, requireSession(req));
     const operations = parsed.data.operations;
     const results = await followTargets(session, { operations });
+    const throttle = latestThrottle(results), sent = results.some(result => result.sent !== false);
+    if (throttle) reply.code(sent ? 207 : 429);
     return {
+      sent,
+      ...(throttle ? { throttle: { ...throttle, sent } } : {}),
       results,
       terminated: results.some(
         (result) => result.code === "authentication_required",
@@ -204,18 +214,22 @@ export function registerPulseRoutes(
       stopped: results.some(
         (result) =>
           result.code === "authentication_required" ||
-          result.code === "subscription_interrupted",
+          result.code === "subscription_interrupted" || result.throttle !== undefined,
       ),
     };
   });
 
-  app.post("/api/pulse/unfollow", async (req) => {
+  app.post("/api/pulse/unfollow", async (req, reply) => {
     const parsed = PulseFollowCommandSchema.safeParse(req.body);
     if (!parsed.success) throw app.httpErrors.badRequest(parsed.error.message);
     const session = requirePulseOwner(parsed.data.context, requireSession(req));
     const operations = parsed.data.operations;
     const results = await unfollowTargets(session, { operations });
+    const throttle = latestThrottle(results), sent = results.some(result => result.sent !== false);
+    if (throttle) reply.code(sent ? 207 : 429);
     return {
+      sent,
+      ...(throttle ? { throttle: { ...throttle, sent } } : {}),
       results,
       terminated: results.some(
         (result) => result.code === "authentication_required",
@@ -223,7 +237,7 @@ export function registerPulseRoutes(
       stopped: results.some(
         (result) =>
           result.code === "authentication_required" ||
-          result.code === "subscription_interrupted",
+          result.code === "subscription_interrupted" || result.throttle !== undefined,
       ),
     };
   });

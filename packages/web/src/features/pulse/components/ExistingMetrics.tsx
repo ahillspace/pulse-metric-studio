@@ -26,11 +26,12 @@ import {
   ReviewedResourceId,
   ReviewedMetricFollowers,
 } from "../registry/views";
+import { CooldownBanner } from "../registry/CooldownBanner";
 import { VariantDialog } from "../registry/VariantDialog";
 import { InventoryFailures } from "../registry/InventoryFailures";
 import { FollowTargetModal } from "./FollowTargetModal";
 import { BusyLabel, Modal } from "./ui";
-import { createPreviewController } from "../registry/preview-controller";
+import { createPreviewController, requestMetricPreview } from "../registry/preview-controller";
 import { MetricPreview } from "../registry/MetricPreview";
 import { sessionOwnerKey } from "../shell/session-events";
 
@@ -50,15 +51,27 @@ export const ExistingMetrics = memo(function ExistingMetrics({ visible = true }:
   const session = useConnection((state) => state.session);
   const registry = useRegistry(useShallow((state) => ({
     inventory: state.inventory, followState: state.followState,
-    loading: state.loading, followLoading: state.followLoading, error: state.error,
+    pendingProviderOperations: state.pendingProviderOperations, loading: state.loading, followLoading: state.followLoading, error: state.error,
+    cooldown: state.cooldown, pollCooldown: state.pollCooldown,
     busy: state.busy, results: state.results, createdMetricIds: state.createdMetricIds,
     deletePlan: state.deletePlan, deleteLoading: state.deleteLoading,
     deleteError: state.deleteError, deleteOverridable: state.deleteOverridable,
     mutationAvailable: state.mutationAvailable, refresh: state.refresh, fork: state.fork,
     previewDelete: state.previewDelete, executeDelete: state.executeDelete,
     reviewDeleteAnyway: state.reviewDeleteAnyway, cancelDelete: state.cancelDelete,
-    dismissResults: state.dismissResults,
+    dismissResults: state.dismissResults, loadMoreFollowState: state.loadMoreFollowState,
   })));
+  useEffect(() => {
+    if (!registry.pendingProviderOperations && !registry.busy && !registry.cooldown) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      await registry.pollCooldown();
+      if (!stopped) timer = setTimeout(() => void poll(), 1000);
+    };
+    void poll();
+    return () => { stopped = true; if (timer) clearTimeout(timer); };
+  }, [Boolean(registry.pendingProviderOperations || registry.busy || registry.cooldown), sessionOwnerKey(session)]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [onlyFollowed, setOnlyFollowed] = useState(false);
   const [plan, setPlan] = useState<{ selectedMetricIds: string[] }>({
@@ -89,7 +102,8 @@ export const ExistingMetrics = memo(function ExistingMetrics({ visible = true }:
       setFollowersOf(null);
   }, [registry.deleteLoading, registry.deletePlan, registry.busy]);
   const existing = registry.inventory;
-  const [usePreview] = useState(() => createPreviewController());
+  const [usePreview] = useState(() => createPreviewController((context, metricId, owner) =>
+    useRegistry.getState().trackProviderOperation(() => requestMetricPreview(context, metricId, owner), owner)));
   const preview = usePreview();
   const previewScope = useMemo(
     () =>
@@ -97,11 +111,10 @@ export const ExistingMetrics = memo(function ExistingMetrics({ visible = true }:
       context &&
       session &&
       existing &&
-      !registry.loading &&
-      !registry.busy
-        ? { context, siteContentUrl: session.siteContentUrl }
+      !registry.loading
+        ? { context, owner: session, siteContentUrl: session.siteContentUrl }
         : null,
-    [contextKey, connected, session?.siteContentUrl, existing, registry.loading, registry.busy],
+    [contextKey, connected, session?.siteContentUrl, Boolean(existing), registry.loading],
   );
   useEffect(() => {
     usePreview.getState().setScope(previewScope);
@@ -171,14 +184,23 @@ export const ExistingMetrics = memo(function ExistingMetrics({ visible = true }:
           .toLowerCase()
           .includes(query.trim().toLowerCase()),
     ), [existing, onlyFollowed, visibilityFollowState, query]);
-  const detailIdsKey = useMemo(() => JSON.stringify((onlyFollowed ? allMetrics : allMetrics.filter((metric) => expanded.has(metric.definitionId)))
-    .map((metric) => metric.metricId).sort()), [onlyFollowed, allMetrics, expanded]);
+  const expandedKey = JSON.stringify([...expanded].sort());
+  const inventoryViewId = existing?.viewId ?? existing?.snapshotId;
+  // Capture demand at an explicit expansion/filter change, including when counts
+  // are still pending. A later local patch must not silently inspect new rows.
+  const capturedDetailIdsKey = useMemo(() => JSON.stringify((onlyFollowed ? allMetrics : allMetrics.filter((metric) => expanded.has(metric.definitionId)))
+    .map((metric) => metric.metricId).sort()), [onlyFollowed, inventoryViewId, expandedKey]);
+  // Local removals retire demand immediately; additions wait for explicit demand.
+  const detailIdsKey = useMemo(() => JSON.stringify((JSON.parse(capturedDetailIdsKey) as string[])
+    .filter(id => metricById.has(id))), [capturedDetailIdsKey, metricById]);
+  const canLoadMoreFollowDetails = (JSON.parse(detailIdsKey) as string[])
+    .some(id => registry.followState?.availabilityByMetricId?.[id]?.canLoadMore === true);
   useEffect(() => {
     const state = useRegistry.getState();
     if (visible && connected && !registry.loading && !registry.followLoading &&
       registryScopeKey(state.context, state.owner) === registryScopeKey(context, session))
       void useRegistry.getState().ensureFollowState(JSON.parse(detailIdsKey) as string[]);
-  }, [visible, contextKey, connected, detailIdsKey, registry.loading, registry.followLoading, existing]);
+  }, [visible, contextKey, connected, detailIdsKey, registry.loading, registry.followLoading, inventoryViewId]);
   const displayedIds = useMemo(() => displayedDefinitions.flatMap((definition) =>
     definition.metrics.map((metric) => metric.metricId),
   ), [displayedDefinitions]);
@@ -245,6 +267,7 @@ export const ExistingMetrics = memo(function ExistingMetrics({ visible = true }:
         </div>
         {registry.results && !followOpen && (
           <RegistryResultsModal
+            cooldown={registry.cooldown}
             results={registry.results}
             onDismiss={registry.dismissResults}
           />
@@ -336,7 +359,7 @@ export const ExistingMetrics = memo(function ExistingMetrics({ visible = true }:
           </span>
           <button
             className="btn small"
-            disabled={Boolean(registry.busy) || !allMetrics.length}
+            disabled={Boolean(registry.busy) || Boolean(registry.cooldown) || !registry.mutationAvailable || !allMetrics.length}
             aria-haspopup="dialog"
             onClick={() => setVariantsOpen(true)}
           >
@@ -346,14 +369,14 @@ export const ExistingMetrics = memo(function ExistingMetrics({ visible = true }:
             <>
               <button
                 className="btn small"
-                disabled={Boolean(registry.busy)}
+                disabled={Boolean(registry.busy) || Boolean(registry.cooldown) || !registry.mutationAvailable}
                 onClick={() => setFollowOpen(true)}
               >
                 Follow / Unfollow
               </button>
               <button
                 className="btn small danger"
-                disabled={Boolean(registry.busy)}
+                disabled={Boolean(registry.busy) || Boolean(registry.cooldown) || !registry.mutationAvailable}
                 onClick={() =>
                   void registry.previewDelete(plan.selectedMetricIds, [
                     ...new Set(
@@ -378,6 +401,7 @@ export const ExistingMetrics = memo(function ExistingMetrics({ visible = true }:
             </>
           )}
         </div>
+        <CooldownBanner cooldown={registry.cooldown} />
         {registry.error && (
           <p className="warning-banner" role="alert">
             Metric Manager unavailable: {registry.error}
@@ -396,6 +420,7 @@ export const ExistingMetrics = memo(function ExistingMetrics({ visible = true }:
             not shown as confirmed zero.
           </p>
         ) : null}
+        {canLoadMoreFollowDetails && <button className="btn small" disabled={registry.followLoading} onClick={() => void registry.loadMoreFollowState(JSON.parse(detailIdsKey) as string[])}>Load more follow details</button>}
         {onlyFollowed && allMetrics.some((metric) =>
           registry.followState?.availabilityByMetricId?.[metric.metricId]?.relationshipStatus === "not_requested") && (
           <p role="status">Loading follow details. Metrics with unknown follow state remain visible.</p>
@@ -414,8 +439,11 @@ export const ExistingMetrics = memo(function ExistingMetrics({ visible = true }:
         )}
         {variantsOpen && (
           <VariantDialog
+            snapshotId={existing?.snapshotId}
+            owner={session}
             metrics={allMetrics}
             selectedMetricIds={plan.selectedMetricIds}
+            cooldown={registry.cooldown}
             busy={Boolean(registry.busy) || !registry.mutationAvailable}
             onClose={() => setVariantsOpen(false)}
             onCreate={registry.fork}
@@ -481,7 +509,7 @@ export const ExistingMetrics = memo(function ExistingMetrics({ visible = true }:
                       className="btn small danger pulse-registry-icon"
                       title={`Delete definition ${definition.name}`}
                       aria-label={`Delete definition ${definition.name}`}
-                      disabled={Boolean(registry.busy)}
+                      disabled={Boolean(registry.busy) || Boolean(registry.cooldown) || !registry.mutationAvailable}
                       onClick={() =>
                         void registry.previewDelete(
                           [],
@@ -544,12 +572,14 @@ export const ExistingMetrics = memo(function ExistingMetrics({ visible = true }:
       </div>
       {registry.results && !followOpen && (
         <RegistryResultsModal
+          cooldown={registry.cooldown}
           results={registry.results}
           onDismiss={registry.dismissResults}
         />
       )}
       {followOpen && (
         <FollowTargetModal
+          cooldown={registry.cooldown}
           metrics={selectedSources}
           currentUserId={session?.userId ?? ""}
           currentUserName={session?.userName}
@@ -596,7 +626,7 @@ export const ExistingMetrics = memo(function ExistingMetrics({ visible = true }:
                   disabled={
                     !registry.deletePlan ||
                     registry.deleteLoading ||
-                    registry.busy === "delete"
+                    registry.busy === "delete" || Boolean(registry.cooldown) || !registry.mutationAvailable
                   }
                   onClick={() => void registry.executeDelete()}
                 >
@@ -606,6 +636,7 @@ export const ExistingMetrics = memo(function ExistingMetrics({ visible = true }:
             </>
           }
         >
+          <CooldownBanner cooldown={registry.cooldown} />
           {registry.deleteLoading && (
             <p role="status">Preparing deletion from loaded metrics...</p>
           )}

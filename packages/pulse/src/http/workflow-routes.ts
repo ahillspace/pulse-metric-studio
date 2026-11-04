@@ -183,9 +183,11 @@ export function registerPulseWorkflowRoutes(
       ),
     );
     app.post("/api/pulse/registry/delete", (req, reply) =>
-      respond(reply, () =>
-        deletion.execute(parse(ExecutePulseDeleteRequestSchema, req.body)),
-      ),
+      respond(reply, async () => {
+        const result = await deletion.execute(parse(ExecutePulseDeleteRequestSchema, req.body));
+        if (result.throttle && result.outcomes.every(outcome => outcome.sent === false)) reply.code(429);
+        return result;
+      }),
     );
   });
 }

@@ -97,14 +97,6 @@ function dependencies(overrides: Partial<PulseDimensionalForkDependencies> = {})
     queryValues: async () => [['West'], ['Central']],
     queryCount: async () => 2,
     getOrCreate: async (_session, input) => ({ metricId: input.definitionId, created: true }),
-    reconcile: async (_session, input) => ({
-      metricId: input.metricId,
-      status: 'visible',
-      exactMetricResolved: true,
-      inventoryVisible: true,
-      ownershipVerified: true,
-      attempts: 1,
-    }),
     ...overrides,
   };
 }
@@ -306,8 +298,8 @@ test('fork summarizes created, existing, and failed results independently', asyn
   });
   assert.equal(summary.results[0]?.sourceMetricId, 'm1');
   assert.equal(summary.results[0]?.createdApiName, 'fork_one');
-  assert.equal(summary.results[0]?.reconciliationStatus, 'visible');
-  assert.equal(summary.results[0]?.ownershipVerified, true);
+  assert.equal(summary.results[0]?.creationStatus, 'created');
+  assert.equal(summary.results[0]?.ownershipVerified, undefined);
   assert.deepEqual(summary.results[0]?.requestedSpecification, specifications.d1);
   assert.deepEqual(specifications.d1?.comparison, sourceM1.specification?.comparison);
   assert.deepEqual((specifications.d1?.filters as unknown[])[1], {
@@ -333,35 +325,6 @@ test('fork reports provider failures without hiding successful creates', async (
   });
   assert.deepEqual({ created: summary.created, failed: summary.failed }, { created: 1, failed: 1 });
   assert.match(summary.results[1]?.error ?? '', /comparison rejected/);
-  assert.equal(dimensionalForkHttpStatus(summary), 207);
-});
-
-test('fork rejects returned metrics that fail reconciliation', async () => {
-  const summary = await new PulseDimensionalForkService(dependencies({
-    reconcile: async (_session, input) => ({
-      metricId: input.metricId,
-      status: input.definitionId === 'd1' ? 'ownership_mismatch' : 'failed',
-      exactMetricResolved: true,
-      inventoryVisible: false,
-      ownershipVerified: false,
-      attempts: 1,
-      diagnostic: { message: `Reconciliation rejected ${input.metricId}.` },
-    }),
-  })).forkMetrics(session, {
-    version: 1,
-    sourceMetricIds: ['m1', 'm2'],
-    fieldId: 'Region',
-    selection: { mode: 'VALUES', values: ['West'] },
-  });
-
-  assert.equal(summary.created, 2);
-  assert.equal(summary.failed, 2);
-  assert.deepEqual(summary.results.map((result) => result.status), ['failed', 'failed']);
-  assert.deepEqual(
-    summary.results.map((result) => result.reconciliationStatus),
-    ['ownership_mismatch', 'failed'],
-  );
-  assert.match(summary.results[0]?.error ?? '', /Reconciliation rejected/);
   assert.equal(dimensionalForkHttpStatus(summary), 207);
 });
 
@@ -422,26 +385,11 @@ test('fork validates selected values against a large domain via a targeted set f
   assert.deepEqual(setFilterValues, ['Deep Member']);
 });
 
-test('fork returns settled Tableau auth failures from create and reconciliation', async (t) => {
-  for (const phase of ['create', 'reconciliation'] as const) {
-    await t.test(phase, async () => {
-      const authError = new TableauError('Tableau session expired.', 401, '', 'auth');
-      const service = new PulseDimensionalForkService(dependencies({
-        ...(phase === 'create'
-          ? { getOrCreate: async () => { throw authError; } }
-          : { reconcile: async () => { throw authError; } }),
-      }));
-
-      const summary = await service.forkMetrics(session, {
-        version: 1, sourceMetricIds: ['m1'], fieldId: 'Region', selection: { mode: 'VALUES', values: ['West'] },
-      });
-      assert.equal(summary.terminated, true);
-      assert.equal(summary.results[0]?.creationStatus, phase === 'create' ? 'failed' : 'created');
-      assert.match(summary.results[0]?.error ?? '', /Reconnect to the owning account.*HTTP 401/);
-      if (phase === 'reconciliation') assert.ok(summary.results[0]?.createdMetricId);
-
-    });
-  }
+test('fork returns settled Tableau authentication failures from create', async () => {
+  const service = new PulseDimensionalForkService(dependencies({ getOrCreate: async () => { throw new TableauError('Tableau session expired.', 401, '', 'auth'); } }));
+  const summary = await service.forkMetrics(session, { version: 1, sourceMetricIds: ['m1'], fieldId: 'Region', selection: { mode: 'VALUES', values: ['West'] } });
+  assert.equal(summary.terminated, true);
+  assert.equal(summary.results[0]?.creationStatus, 'failed');
 });
 
 test('fork accepts exact selected values present in a provider-cap-sized domain', async () => {

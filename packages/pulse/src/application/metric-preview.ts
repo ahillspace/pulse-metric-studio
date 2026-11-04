@@ -1,7 +1,7 @@
 import { sanitizeProviderMessage, TableauError } from '@pulse-metric-studio/core';
 import type { PulseMetricPreview, PulseMetricPreviewRequest } from '@pulse-metric-studio/shared';
 import { getPulseDefinition, getPulseMetric } from '../pulse/pulse-client.js';
-import { metricDefinitionId } from '../pulse/reconciliation.js';
+import { metricDefinitionId } from '../pulse/metric-facts.js';
 import { generateMetricPreview, PulsePreviewDataError, PulsePreviewProviderError } from '../pulse/metric-preview.js';
 import { requirePulseOwner } from './context.js';
 import { PulseApplicationError } from './errors.js';

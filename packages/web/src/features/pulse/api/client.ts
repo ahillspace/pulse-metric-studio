@@ -1,5 +1,7 @@
 import {
   PulseDraftRecordSchema,
+  TableauThrottleMetadataSchema,
+  type TableauThrottleMetadata,
   PulseDraftPageSchema,
   PulseReceiptPageSchema,
   type PulseListQuery,
@@ -25,6 +27,7 @@ export class PulseApiError extends Error {
     public readonly status: number,
     public readonly code?: string,
     public readonly details?: unknown,
+    public readonly throttle?: TableauThrottleMetadata,
   ) {
     super(message);
     this.name = "PulseApiError";
@@ -72,6 +75,7 @@ export async function pulseRequest(
           ? record.code
           : undefined,
       error.details ?? record.details,
+      TableauThrottleMetadataSchema.safeParse(record.throttle).success ? TableauThrottleMetadataSchema.parse(record.throttle) : undefined,
     );
   }
   return data;

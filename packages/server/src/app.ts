@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { LogController, type FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import sensible from '@fastify/sensible';
 import fastifyStatic from '@fastify/static';
@@ -13,8 +13,12 @@ import {
   registerLlmRoutes,
   LlmProviderError,
   TableauError,
+  TableauThrottleError,
   isAllowedAppOrigin,
   sanitizeProviderMessage,
+  configureTableauTelemetry,
+  runWithTableauTelemetry,
+  safeTableauAppPath,
 } from '@pulse-metric-studio/core';
 import type { AuthorOpsFn } from '@pulse-metric-studio/core';
 import { createDesktopRequestVerifier, DESKTOP_BODY_LIMIT, DESKTOP_PROTOCOL } from './desktop.js';
@@ -35,7 +39,10 @@ export type FeatureHooks = {
   registerPulseRoutes?: (app: FastifyInstance) => void;
 };
 
-export function buildApp(hooks: FeatureHooks = {}, options: { desktopToken?: string } = {}) {
+export function buildApp(hooks: FeatureHooks = {}, options: {
+  desktopToken?: string;
+  logStream?: { write(message: string): void };
+} = {}) {
   const desktopToken = options.desktopToken;
   if (process.env.PULSE_METRIC_STUDIO_DESKTOP_IDENTIFIER === 'com.ahillspace.pulsemetricstudio' && !desktopToken) {
     throw new Error('Pulse desktop authentication is required.');
@@ -43,11 +50,38 @@ export function buildApp(hooks: FeatureHooks = {}, options: { desktopToken?: str
   const verifyDesktopRequest = desktopToken ? createDesktopRequestVerifier(desktopToken) : null;
   const app = Fastify({
     bodyLimit: DESKTOP_BODY_LIMIT,
+    logController: new LogController({ disableRequestLogging: true }),
+    requestIdHeader: false,
+    genReqId: () => crypto.randomUUID(),
     logger: {
       level: config.logLevel,
+      ...(options.logStream ? { stream: options.logStream } : {}),
       redact: ['req.headers.authorization', 'req.headers.cookie', 'res.headers.set-cookie'],
       serializers: { req: (request) => ({ method: request.method, url: request.url?.split('?')[0] }) },
     },
+  });
+
+  // Tableau diagnostics are a default-level record even when routine server
+  // verbosity is lowered. The core telemetry boundary projects safe fields.
+  const diagnostics = app.log.child({}, { level: 'info' });
+  configureTableauTelemetry((event) => diagnostics.info(event));
+  app.addHook('onRequest', (request, _reply, done) => {
+    runWithTableauTelemetry({
+      reqId: request.id,
+      appMethod: request.method,
+      appPath: request.routeOptions.url ?? request.url,
+      log: (event) => diagnostics.info(event),
+    }, done);
+  });
+  app.addHook('onResponse', async (request, reply) => {
+    const routePath = request.routeOptions.url;
+    const requestPath = safeTableauAppPath(routePath ?? request.url);
+    const successfulHealthCheck = request.method === 'GET' && reply.statusCode < 400
+      && routePath !== undefined
+      && ['/api/tableau/status', '/api/tableau/throttle', '/api/llm/status', '/api/pulse/status', '/api/desktop/ready'].includes(routePath);
+    if (successfulHealthCheck || !requestPath.startsWith('/api/')) return;
+    diagnostics.info({ event: 'app.request', reqId: request.id, method: request.method,
+      path: requestPath, status: reply.statusCode, durationMs: Math.round(reply.elapsedTime) });
   });
 
   app.addHook('onRequest', async (request, reply) => {
@@ -108,7 +142,9 @@ export function buildApp(hooks: FeatureHooks = {}, options: { desktopToken?: str
       const snippet = error.bodySnippet ? error.bodySnippet.slice(0, 500) : '';
       const message = sanitizeProviderMessage(snippet ? `${error.message} - ${snippet}` : error.message);
       app.log.warn({ status: error.status, kind: error.kind, code }, 'Tableau provider request failed');
-      reply.code(code).send({ error: message });
+      reply.code(code).send({ error: message,
+        ...(typeof error.sent === 'boolean' ? { sent: error.sent } : {}),
+        ...(error instanceof TableauThrottleError ? { throttle: error.throttle } : {}) });
       return;
     }
     // Any error carrying an explicit HTTP error status (4xx or 5xx) surfaces

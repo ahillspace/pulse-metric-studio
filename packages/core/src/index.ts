@@ -3,6 +3,7 @@ export * from './cors.js';
 export * from './db/crypto.js';
 export * from './db/index.js';
 export * from './tableau/rest-client.js';
+export * from './tableau/telemetry.js';
 export * from './tableau/session.js';
 export * from './tableau/routes.js';
 export * from './tableau/signin.js';

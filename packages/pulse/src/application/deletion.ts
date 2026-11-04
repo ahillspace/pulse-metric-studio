@@ -1,3 +1,4 @@
+import { assertTableauMutationAdmission, getSessionContext, isSessionCurrent } from "@pulse-metric-studio/core";
 import type { TableauSession } from "@pulse-metric-studio/core";
 import type {
   ExecutePulseDeleteRequest,
@@ -8,7 +9,7 @@ import { requirePulseOwner } from "./context.js";
 import { executeDeletes } from "./delete-execution.js";
 import { PulseApplicationError } from "./errors.js";
 import { fingerprint } from "./fingerprint.js";
-import { getPulseInventorySnapshot } from "./inventory-snapshots.js";
+import { getPulseInventorySnapshot, patchPulseInventory, beginInventoryMutation, endInventoryMutation } from "./inventory-snapshots.js";
 import type { ExistingMetricsResult } from "./inventory.js";
 
 export interface DeleteDependencies {
@@ -137,6 +138,8 @@ export class PulseDeletionService {
   }
   async execute(request: ExecutePulseDeleteRequest) {
     const session = requirePulseOwner(request.context);
+    assertTableauMutationAdmission(session);
+    const capturedContext = getSessionContext(session);
     const plan = await this.plan(request, session);
     if (plan.previewFingerprint !== request.previewFingerprint)
       throw new PulseApplicationError(
@@ -145,7 +148,9 @@ export class PulseDeletionService {
         409,
       );
     requirePulseOwner(request.context, session);
-    return this.dependencies.execute(
+    beginInventoryMutation(session, request.context, request.snapshotId);
+    try {
+    const result = await this.dependencies.execute(
       session,
       plan.targets.map((target) =>
         target.kind === "definition"
@@ -153,6 +158,16 @@ export class PulseDeletionService {
           : { metricIds: [target.id], name: target.name },
       ),
     );
+    if (getSessionContext(session) === capturedContext && (!capturedContext || isSessionCurrent(session))) {
+      const confirmed = result.outcomes.filter(outcome => outcome.status === 'deleted' || outcome.status === 'already_absent');
+      if (confirmed.length) result.inventoryPatch = patchPulseInventory(session, request.context, request.snapshotId, {
+        upserts: [],
+        removedMetricIds: confirmed.flatMap(outcome => outcome.metricId ? [outcome.metricId] : []),
+        removedDefinitionIds: confirmed.flatMap(outcome => outcome.definitionId ? [outcome.definitionId] : []),
+      });
+    }
+    return result;
+    } finally { endInventoryMutation(session, request.context, request.snapshotId); }
   }
 }
 

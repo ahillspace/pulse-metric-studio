@@ -28,9 +28,14 @@ import {
   variantPreview,
   variantRequest,
 } from "./variant-plan";
+import { CooldownBanner, type RegistryCooldown } from "./CooldownBanner";
+import type { SessionOwner } from "../shell/session-events";
 import { getForkDisabledReason, SelectionCheckbox } from "./views";
 
 interface Props {
+  cooldown?: RegistryCooldown | null;
+  snapshotId?: string;
+  owner?: SessionOwner | null;
   metrics: PulseRegistryMetric[];
   selectedMetricIds: string[];
   busy: boolean;
@@ -41,6 +46,9 @@ interface Props {
   ): Promise<void>;
 }
 export function VariantDialog({
+  cooldown,
+  snapshotId,
+  owner,
   metrics,
   selectedMetricIds,
   busy,
@@ -61,6 +69,7 @@ export function VariantDialog({
         : { ...current, selectedMetricIds };
     });
   }, [metrics]);
+  const [sourceContextId, setSourceContextId] = useState<string | undefined>();
   const [query, setQuery] = useState("");
   const [sourceOpen, setSourceOpen] = useState(!selectedMetricIds.length);
   const [compatibility, setCompatibility] = useState("");
@@ -130,7 +139,7 @@ export function VariantDialog({
       .includes(query.toLowerCase()),
   );
   const reason =
-    filterState ||
+    (cooldown ? "Wait for the Tableau request limit before creating variants." : null) || filterState ||
     getForkDisabledReason({
       selectedCount: selected.length,
       hasChanges: variantHasChanges(plan, metrics, fields),
@@ -158,7 +167,7 @@ export function VariantDialog({
             disabled={Boolean(reason)}
             onClick={() =>
               void onCreate(
-                variantRequest(plan, metrics, fields),
+                { ...variantRequest(plan, metrics, fields), sourceContextId },
                 new Map(sources.map((source) => [source.id, source.label])),
               ).then(onClose)
             }
@@ -168,7 +177,8 @@ export function VariantDialog({
         </>
       }
     >
-      <fieldset disabled={busy} className="pulse-variant-fields">
+      <CooldownBanner cooldown={cooldown} />
+      <fieldset disabled={busy || Boolean(cooldown)} className="pulse-variant-fields">
         <div className="pulse-variant-layout">
           <div className="pulse-variant-config">
             <section>
@@ -286,6 +296,8 @@ export function VariantDialog({
               </select>
             </section>
             <DimensionalFork
+              context={{ snapshotId, owner }}
+              onSourceContextResolved={setSourceContextId}
               sources={sources}
               clauses={plan.clauses}
               inherited={inherited}

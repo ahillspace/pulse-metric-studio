@@ -5,9 +5,11 @@ import type {
 } from "@pulse-metric-studio/shared";
 import { PulseMetricPreviewSchema } from "@pulse-metric-studio/shared";
 import type { PulseRegistryMetric } from "../fork-plan";
+import { captureSessionOwner, ownedPulseUrl, type SessionOwner } from "../shell/session-events";
 import { PulseApiError, pulseRequest } from "../api/client";
 
 export interface PreviewScope {
+  owner?: SessionOwner | null;
   context: PulseDraftContext;
   siteContentUrl: string;
 }
@@ -24,10 +26,10 @@ export interface PreviewState {
   close(): void;
 }
 
-export async function requestMetricPreview(context: PulseDraftContext, metricId: string) {
+export async function requestMetricPreview(context: PulseDraftContext, metricId: string, owner = captureSessionOwner()) {
   return PulseMetricPreviewSchema.parse(
     await pulseRequest(
-      `/api/pulse/metrics/${encodeURIComponent(metricId)}/preview`,
+      ownedPulseUrl(`/api/pulse/metrics/${encodeURIComponent(metricId)}/preview`, owner),
       "POST",
       { context },
     ),
@@ -53,7 +55,7 @@ export function createPreviewController(transport = requestMetricPreview) {
       const request = ++generation;
       set({ metric, loading: true, image: null, error: null });
       try {
-        const image = await transport(scope.context, metric.metricId);
+        const image = await transport(scope.context, metric.metricId, scope.owner);
         if (request !== generation || scope !== get().scope) return;
         if (
           image.metricId !== metric.metricId ||

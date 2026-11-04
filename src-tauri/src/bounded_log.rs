@@ -7,6 +7,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 pub const LOG_BYTES: u64 = 1024 * 1024;
+// Keep a working session of per-attempt Tableau diagnostics while retaining a
+// fixed disk budget. Desktop lifecycle logs do not need the same capacity.
+pub const SERVER_LOG_BYTES: u64 = 16 * 1024 * 1024;
 pub const LOG_ARCHIVES: usize = 2;
 const READ_BYTES: usize = 8192;
 
