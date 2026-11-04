@@ -52,10 +52,14 @@ test('completed shared holds report actual waited duration', async () => {
   let calls = 0;
   globalThis.fetch = async () => ++calls === 1 ? new Response('{}', { status: 429, headers: { 'Retry-After': '1' } }) : Response.json({});
   await collect('held', records, () => getJson(session(), '/api/-/pulse/definitions'));
-  const held = records.find(record => record.event === 'tableau.gate_wait');
+  const attempts = records.filter(record => record.event === 'tableau.attempt');
+  assert.equal(attempts.length, calls);
+  assert.deepEqual(attempts.map(record => [record.status, record.attempt, record.retryReason]), [[429, 1, null], [200, 2, 'throttle']]);
+  const held = records.find(record => record.event === 'tableau.gate_wait' && record.attempt === 2 && Number(record.holdMs) > 0);
   assert.equal(held?.sent, false);
   assert.ok(Number(held?.waitedMs) >= 900);
-  assert.ok(Number(records[0].throttleHoldMs) >= 990);
+  assert.equal(held?.callId, attempts[0].callId);
+  assert.ok(Number(attempts[0].throttleHoldMs) >= 990);
 });
 
 test('authentication refresh and replay retain request identity and monotonic attempt numbers', async () => {
@@ -85,8 +89,10 @@ test('sign-in, discovery, network failures, and REST version fallback are observ
   const records: Record[] = [];
   globalThis.fetch = async () => { throw new Error('SECRET-FILTER SECRET-TOKEN'); };
   await collect('network', records, () => assert.rejects(getJson(session(), '/api/-/pulse/definitions')));
-  assert.equal(records[0].status, null);
-  assert.equal(records[0].failure, 'network');
+  const network = records.filter(record => record.reqId === 'network' && record.event === 'tableau.attempt');
+  assert.equal(network.length, 1);
+  assert.equal(network[0].status, null);
+  assert.equal(network[0].failure, 'network');
   globalThis.fetch = async (url) => String(url).endsWith('serverInfo')
     ? Response.json({ serverInfo: { restApiVersion: { number: '3.27' } } })
     : Response.json({ credentials: { token: 'SECRET-TOKEN', site: { id: uuid }, user: { id: uuid } } });
@@ -97,7 +103,7 @@ test('sign-in, discovery, network failures, and REST version fallback are observ
   assert.equal(records.filter(record => record.reqId === 'connect' && record.event === 'tableau.attempt').length, 2);
   globalThis.fetch = async (url) => String(url).includes('/3.27/') ? new Response('{"error":{"code":"404003"}}', { status: 404 }) : Response.json({});
   await collect('version', records, () => getJson(session(), `/api/3.27/sites/${uuid}/groups`));
-  const version = records.filter(record => record.reqId === 'version');
+  const version = records.filter(record => record.reqId === 'version' && record.event === 'tableau.attempt');
   assert.deepEqual(version.map(record => [record.status, record.attempt, record.retryReason]), [[404, 1, null], [200, 2, 'version']]);
   assert.doesNotMatch(JSON.stringify(records), /SECRET/);
 });
@@ -113,14 +119,16 @@ test('discovery redirects log every hop without Location values and retain a bou
       : Response.json({ serverInfo: { restApiVersion: { number: '3.28' } } });
   };
   assert.equal(await collect('redirects', records, () => discoverRestApiVersion('https://tableau.example.test')), '3.28');
-  assert.deepEqual(records.map(record => [record.status, record.attempt, record.retryReason]), [[302, 1, null], [303, 2, 'redirect'], [200, 3, 'redirect']]);
-  assert.equal(new Set(records.map(record => record.callId)).size, 1);
+  const redirects = records.filter(record => record.reqId === 'redirects' && record.event === 'tableau.attempt');
+  assert.equal(redirects.length, calls);
+  assert.deepEqual(redirects.map(record => [record.status, record.attempt, record.retryReason]), [[302, 1, null], [303, 2, 'redirect'], [200, 3, 'redirect']]);
+  assert.equal(new Set(redirects.map(record => record.callId)).size, 1);
   assert.doesNotMatch(JSON.stringify(records), /SECRET|Location|location/);
   calls = 0;
   globalThis.fetch = async () => { calls++; return new Response(null, { status: 302, headers: { Location: '/api/-/serverInfo' } }); };
   assert.equal(await collect('loop', records, () => discoverRestApiVersion('https://tableau.example.test')), '3.27');
   assert.equal(calls, 21, 'matches fetch maximum of twenty redirects');
-  assert.equal(records.filter(record => record.reqId === 'loop').length, calls);
+  assert.equal(records.filter(record => record.reqId === 'loop' && record.event === 'tableau.attempt').length, calls);
 });
 
 test('central projection rejects arbitrary fields, unrecognized paths, unsafe IDs and headers', async () => {
@@ -220,19 +228,21 @@ test('attempt completion includes body wait and logs once when the body fails', 
   const records: Record[] = [];
   globalThis.fetch = async () => new Response(new ReadableStream({ start(controller) { setTimeout(() => { controller.enqueue(new TextEncoder().encode('{}')); controller.close(); }, 30); } }));
   await collect('body', records, () => getJson(session(), '/api/-/pulse/definitions'));
-  assert.equal(records.length, 1);
-  assert.ok(Number(records[0].durationMs) >= 20);
-  assert.ok(Number(records[0].durationMs) > Number(records[0].headersMs));
+  const body = records.filter(record => record.reqId === 'body' && record.event === 'tableau.attempt');
+  assert.equal(body.length, 1);
+  assert.ok(Number(body[0].durationMs) >= 20);
+  assert.ok(Number(body[0].durationMs) > Number(body[0].headersMs));
   globalThis.fetch = async () => new Response(new ReadableStream({ cancel() {} }));
   await assert.rejects(collect('body-failed', records, () => postJson(session(), '/api/-/pulse/definitions', {}, { timeoutMs: 20 })));
-  assert.equal(records.filter(record => record.reqId === 'body-failed').length, 1);
-  assert.equal(records.find(record => record.reqId === 'body-failed')?.status, 200);
+  const failed = records.filter(record => record.reqId === 'body-failed' && record.event === 'tableau.attempt');
+  assert.equal(failed.length, 1);
+  assert.equal(failed[0].status, 200);
   await collect('complete', records, async () => {
     const response = await observedTableauFetch('https://tableau.example.test/api/-/pulse/definitions', {}, undefined, async () => Response.json({}));
     finishObservedTableauResponse(response);
     finishObservedTableauResponse(response);
   });
-  assert.equal(records.filter(record => record.reqId === 'complete').length, 1);
+  assert.equal(records.filter(record => record.reqId === 'complete' && record.event === 'tableau.attempt').length, 1);
 });
 
 test('a queued deadline during a shared hold records the known throttle cause', async () => {
