@@ -6,10 +6,11 @@ import type {
   PulseVariantSummary,
 } from "@pulse-metric-studio/shared";
 import { createRegistryController } from "./controller";
+import { applyInventoryPatch } from "./inventory-patch";
 import { deferred, draft, inventory, session } from "../testing/fixtures";
 import { unavailableFollowState } from "../follow-state";
-import { decodeVariantResponse, type RegistryApi } from "../api/registry";
-import { PulseApiError, type PulseApi } from "../api/client";
+import { decodeVariantResponse, registryApi, type RegistryApi } from "../api/registry";
+import { pulseApi, PulseApiError, type PulseApi } from "../api/client";
 
 function fixture(
   overrides: Partial<RegistryApi> = {},
@@ -1281,15 +1282,128 @@ test("sent throttle receipts show cooldown after fast failure and reject older u
 });
 
 
-for (const kind of ["delete", "follow"] as const) test(`confirmed ${kind} receipt retains a sent throttle after the command completes`, async () => {
-  const throttle = { retryAt: 36_000, serverTime: 0, reason: "throttle" as const, sent: true };
-  const store = fixture({ follow: async () => ({ throttle, sent: true, results: [{ metricId: "metric", targetId: "user", targetKind: "USER", status: "failed", ok: false, sent: true }] }) }, {
-    delete: async () => ({ throttle, sent: true, definitionsDeleted: 0, metricsDeleted: 0, failures: ["HTTP 429"], outcomes: [{ metricId: "metric", status: "failed", sent: true }] }),
+for (const kind of ["follow", "unfollow"] as const) for (const sent of [true, false]) test(`real ${kind} ${sent ? "sent partial" : "unsent admission"} receipt retains its throttle`, async (t) => {
+  const throttle = { retryAt: 36_000, serverTime: 0, reason: "throttle" as const, sent };
+  let providerFollowReads = 0, writes = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    writes++;
+    return Response.json({ stopped: true, sent, throttle, results: [
+      { metricId: "metric", targetId: "user", targetKind: "USER", status: sent ? "failed" : "not_attempted", ok: false, sent, throttle },
+    ] }, { status: sent ? 207 : 429 });
+  });
+  const store = fixture({ [kind]: registryApi[kind], followState: async () => { providerFollowReads++; return completeCounts(["metric"], true); } });
+  store.getState().setContext(draft().context, "A", session);
+  const operations = Array.from({ length: 201 }, (_, index) => ({ metricId: index ? `other-${index}` : "metric", target: { kind: "USER" as const, id: "user" } }));
+  await store.getState().follow(kind, operations, [], []);
+  assert.equal(store.getState().cooldown?.remainingSeconds, 36);
+  assert.equal(store.getState().busy, null);
+  assert.equal(store.getState().results?.items[0].status, sent ? "failed" : "not_attempted");
+  assert.equal(store.getState().results?.items.at(-1)?.status, "not_attempted");
+  assert.equal(writes, 1, "known throttle prevents dispatching a second batch");
+  assert.equal(providerFollowReads, 0, "known cooldown prevents automatic relationship reads");
+});
+
+
+test("a new backend owner lifetime replaces retired local receipts without journal replay", async () => {
+  const base = { ...inventory(), lifetimeId: "retired", revision: 1 };
+  const created = { ...structuredClone(base), snapshotId: "patched-2", viewId: "owned-view", revision: 2 };
+  created.definitions[0].metrics.push({ ...created.definitions[0].metrics[0], metricId: "retired-local" });
+  let reads = 0;
+  const store = fixture({
+    inventory: async () => ++reads === 1 ? base : { ...inventory(), lifetimeId: "replacement", revision: 1 },
+    fork: async () => ({ attempted: 1, created: 1, existing: 0, failed: 0, pendingVisibility: 0, results: [],
+      inventoryPatch: { ...inventoryPatch(2, [{ definitionId: "definition-metric", metric: created.definitions[0].metrics[1] }]), lifetimeId: "retired", inventory: created } }),
   });
   store.getState().setContext(draft().context, "A", session);
-  if (kind === "delete") { await store.getState().load(); await store.getState().previewDelete(["metric"], []); await store.getState().executeDelete(); }
-  else await store.getState().follow("follow", [{ metricId: "metric", target: { kind: "USER", id: "user" } }], [], []);
+  await store.getState().load();
+  await store.getState().fork({ version: 1, sourceMetricIds: ["metric"], clauses: [] }, new Map());
+  await store.getState().refresh();
+  assert.deepEqual(store.getState().inventory?.definitions[0].metrics.map(row => row.metricId), ["metric"]);
+  assert.equal((store.getState().inventory as any)?.lifetimeId, "replacement");
+  assert.equal(store.getState().inventory?.revision, 1);
+});
+
+test("reverse mutation receipts retain every confirmed create after A B A navigation", async () => {
+  const first = deferred<PulseVariantSummary>();
+  const second = deferred<PulseVariantSummary>();
+  const base = { ...inventory(), lifetimeId: "owner-lifetime", revision: 1 };
+  const snapshot = (revision: number, ids: string[]) => ({ ...structuredClone(base), snapshotId: `patched-${revision}`, viewId: "owned-view", revision,
+    definitions: base.definitions.map(definition => ({ ...definition, metrics: [...definition.metrics, ...ids.map(metricId => ({ ...definition.metrics[0], metricId }))] })) });
+  const receipt = (revision: number, ids: string[]): PulseVariantSummary => ({ attempted: 1, created: 1, existing: 0, failed: 0, pendingVisibility: 0, results: [],
+    inventoryPatch: { ...inventoryPatch(revision, [{ definitionId: "definition-metric", metric: { ...base.definitions[0].metrics[0], metricId: ids.at(-1)! } }]), lifetimeId: base.lifetimeId, inventory: snapshot(revision, ids) } as any });
+  let writes = 0;
+  const store = fixture({ inventory: async () => base, fork: async () => ++writes === 1 ? first.promise : second.promise });
+  store.getState().setContext(draft().context, "A", session);
+  await store.getState().load();
+  const command = { version: 1 as const, sourceMetricIds: ["metric"], clauses: [] };
+  const one = store.getState().fork(command, new Map());
+  store.getState().setContext(draft("b").context, "B", session);
+  store.getState().setContext(draft().context, "A", session);
+  const two = store.getState().fork(command, new Map());
+  second.resolve(receipt(3, ["one", "two"])); await two;
+  first.resolve(receipt(2, ["one"])); await one;
+  assert.deepEqual(store.getState().inventory?.definitions[0].metrics.map(row => row.metricId), ["metric", "one", "two"]);
+  assert.equal(store.getState().inventory?.revision, 3);
+});
+
+test("provider read errors retain structured cooldown and fence pending work by owner", async () => {
+  const held = deferred<never>();
+  const store = fixture();
+  store.getState().setContext(draft().context, "A", session);
+  const read = store.getState().trackRead(() => held.promise).catch(() => undefined);
+  assert.equal(store.getState().pendingProviderReads, 1);
+  store.getState().setContext(draft("b").context, "B", session);
+  assert.equal(store.getState().pendingProviderReads, 1, "same-owner work remains visible across datasources");
+  held.reject(new PulseApiError("Wait", 429, undefined, undefined, { retryAt: 50_000, serverTime: 0, reason: "throttle", sent: true }));
+  await read;
+  assert.equal(store.getState().cooldown?.remainingSeconds, 50);
+  assert.equal(store.getState().pendingProviderReads, 0);
+  const stale = deferred<never>();
+  const old = store.getState().trackRead(() => stale.promise).catch(() => undefined);
+  store.getState().setContext(draft().context, "New owner", { ...session, sessionGeneration: 2 });
+  assert.equal(store.getState().pendingProviderReads, 0);
+  stale.reject(new PulseApiError("Old wait", 429, undefined, undefined, { retryAt: 90_000, serverTime: 0, reason: "throttle", sent: true }));
+  await old;
+  assert.equal(store.getState().cooldown, null);
+});
+
+test("late mutation from a retired backend lifetime cannot replace a new authoritative read", async () => {
+  const held = deferred<PulseVariantSummary>();
+  const base = { ...inventory(), lifetimeId: "retired", revision: 1 };
+  const replacement = { ...inventory("replacement"), lifetimeId: "new", revision: 1 };
+  let reads = 0;
+  const store = fixture({ inventory: async () => ++reads === 1 ? base : replacement, fork: async () => held.promise });
+  store.getState().setContext(draft().context, "A", session);
+  await store.getState().load();
+  const mutation = store.getState().fork({ version: 1, sourceMetricIds: ["metric"], clauses: [] }, new Map());
+  await store.getState().refresh();
+  held.resolve({ attempted: 1, created: 1, existing: 0, failed: 0, pendingVisibility: 0, results: [{ sourceMetricId: "metric", metricId: "retired-local", status: "created", creationStatus: "created", requestedSpecification: {} }],
+    inventoryPatch: { ...inventoryPatch(2), lifetimeId: "retired", inventory: { ...base, revision: 2 } } });
+  await mutation;
+  assert.deepEqual(store.getState().inventory, replacement);
+  assert.equal(store.getState().results?.items[0].status, "created", "the confirmed receipt remains inspectable even though its retired snapshot is rejected");
+});
+
+test("real deletion partial receipt retains its sent throttle after completion", async (t) => {
+  const throttle = { retryAt: 36_000, serverTime: 0, reason: "throttle", sent: true };
+  t.mock.method(globalThis, "fetch", async () => Response.json({ throttle, sent: true,
+    definitionsDeleted: 0, metricsDeleted: 0, failures: ["HTTP 429"], outcomes: [{ metricId: "metric", status: "failed", sent: true, throttle }],
+  }, { status: 207 }));
+  const store = fixture({}, { delete: pulseApi.delete });
+  store.getState().setContext(draft().context, "A", session);
+  await store.getState().load();
+  await store.getState().previewDelete(["metric"], []);
+  await store.getState().executeDelete();
   assert.equal(store.getState().cooldown?.remainingSeconds, 36);
   assert.equal(store.getState().busy, null);
   assert.equal(store.getState().results?.items[0].status, "failed");
+});
+
+test("complete receipt coordinates must match the normalized snapshot envelope", () => {
+  const base = { ...inventory(), lifetimeId: "owner", revision: 1, viewId: "owned-view" };
+  const patch = { ...inventoryPatch(2), lifetimeId: "owner", inventory: { ...base, snapshotId: "patched-2", revision: 2 } };
+  for (const conflict of [{ snapshotId: "wrong" }, { viewId: "wrong" }, { lifetimeId: "wrong" }, { revision: 3 }]) {
+    assert.equal(applyInventoryPatch(base, { ...patch, inventory: { ...patch.inventory, ...conflict } }), base);
+  }
+  assert.equal(applyInventoryPatch(base, patch), patch.inventory);
 });

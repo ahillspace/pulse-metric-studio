@@ -362,6 +362,7 @@ export const PulseInventoryFailureSchema = z.object({
 });
 export const PulseInventoryResponseSchema = z.object({
   snapshotId: id,
+  lifetimeId: id.optional(),
   viewId: id.optional(),
   revision: z.number().int().nonnegative().optional(),
   definitions: z.array(PulseDefinitionNodeSchema),
@@ -376,6 +377,8 @@ export type PulseInventoryResponse = z.infer<
 >;
 export const PulseInventoryPatchSchema = z.object({
   version: z.literal(1),
+  lifetimeId: id.optional(),
+  inventory: PulseInventoryResponseSchema.optional(),
   baseSnapshotId: id,
   snapshotId: id,
   viewId: id,
@@ -424,6 +427,8 @@ export const PulseFollowCommandSchema = z.object({
   operations: z.array(PulseFollowOperationSchema).min(1).max(200),
 });
 export const PulseFollowOperationResultSchema = z.object({
+  sent: z.boolean().optional(),
+  throttle: TableauThrottleMetadataSchema.optional(),
   metricId: id,
   targetId: id,
   targetKind: z.enum(['GROUP', 'USER']),
@@ -441,6 +446,8 @@ export const PulseFollowOperationResultSchema = z.object({
   code: z.string().optional(),
 });
 export const PulseFollowResultsSchema = z.object({
+  sent: z.boolean().optional(),
+  throttle: TableauThrottleMetadataSchema.optional(),
   results: z.array(PulseFollowOperationResultSchema),
   terminated: z.boolean().optional(),
   stopped: z.boolean().optional(),

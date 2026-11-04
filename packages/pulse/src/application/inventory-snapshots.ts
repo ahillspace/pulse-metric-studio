@@ -17,7 +17,7 @@ interface InventorySnapshot {
   facts: Map<string, InventorySourceFact>;
 }
 interface Changes { upserts: PulseInventoryPatch['upserts']; removedMetricIds: string[]; removedDefinitionIds: string[] }
-interface OwnerState { revision: number; sequence: number; latest?: InventorySnapshot; journal: Array<{ sequence: number; changes: Changes }>; pendingReads: Map<string, number>; deletedMetrics: Map<string, number>; deletedDefinitions: Map<string, number>; activeMutations: Map<string, { sequence: number; count: number }> }
+interface OwnerState { lifetimeId: string; readGeneration: number; revision: number; sequence: number; latest?: InventorySnapshot; journal: Array<{ sequence: number; changes: Changes }>; pendingReads: Map<string, number>; deletedMetrics: Map<string, number>; deletedDefinitions: Map<string, number>; activeMutations: Map<string, { sequence: number; count: number }> }
 const snapshots = new WeakMap<TableauSession, Map<string, InventorySnapshot>>();
 const owners = new WeakMap<TableauSession, { context: ReturnType<typeof getSessionContext>; coordinates: string; states: Map<string, OwnerState> }>();
 function ownerKey(owner: PulseDraftContext): string { return JSON.stringify([owner.connectionId, owner.serverUrl, owner.siteId, owner.datasourceLuid]); }
@@ -28,7 +28,7 @@ function stateFor(session: TableauSession, owner: PulseDraftContext): OwnerState
     retained = { context, coordinates, states: new Map() }; owners.set(session, retained);
   }
   const key = ownerKey(owner); let state = retained.states.get(key);
-  if (!state) { state = { revision: 0, sequence: 0, journal: [], pendingReads: new Map(), deletedMetrics: new Map(), deletedDefinitions: new Map(), activeMutations: new Map() }; retained.states.set(key, state); }
+  if (!state) { state = { lifetimeId: randomUUID(), readGeneration: 0, revision: 0, sequence: 0, journal: [], pendingReads: new Map(), deletedMetrics: new Map(), deletedDefinitions: new Map(), activeMutations: new Map() }; retained.states.set(key, state); }
   return state;
 }
 function retain(session: TableauSession, snapshot: InventorySnapshot): PulseInventoryResponse {
@@ -66,6 +66,7 @@ export async function loadPulseInventory(session: TableauSession, datasourceLuid
   const owner: PulseDraftContext = { connectionId: sessionContext?.connectionId ?? '', serverUrl: session.serverUrl, siteId: session.siteId, datasourceLuid };
   requirePulseOwner(owner, session);
   const userId = session.userId, state = stateFor(session, owner), startedSequence = state.sequence;
+  const generation = ++state.readGeneration;
   const readId = randomUUID(); state.pendingReads.set(readId, startedSequence);
   try {
   const facts = new Map<string, InventorySourceFact>();
@@ -75,7 +76,8 @@ export async function loadPulseInventory(session: TableauSession, datasourceLuid
   } });
   requirePulseOwner(owner, session);
   if (getSessionContext(session) !== sessionContext || session.userId !== userId) throw refreshRequired();
-  const inventory: PulseInventoryResponse = { ...result, snapshotId: randomUUID(), viewId: randomUUID(), revision: ++state.revision };
+  if (generation !== state.readGeneration && state.latest) return structuredClone(state.latest.inventory);
+  const inventory: PulseInventoryResponse = { ...result, lifetimeId: state.lifetimeId, snapshotId: randomUUID(), viewId: randomUUID(), revision: ++state.revision };
   for (const entry of state.journal) if (entry.sequence > startedSequence) apply(inventory, entry.changes);
   // Merge original acquisition facts for local rows that a pending refresh could not yet list.
   for (const [id, fact] of state.latest?.facts ?? []) if (!facts.has(id) && inventory.definitions.some(definition => definition.metrics.some(metric => metric.metricId === id))) facts.set(id, structuredClone(fact));
@@ -154,7 +156,7 @@ export function patchPulseInventory(session: TableauSession, owner: PulseDraftCo
   pruneJournal(state);
   // This journal lives only for the active owner, with snapshots bounded independently.
   const snapshot = { ...latest, inventory, facts }; state.latest = snapshot; retain(session, snapshot);
-  return { version: 1, baseSnapshotId: latest.inventory.snapshotId, snapshotId: inventory.snapshotId, viewId: inventory.viewId, revision: inventory.revision, ...structuredClone(changes) };
+  return { version: 1, lifetimeId: state.lifetimeId, inventory: structuredClone(inventory), baseSnapshotId: latest.inventory.snapshotId, snapshotId: inventory.snapshotId, viewId: inventory.viewId, revision: inventory.revision, ...structuredClone(changes) };
 }
 export function getInventoryView(session: TableauSession, snapshotId: string): { viewId: string; metricIds: string[] } {
   const retained = snapshots.get(session)?.get(snapshotId); if (!retained) throw refreshRequired();

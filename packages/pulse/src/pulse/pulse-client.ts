@@ -452,6 +452,8 @@ export interface SubscriptionWriteTarget {
   targetType: 'USER' | 'GROUP';
 }
 export interface SubscriptionWriteResult {
+  sent?: boolean;
+  throttle?: import('@pulse-metric-studio/shared').TableauThrottleMetadata;
   metricId: string;
   targetId: string;
   targetType?: 'USER' | 'GROUP';
@@ -461,6 +463,7 @@ export interface SubscriptionWriteResult {
   error?: string;
 }
 export class SubscriptionBatchInterrupted extends TableauError {
+  readonly throttle?: import('@pulse-metric-studio/shared').TableauThrottleMetadata;
   readonly failed: { metricId: string; targetId: string };
   constructor(
     cause: TableauError,
@@ -469,7 +472,8 @@ export class SubscriptionBatchInterrupted extends TableauError {
     public readonly failedTargets: SubscriptionWriteTarget[] = [],
     public readonly phase: 'submission' | 'confirmation' = 'submission',
   ) {
-    super(cause.message, cause.status, cause.bodySnippet, cause.kind, cause.providerCode, cause.providerInfo);
+    super(cause.message, cause.status, cause.bodySnippet, cause.kind, cause.providerCode, cause.providerInfo, cause.sent);
+    if ('throttle' in cause) this.throttle = (cause as TableauError & { throttle: import('@pulse-metric-studio/shared').TableauThrottleMetadata }).throttle;
     this.failed = failed;
   }
 }
@@ -500,6 +504,7 @@ export async function batchCreateSubscriptions(session: TableauSession, items: S
         try { records = normalizeSubscriptionEnvelope({ subscriptions: subscriptionRecords(data).filter((record) => record.metric_id === undefined || record.metric_id === metricId) }); }
         catch { records = []; }
       } catch (error) {
+        if (error instanceof TableauError && error.status === 429) throw new SubscriptionBatchInterrupted(error, results, batch[0]!, batch);
         if (!(error instanceof TableauError) || error.kind === 'auth' || error.kind === 'network' || error.status >= 500) {
           const cause = error instanceof TableauError ? error : new TableauError('Subscription batch outcome is unknown.', 502);
           throw new SubscriptionBatchInterrupted(cause, results, batch[0]!, batch);

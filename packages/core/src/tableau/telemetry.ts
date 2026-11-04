@@ -92,6 +92,11 @@ export function logTableauEvent(event: TableauTelemetryEvent): void {
   try { (current?.log ?? fallback)(record); } catch { /* Diagnostics cannot change provider outcomes. */ }
 }
 
+/** Shared gates may wake a waiter from another request; retain its logging and tracing stores. */
+export function captureTableauEventLogger(): typeof logTableauEvent {
+  return AsyncLocalStorage.bind(logTableauEvent);
+}
+
 export interface TableauCallTrace { callId: string; attempt: number; retryReason?: RetryReason; }
 export function createTableauCallTrace(): TableauCallTrace { return { callId: randomUUID(), attempt: 0, retryReason: context.getStore()?.retryReason }; }
 

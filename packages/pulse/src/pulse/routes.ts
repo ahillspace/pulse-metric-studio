@@ -30,6 +30,7 @@ import {
   pulseForkPlanService,
   type PulseForkPlanService,
 } from "./fork-plan-service.js";
+import { latestThrottle } from '../application/mutation-metadata.js';
 import { pulseOperationErrorMessage } from './operation-errors.js';
 
 async function dimensionOperation<T>(session: TableauSession, operation: () => Promise<T>): Promise<T> {
@@ -195,13 +196,17 @@ export function registerPulseRoutes(
     return getFollowTargets(session);
   });
 
-  app.post("/api/pulse/follow", async (req) => {
+  app.post("/api/pulse/follow", async (req, reply) => {
     const parsed = PulseFollowCommandSchema.safeParse(req.body);
     if (!parsed.success) throw app.httpErrors.badRequest(parsed.error.message);
     const session = requirePulseOwner(parsed.data.context, requireSession(req));
     const operations = parsed.data.operations;
     const results = await followTargets(session, { operations });
+    const throttle = latestThrottle(results), sent = results.some(result => result.sent !== false);
+    if (throttle) reply.code(sent ? 207 : 429);
     return {
+      sent,
+      ...(throttle ? { throttle: { ...throttle, sent } } : {}),
       results,
       terminated: results.some(
         (result) => result.code === "authentication_required",
@@ -209,18 +214,22 @@ export function registerPulseRoutes(
       stopped: results.some(
         (result) =>
           result.code === "authentication_required" ||
-          result.code === "subscription_interrupted",
+          result.code === "subscription_interrupted" || result.throttle !== undefined,
       ),
     };
   });
 
-  app.post("/api/pulse/unfollow", async (req) => {
+  app.post("/api/pulse/unfollow", async (req, reply) => {
     const parsed = PulseFollowCommandSchema.safeParse(req.body);
     if (!parsed.success) throw app.httpErrors.badRequest(parsed.error.message);
     const session = requirePulseOwner(parsed.data.context, requireSession(req));
     const operations = parsed.data.operations;
     const results = await unfollowTargets(session, { operations });
+    const throttle = latestThrottle(results), sent = results.some(result => result.sent !== false);
+    if (throttle) reply.code(sent ? 207 : 429);
     return {
+      sent,
+      ...(throttle ? { throttle: { ...throttle, sent } } : {}),
       results,
       terminated: results.some(
         (result) => result.code === "authentication_required",
@@ -228,7 +237,7 @@ export function registerPulseRoutes(
       stopped: results.some(
         (result) =>
           result.code === "authentication_required" ||
-          result.code === "subscription_interrupted",
+          result.code === "subscription_interrupted" || result.throttle !== undefined,
       ),
     };
   });

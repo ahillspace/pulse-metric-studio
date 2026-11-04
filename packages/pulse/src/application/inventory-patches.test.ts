@@ -6,6 +6,32 @@ import { exactMetricVariant } from './inventory.js';
 import { PulseDeletionService } from './deletion.js';
 
 function gate() { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; }
+test('older dispatched refresh cannot replace a newer authoritative inventory or receipt', async () => {
+  const originalFetch = globalThis.fetch;
+  const session: TableauSession = { serverUrl: 'https://refresh.test', siteContentUrl: 'site', siteId: 'site', userId: 'user', token: 'token', apiVersion: '3.27' };
+  const owner = { connectionId: 'connection', serverUrl: session.serverUrl, siteId: 'site', datasourceLuid: 'datasource' };
+  setSession(session, { connectionId: 'connection', patSecret: '' });
+  const pending = gate(), started = gate(); let lists = 0;
+  const source = { id: 'source', definition_id: 'definition', is_default: false, specification: { filters: [] } };
+  globalThis.fetch = async input => {
+    if (new URL(String(input)).pathname.endsWith('/definitions')) return Response.json({ definitions: [{ metadata: { id: 'definition' }, specification: { datasource: { id: 'datasource' } } }] });
+    const read = ++lists; if (read === 2) { started.resolve(); await pending.promise; }
+    return Response.json({ metrics: read === 3 ? [source, { ...source, id: 'remote' }] : [source] });
+  };
+  try {
+    await loadPulseInventory(session, 'datasource', { refresh: true });
+    const a = loadPulseInventory(session, 'datasource', { refresh: true }); await started.promise;
+    const b = await loadPulseInventory(session, 'datasource', { refresh: true }); pending.resolve(); await a;
+    const patch = patchPulseInventory(session, owner, b.snapshotId, { upserts: [{ definitionId: 'definition', metric: exactMetricVariant('local', {}, source) }], removedMetricIds: [], removedDefinitionIds: [] })!;
+    assert.deepEqual(getPulseInventorySnapshot(session, owner, patch.snapshotId).definitions[0]!.metrics.map(row => row.metricId), ['source', 'remote', 'local']);
+    assert.equal(patch.lifetimeId, b.lifetimeId);
+    assert.deepEqual(patch.inventory, getPulseInventorySnapshot(session, owner, patch.snapshotId));
+    const later = patchPulseInventory(session, owner, b.snapshotId, { upserts: [], removedMetricIds: ['source'], removedDefinitionIds: [] })!;
+    assert.deepEqual(later.inventory!.definitions[0]!.metrics.map(row => row.metricId), ['remote', 'local']);
+    assert.ok(later.revision > patch.revision);
+    assert.equal(lists, 3);
+  } finally { pending.resolve(); globalThis.fetch = originalFetch; clearSession(); }
+});
 test('local patches rebase pending refreshes, preserve reviewed evidence and fence older create results after deletion', async () => {
   const originalFetch = globalThis.fetch;
   const session: TableauSession = { serverUrl: 'https://example.test', siteContentUrl: 'site', siteId: 'site', userId: 'patch-user', token: 'token', apiVersion: '3.27' };

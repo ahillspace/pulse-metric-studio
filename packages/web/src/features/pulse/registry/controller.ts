@@ -15,7 +15,7 @@ import {
   forkRegistryActionItem,
   type RegistryActionResults,
 } from "../registry-actions";
-import { mergeFollowStates, replaceFollowDetails, selectFollowMetrics, unavailableFollowState } from "../follow-state";
+import { mergeFollowStates, replaceFollowDetails, replaceFollowMetrics, selectFollowMetrics, unavailableFollowState } from "../follow-state";
 import { applyInventoryPatch } from "./inventory-patch";
 import type { FollowState } from "./view-types";
 import {
@@ -35,6 +35,8 @@ interface RegistryState {
   inventory: PulseInventoryResponse | null;
   followState: FollowState | null;
   loading: boolean;
+  pendingProviderReads: number;
+  trackRead<T>(read: () => Promise<T>, owner?: SessionOwner | null): Promise<T>;
   followLoading: boolean;
   error: string | null;
   busy: "fork" | "delete" | "follow" | "unfollow" | null;
@@ -105,7 +107,8 @@ export function createRegistryController(
   type CachedInventory = { inventory: PulseInventoryResponse; followState: FollowState | null; loadedAt: number; operation: InventoryIdentity };
   const cache = new Map<string, CachedInventory>();
   const pending = new Map<string, InventoryRead>();
-  const patches = new Map<string, PulseInventoryPatch[]>();
+  const providerReads = new Map<string, number>();
+  const trailingStatus = new Map<string, ReturnType<typeof setTimeout>>();
   const detailScopes = new Map<string, DetailScope>();
   let activeDetailRequests = 0;
   const waitingDetailRequests: Array<() => void> = [];
@@ -149,7 +152,7 @@ export function createRegistryController(
       scope.generation === generation &&
       scope.key === activeKey();
     const captureThrottle = (scope: ReturnType<typeof capture>, throttle: TableauThrottleMetadata | undefined) => {
-      if (!throttle || !current(scope)) return;
+      if (!throttle || sessionOwnerKey(scope.owner) !== sessionOwnerKey(get().owner)) return;
       const ownerKey = sessionOwnerKey(scope.owner);
       cooldownVersions.set(ownerKey, (cooldownVersions.get(ownerKey) ?? 0) + 1);
       const retryAt = Math.max(get().cooldown?.retryAt ?? 0, throttle.retryAt);
@@ -168,27 +171,32 @@ export function createRegistryController(
       }));
     const applyPatch = (scope: ReturnType<typeof capture>, patch: PulseInventoryPatch | undefined) => {
       if (!patch) return;
-      const journal = patches.get(scope.key) ?? [];
-      if (!journal.some(entry => entry.snapshotId === patch.snapshotId)) journal.push(patch);
-      journal.sort((a, b) => a.revision - b.revision);
-      patches.set(scope.key, journal);
       const addMissingEvidence = (state: FollowState | null) => {
         if (!state) state = { userFollowsByMetricId: {}, groupFollowsByMetricId: {}, followerCountsByMetricId: {}, errors: [], availabilityByMetricId: {} };
         const availabilityByMetricId = { ...state.availabilityByMetricId };
-        for (const { metric } of patch.upserts) if (!availabilityByMetricId[metric.metricId]) availabilityByMetricId[metric.metricId] = {
+        for (const metric of patch.inventory?.definitions.flatMap(definition => definition.metrics) ?? patch.upserts.map(upsert => upsert.metric)) if (!availabilityByMetricId[metric.metricId]) availabilityByMetricId[metric.metricId] = {
           status: "partial", relationshipStatus: "not_requested", followerIdsStatus: "not_requested", followerCountStatus: "not_requested", diagnostics: [],
         };
         return { ...state, availabilityByMetricId };
       };
       const saved = cache.get(scope.key);
-      if (saved) retain(scope.key, { ...saved, inventory: applyInventoryPatch(saved.inventory, patch), followState: addMissingEvidence(saved.followState) });
+      if (saved) {
+        const inventory = applyInventoryPatch(saved.inventory, patch);
+        if (inventory !== saved.inventory) retain(scope.key, { ...saved, inventory, followState: addMissingEvidence(saved.followState) });
+      }
       const read = pending.get(scope.key);
       if (read?.inventory) read.inventory = applyInventoryPatch(read.inventory, patch);
-      if (current(scope) && get().inventory) set({ inventory: applyInventoryPatch(get().inventory!, patch), followState: addMissingEvidence(get().followState) });
+      if (scope.key === activeKey() && get().inventory) {
+        const inventory = applyInventoryPatch(get().inventory!, patch);
+        if (inventory !== get().inventory) set({ inventory, followState: addMissingEvidence(get().followState) });
+      }
     };
-    const rebaseInventory = (scopeKey: string, inventory: PulseInventoryResponse) =>
-      (patches.get(scopeKey) ?? []).filter(patch => patch.revision > (inventory.revision ?? 0))
-        .reduce(applyInventoryPatch, inventory);
+    const rebaseInventory = (scopeKey: string, inventory: PulseInventoryResponse) => {
+      const retained = scopeKey === activeKey() ? get().inventory : cache.get(scopeKey)?.inventory;
+      // A read establishes the owner lifetime. Revisions are comparable only inside it.
+      return retained && retained.lifetimeId === inventory.lifetimeId &&
+        (retained.revision ?? 0) > (inventory.revision ?? 0) ? retained : inventory;
+    };
     const pruneDetailScopes = () => {
       for (const [scopeKey, reads] of detailScopes) {
         if (detailScopes.size <= 8) break;
@@ -241,12 +249,12 @@ export function createRegistryController(
             const previous = current(scope) ? get().followState : cache.get(scope.key)?.followState;
             const missingCounts = valid.filter(id => refreshCounts || previous?.availabilityByMetricId?.[id]?.followerCountStatus === "not_requested");
             const [details, counts] = await Promise.all([
-              transport.followState(valid, true, scope.owner, { snapshotId: (current(scope) ? get().inventory : cache.get(scope.key)?.inventory)?.snapshotId, continueCoverage }).catch(error => {
+              get().trackRead(() => transport.followState(valid, true, scope.owner, { snapshotId: (current(scope) ? get().inventory : cache.get(scope.key)?.inventory)?.snapshotId, continueCoverage }), scope.owner).catch(error => {
                 const unavailable = unavailableFollowState(valid, errorMessage(error));
                 for (const availability of Object.values(unavailable.availabilityByMetricId ?? {})) availability.followerCountStatus = "not_requested";
                 return unavailable;
               }),
-              missingCounts.length ? transport.followState(missingCounts, false, scope.owner).catch(error => unavailableFollowState(missingCounts, errorMessage(error))) : Promise.resolve(null),
+              missingCounts.length ? get().trackRead(() => transport.followState(missingCounts, false, scope.owner), scope.owner).catch(error => unavailableFollowState(missingCounts, errorMessage(error))) : Promise.resolve(null),
             ]);
             return counts ? replaceFollowDetails(counts, details, valid) : details;
           }
@@ -298,6 +306,34 @@ export function createRegistryController(
       inventory: null,
       followState: null,
       loading: false,
+      pendingProviderReads: 0,
+      async trackRead(read, owner = get().owner) {
+        const scope = { ...capture(), owner };
+        const ownerKey = sessionOwnerKey(owner);
+        const publish = () => { if (ownerKey === sessionOwnerKey(get().owner)) set({ pendingProviderReads: providerReads.get(ownerKey) ?? 0 }); };
+        providerReads.set(ownerKey, (providerReads.get(ownerKey) ?? 0) + 1);
+        publish();
+        try { return await read(); }
+        catch (error) { captureCooldown(scope, error); throw error; }
+        finally {
+          const remaining = (providerReads.get(ownerKey) ?? 1) - 1;
+          if (remaining) providerReads.set(ownerKey, remaining); else providerReads.delete(ownerKey);
+          publish();
+          const previous = trailingStatus.get(ownerKey);
+          if (previous) clearTimeout(previous);
+          trailingStatus.delete(ownerKey);
+          // One final observation catches a fast partial read that ended after an unthrottled poll.
+          // It is tied to completed work and never starts an idle polling loop.
+          if (ownerKey === sessionOwnerKey(get().owner) && transport.throttle) {
+            const timer = setTimeout(() => {
+              trailingStatus.delete(ownerKey);
+              if (ownerKey === sessionOwnerKey(get().owner)) void get().pollCooldown();
+            }, Math.max(0, 1000 - (Date.now() - (cooldownReads.get(ownerKey) ?? 0))));
+            trailingStatus.set(ownerKey, timer);
+            (timer as unknown as { unref?: () => void }).unref?.();
+          }
+        }
+      },
       followLoading: false,
       error: null,
       busy: null,
@@ -345,6 +381,7 @@ export function createRegistryController(
           followState: saved?.followState ?? null,
           followLoading: false,
           loading: false,
+          pendingProviderReads: providerReads.get(sessionOwnerKey(owner)) ?? 0,
           error: null,
           busy: null,
           results: get().outcomes[key(context, owner)] ?? null,
@@ -398,7 +435,7 @@ export function createRegistryController(
           operation = { identity: { detailScope }, promise: undefined!, details: new Map(), detailScope };
           const read = operation;
           read.promise = (async (): Promise<CachedInventory> => {
-            const inventory = rebaseInventory(scope.key, await transport.inventory(scope.context!, scope.owner, options));
+            const inventory = rebaseInventory(scope.key, await get().trackRead(() => transport.inventory(scope.context!, scope.owner, options), scope.owner));
             const result = (followState: FollowState | null): CachedInventory => {
               const rebased = rebaseInventory(scope.key, inventory);
               const knownIds = new Set(idsFor(inventory));
@@ -418,7 +455,7 @@ export function createRegistryController(
                 (_, index) => ids.slice(offset + index * 200, offset + (index + 1) * 200));
               await Promise.all(batches.map(async (batch) => {
                 let state: FollowState;
-                try { state = await transport.followState(batch, false, scope.owner); }
+                try { state = await get().trackRead(() => transport.followState(batch, false, scope.owner), scope.owner); }
                 catch (error) {
                   state = unavailableFollowState(batch, errorMessage(error));
                   for (const availability of Object.values(state.availabilityByMetricId ?? {})) {
@@ -780,10 +817,12 @@ export function createRegistryController(
               scope.owner,
             );
             captureThrottle(scope, response.throttle);
+            for (const result of response.results) captureThrottle(scope, result.throttle);
             results.push(...response.results);
-            if (response.terminated || response.stopped) {
+            if (response.terminated || response.stopped || response.throttle) {
               failure = response.terminated
                 ? "The Tableau session ended. Remaining subscriptions were not sent."
+                : response.throttle ? "Tableau is limiting requests. Remaining subscriptions were not sent."
                 : "A subscription outcome is uncertain. Remaining subscriptions were not sent.";
               break;
             }
@@ -833,9 +872,19 @@ export function createRegistryController(
           items: reconciled.items,
         });
         if (sentCount > 0) {
-          const ids = operations.slice(0, sentCount).map(operation => operation.metricId);
+          const ids = [...new Set(results.filter(result => result.sent !== false && result.status !== "not_attempted").map(result => result.metricId))];
           supersedeDetails(scope, ids);
-          await readFollowState(scope, ids, true);
+          if (!get().cooldown) await readFollowState(scope, ids, true);
+          else if (ids.length) {
+            const deferred = unavailableFollowState(ids, "Follow details changed. Reload them after the Tableau request limit clears.");
+            for (const availability of Object.values(deferred.availabilityByMetricId ?? {})) {
+              availability.relationshipStatus = "not_requested";
+              availability.followerCountStatus = "not_requested";
+            }
+            const saved = cache.get(scope.key);
+            if (saved) retain(scope.key, { ...saved, followState: replaceFollowMetrics(saved.followState, deferred, ids) });
+            if (scope.key === activeKey()) set({ followState: replaceFollowMetrics(get().followState, deferred, ids) });
+          }
         }
         if (current(scope)) set({ busy: null });
         return reconciled.retryOperations;
@@ -846,13 +895,14 @@ export function createRegistryController(
         directoryPending.delete(ownerKey);
       },
       async loadTargets(refresh = false) {
-        const ownerKey = sessionOwnerKey(get().owner);
+        const owner = get().owner;
+        const ownerKey = sessionOwnerKey(owner);
         if (refresh) get().invalidateTargets();
         const saved = directories.get(ownerKey);
         if (saved && Date.now() - saved.loadedAt < (saved.value.errors.length ? 15_000 : 300_000)) return saved.value;
         const existing = directoryPending.get(ownerKey);
         if (existing) return existing;
-        const request = transport.followTargets(get().owner);
+        const request = get().trackRead(() => transport.followTargets(owner), owner);
         directoryPending.set(ownerKey, request);
         try {
           const value = await request;
@@ -884,7 +934,10 @@ export function createRegistryController(
         const result = await readFollowState(scope, metricIds, true);
         return current(scope) ? result : null;
       },
-      loadFollowers: (metricIds) => transport.followers(metricIds, get().owner),
+      loadFollowers: (metricIds) => {
+        const owner = get().owner;
+        return get().trackRead(() => transport.followers(metricIds, owner), owner);
+      },
     };
   });
 }

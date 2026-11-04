@@ -213,8 +213,14 @@ Cancellation, expiry, network failure, and terminal non-success responses releas
 Queued requests observe their original deadline and never dispatch after expiration.
 An identity-scoped `GET /api/tableau/throttle` returns local cooldown state, `retryAt`, server time, and the throttle reason without contacting Tableau.
 Its optional expected-owner fence checks the complete connection, server, site, user, and session generation.
-Pending Manager mutations poll this endpoint at most once per second to display shared cooldown, including extensions.
+Pending Manager reads and mutations poll this endpoint at most once per second to display shared cooldown, including extensions.
+A final local check after the last operation settles captures fast terminal throttles.
+Status polling stops when no work or cooldown remains.
 New overlapping mutations are refused during known cooldown in both the interface and backend admission.
+Follow and unfollow admission runs before subscription preflight.
+Their per-target and summary receipts retain mutation dispatch and cooldown metadata.
+A throttled target stops later envelopes; unsent targets remain distinct from rejected submitted targets.
+An entirely unsent throttled response uses HTTP 429; a response containing submitted mutations uses HTTP 207.
 Structured throttle errors distinguish sent requests from local refusals and retain retry timing.
 Expiry permits eligible admitted requests to resume; it never resubmits a whole command or an ambiguous write.
 See [`getFieldCatalog`](../packages/core/src/tableau/vds-fields.ts) and [`metadata-fallback.ts`](../packages/core/src/tableau/metadata-fallback.ts).
@@ -333,6 +339,8 @@ Incomplete or unqualified site coverage falls back to requested metrics without 
 One demand uses at most 20 subscription calls, including discovery and targeted pages.
 Explicit continuation retains progress and limits site scanning to 20 pages and 2,000 records per view.
 Targeted scans use the same page and record bounds; each owner retains eight coverage views.
+Exhausted page or record budgets disable continuation and explain the terminal local limit.
+Personal-only requests cannot upgrade retained unqualified site coverage into authoritative absence.
 Only displayed datasource metric identities enter retained relationship records.
 Absent site records remain unknown until site-negative coverage is qualified against known user and group subscriptions.
 The default backend keeps site-negative qualification disabled.
@@ -347,6 +355,8 @@ The backend derives connection ownership from the active Tableau session and bin
 Snapshots remain in memory without a time limit, with a retention target of 32 snapshots per session.
 Active create and delete commands pin their snapshots until completion, so pinned snapshots can temporarily exceed that target.
 Inactive datasource state retires after its latest snapshot is evicted and its pending reads and mutation pins finish.
+Each owner state has an opaque lifetime identifier; its revisions increase only within that lifetime.
+A replacement owner state starts a new lifetime instead of reusing prior revision authority.
 Deletion preview uses the displayed snapshot identifier and makes no Tableau requests.
 Deletion requires explicit inventory refresh for missing, evicted, or mismatched snapshots; it never falls back to provider reads.
 Deletion submits the exact selection, snapshot identifier, and reviewed plan fingerprint.
@@ -355,7 +365,10 @@ Deleting a definition sends one definition DELETE; Tableau removes its metrics a
 Selected child metrics covered by that definition do not receive individual DELETE requests.
 Individual metric DELETEs run in sequential groups of up to five; definition DELETEs remain serial.
 Every request in a group, including its bounded transport retries, settles before the next group starts.
-Confirmed deletions produce a cloned backend snapshot and a versioned inventory patch without changing earlier review evidence.
+Confirmed deletions produce a cloned backend snapshot and a versioned inventory receipt without changing earlier review evidence.
+Each mutation receipt carries the complete normalized authoritative inventory, its lifetime, and revision, alongside affected identity deltas.
+Newer receipts include earlier confirmed changes, so reverse delivery cannot discard those changes.
+The renderer rejects older same-lifetime receipts and receipts from retired lifetimes without retaining an indefinite mutation journal.
 The controller removes confirmed targets and preserves failed, unknown, and unsent targets with their explicit outcomes.
 Create and delete results do not trigger automatic inventory reloads, including after local admission refusal.
 Use **Refresh metrics** to reconcile external changes or inspect uncertain outcomes after cooldown.
@@ -375,7 +388,8 @@ Create can rebase a truly missing or evicted snapshot onto the latest safe backe
 This fallback validates source facts through cold reads; retained snapshots with a different owner or datasource are rejected.
 Without a safe owned base, create returns 409 and requests **Refresh metrics** before sending writes.
 The provider's validated creation Boolean and metric ID establish created or existing outcomes without metric-list propagation polling.
-Supplied response coordinates must match the captured definition, datasource, and destination specification.
+Every supplied supported response coordinate must match the captured metric, definition, site, datasource, and destination specification.
+Conflicting aliases retain the known created or existing disposition and metric ID, but cannot produce mergeable inventory evidence.
 Missing display enrichment retains trusted captured facts; unknown default status remains unknown.
 Confirmed normalized rows merge by metric ID into a cloned backend snapshot and the current display.
 An existing destination does not gain creation or deletion ownership merely because a request returns its ID.
@@ -383,6 +397,7 @@ Patches preserve unrelated selection, expansion, preview images, follower counts
 New metrics retain not-requested relationship evidence until explicit inspection or a relevant follow mutation acquires it.
 Owner, datasource, generation, and mutation-order checks prevent stale patch replacement and confirmed deletion resurrection.
 Concurrent manual refresh rebases confirmed patches through local cached evidence without additional Tableau reads.
+Dispatch order fences inventory authority; an older refresh completion cannot replace a newer accepted inventory.
 The owner journal retains changes only for pending refresh windows; deletion sequence fences reject older pending upserts for deleted identities.
 Follow / Unfollow's Add existing reads a fresh identity snapshot for the exact selected metrics through the existing batched follow-state endpoint.
 It merges direct user and group subscribers into the selected targets without expanding group membership, and reports incomplete identity reads.
@@ -390,6 +405,9 @@ The directory supplies display names, not subscription evidence.
 Initial summaries request follower counts without subscriber identities or user-membership discovery.
 Visible rows and explicit actions request identity detail; not-requested information remains distinct from zero, unavailable, or complete information.
 Follow mutations retain inventory and reconcile only affected metric IDs, including partial and unknown outcomes.
+Backend coverage invalidation fences both mutation admission and completion, including failed and unknown outcomes.
+A relationship read during a write cannot remain authoritative after that write settles.
+Unsent targets preserve prior display evidence; known cooldown defers provider reconciliation until an explicit retry or refresh.
 Directory reads share bounded session-owned cache entries with an explicit refresh path.
 Group creation and removal invalidate the affected owner's target directory; ordinary subscription changes retain it.
 Backend membership reads share session/user-owned evidence until expiry or a relevant membership or group mutation.

@@ -11,6 +11,10 @@ interface ViewCoverage {
 interface CoverageStore { owner: ReturnType<typeof getSessionContext>; coordinates: string; views: Map<string, ViewCoverage> }
 const stores = new WeakMap<TableauSession, Map<object, CoverageStore>>();
 function fresh(): TargetCoverage { return { records: [], complete: false, seen: new Set(), pages: 0, scanned: 0, version: 0, demanded: false }; }
+function stopAtLimit(target: TargetCoverage): void {
+  target.terminal = true;
+  target.error = new Error('Subscription coverage reached the local safety limit. Refresh metrics to start a new view.');
+}
 export function invalidateSubscriptionCoverage(session: TableauSession, metricIds: string[]): void {
   for (const store of stores.get(session)?.values() ?? []) for (const view of store.views.values()) for (const id of metricIds) {
     view.invalidated.add(id); const target = view.targeted.get(id); if (target) target.version++;
@@ -45,18 +49,25 @@ export async function subscriptionCoverage(session: TableauSession, metricIds: s
         if (!dependencies.listSubscriptionPage) {
           if (!metricId) return;
           const records = await dependencies.listSubscriptions(session, metricId);
-          if (version === target.version && current()) { target.records = records; target.complete = true; target.pages++; }
+          if (version === target.version && current()) {
+            target.records = records.slice(0, 2000); target.scanned = target.records.length; target.complete = records.length <= 2000; target.pages++;
+            if (!target.complete) stopAtLimit(target);
+          }
           return;
         }
         const result = await dependencies.listSubscriptionPage(session, { ...(metricId ? { metricId } : {}), ...(captured.scope === 'user' && !metricId ? { userId: session.userId } : {}), ...(target.token ? { pageToken: target.token } : {}) });
         if (version !== target.version || !current()) return;
-        target.pages++; target.scanned += result.subscriptions.length; target.error = undefined;
-        const records = result.subscriptions.filter(record => metricId || (record.metricId && captured.metricIds.has(record.metricId)));
+        const remaining = Math.max(0, 2000 - target.scanned), scanned = result.subscriptions.slice(0, remaining);
+        const overflow = result.subscriptions.length > remaining;
+        target.pages++; target.scanned += scanned.length; target.error = undefined;
+        const records = scanned.filter(record => metricId || (record.metricId && captured.metricIds.has(record.metricId)));
         // Site limits apply to scanned records, even though unrelated identities are not retained.
         target.records.push(...records);
+        if (overflow) { target.token = undefined; stopAtLimit(target); return; }
         if (!result.nextPageToken) { target.complete = true; target.token = undefined; return; }
         if (target.seen.has(result.nextPageToken) || !result.subscriptions.length) { target.error = new Error('Subscription continuation is invalid.'); target.token = undefined; target.terminal = true; return; }
         target.seen.add(result.nextPageToken); target.token = result.nextPageToken;
+        if (target.scanned >= 2000 || target.pages >= 20) stopAtLimit(target);
       } catch (error) { if (version === target.version) target.error = error; }
     })().finally(() => { target.pending = undefined; });
     return target.pending;
@@ -68,7 +79,7 @@ export async function subscriptionCoverage(session: TableauSession, metricIds: s
   if (options.continueCoverage && dependencies.listSubscriptionPage) while (view.site.token && !view.site.complete && calls < 20 && view.site.pages < 20) {
     const previous = view.site.pages; await page(view.site); if (view.site.error || previous === view.site.pages) break;
   }
-  const qualified = (view.scope === 'site' && dependencies.siteNegativeCoverageQualified === true) || options.personalOnly === true;
+  const qualified = (view.scope === 'site' && dependencies.siteNegativeCoverageQualified === true) || (view.scope === 'user' && options.personalOnly === true);
   const entries = [];
   for (const metricId of metricIds) {
     if (qualified && view.site.complete && view.siteEligible.has(metricId) && !view.invalidated.has(metricId)) {
@@ -81,12 +92,12 @@ export async function subscriptionCoverage(session: TableauSession, metricIds: s
       do { const previous = target.pages; await page(target, metricId); if (target.error || previous === target.pages) break; } while (target.token && !target.complete && calls < 20);
     }
     const positive = view.invalidated.has(metricId) ? [] : view.site.records.filter(record => record.metricId === metricId);
-    const records = target.complete ? target.records : [...positive, ...target.records];
+    const records = target.complete ? target.records : [...positive, ...target.records].slice(0, 2000);
     const hasEvidence = target.complete || records.length > 0;
     entries.push({ metricId, subscriptions: hasEvidence ? records : null, complete: target.complete, ...(!target.complete ? { diagnostic: { message: target.error instanceof Error ? target.error.message : 'Subscription coverage is partial. Load more follow details to continue.' } } : {}) });
   }
   if (!current()) throw new Error('The Tableau session changed while subscription coverage was loading.');
   const complete = entries.every(entry => entry.complete);
-  const canLoadMore = Boolean(view.site.token && view.site.pages < 20) || entries.some(entry => !entry.complete && !view!.targeted.get(entry.metricId)?.terminal && (view!.targeted.get(entry.metricId)?.pages ?? 0) < 20);
+  const canLoadMore = Boolean(view.site.token && !view.site.terminal && view.site.pages < 20 && view.site.scanned < 2000) || entries.some(entry => !entry.complete && !view!.targeted.get(entry.metricId)?.terminal && (view!.targeted.get(entry.metricId)?.pages ?? 0) < 20 && (view!.targeted.get(entry.metricId)?.scanned ?? 0) < 2000);
   return { entries, coverage: { status: complete ? 'available' : entries.some(entry => entry.subscriptions) ? 'partial' : 'unavailable', canLoadMore } };
 }

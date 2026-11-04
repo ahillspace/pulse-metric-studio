@@ -90,6 +90,8 @@ A demand cannot exceed 20 subscription calls; explicit continuation retains prog
 These bounds are app preferences, not Tableau service limits.
 Cold or expired source facts and catalog metadata add required acquisition calls without changing the warm budgets.
 Missing negative coverage remains unknown until targeted reads complete or site coverage receives user-led qualification.
+Personal-only requests retain the authority of the acquired scope rather than upgrading earlier site reads.
+Exhausted local page or record limits disable **Load more** and retain an explanatory diagnostic.
 
 ## Locate the logs
 
@@ -119,9 +121,17 @@ Avoid adding screenshots or notes containing credentials or filter values.
 ## Interpret the diagnostics
 
 Each Tableau attempt carries the triggering API request's `reqId` and a separate logical Tableau request ID.
+Queued gate events retain that same request attribution when another request releases capacity.
 Group attempt events by `reqId` and endpoint to count outbound calls per API request.
 Use the recorded step windows to group follow-up API requests into the same user action.
 Count only outbound attempt events as Tableau calls; local rejection and cooldown events do not represent additional requests.
+Pending Manager reads and writes acquire local cooldown status; a final local check captures fast terminal throttles.
+These status reads make no Tableau calls.
+Follow and unfollow receipts retain per-target and summary `sent` and `throttle` metadata.
+Known cooldown refuses these commands before subscription preflight, and a new throttle stops later metric envelopes.
+An entirely unsent throttle uses HTTP 429; a throttled response containing submitted mutations uses HTTP 207.
+Confirmed inventory receipts contain complete normalized snapshots with an owner-state lifetime and revision.
+Reordered receipts and superseded refreshes cannot discard confirmed local changes or replace newer inventory authority.
 Attempt `durationMs` includes response consumption or cancellation; `headersMs` measures the time until response headers arrive.
 Authentication rejections finish their timing before the separate authentication refresh starts.
 Use `startedAt` and `headersMs` to order provider responses when concurrent attempts finish in a different order.

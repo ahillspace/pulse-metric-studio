@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
+import { DimensionalFork } from "../components/DimensionalFork";
+import { pulseDimensionalForkApi } from "../dimensional-fork-api";
 import { ExistingMetrics } from "../components/ExistingMetrics";
 import { createAuthorController, useAuthor } from "../author/controller";
 import { useConnection } from "../connections/controller";
@@ -212,4 +214,99 @@ test("a fast sent throttle failure keeps its banner in results and disables anot
   assert.ok(renderer.root.findAll(node => node.type === "span" && node.children.includes("1 selected")).length);
   assert.equal(useRegistry.getState().busy, null);
   assert.match(useRegistry.getState().results?.summary ?? "", /Tableau is limiting requests/);
+});
+
+for (const [index, kind] of ["inventory", "follow details", "follow targets", "followers"].entries()) test(`pending ${kind} acquires shared cooldown in the mounted Manager`, async (t) => {
+  const now = Date.now() + 20_000 + index * 2_000;
+  t.mock.method(Date, "now", () => now);
+  const fixture = await setup(t, `read-cooldown-${index}`);
+  useRegistry.setState({ inventory: inventory(), followState: null, busy: null, cooldown: null, loading: false });
+  const held = deferred<any>();
+  let polls = 0;
+  t.mock.method(registryApi, "throttle", async () => { polls++; return { throttled: true, retryAt: now + 36_000, serverTime: now, reason: "throttle" }; });
+  t.mock.method(registryApi, "followState", async () => ({ ...completeReadState(), selectedGroupId: null }));
+  t.mock.method(registryApi, "inventory", async () => kind === "inventory" ? held.promise : inventory());
+  t.mock.method(registryApi, "followTargets", async () => held.promise);
+  t.mock.method(registryApi, "followers", async () => held.promise);
+  if (kind === "follow details") t.mock.method(registryApi, "followState", async () => held.promise);
+  const renderer = await fixture.mount();
+  let pending!: Promise<unknown>;
+  await act(async () => {
+    pending = kind === "inventory" ? useRegistry.getState().refresh()
+      : kind === "follow details" ? useRegistry.getState().ensureFollowState(["metric"])
+      : kind === "follow targets" ? useRegistry.getState().loadTargets(true)
+      : useRegistry.getState().loadFollowers(["metric"]);
+  });
+  assert.ok(useRegistry.getState().pendingProviderReads > 0);
+  assert.equal(polls, 1, "a pending read starts local status observation without a write");
+  assert.equal(useRegistry.getState().cooldown?.remainingSeconds, 36);
+  assert.equal(renderer.root.findAll(node => node.type === "button" && node.children.includes("Create variants"))[0].props.disabled, true);
+  await act(async () => {
+    held.resolve(kind === "inventory" ? inventory() : kind === "follow targets" ? { targets: [], errors: [] } : kind === "followers" ? { details: [] } : { ...completeReadState(), selectedGroupId: null });
+    await pending;
+  });
+  assert.equal(useRegistry.getState().pendingProviderReads, 0);
+});
+
+function completeReadState() {
+  return { userFollowsByMetricId: {}, groupFollowsByMetricId: {}, followerCountsByMetricId: {}, availabilityByMetricId: {}, errors: [] };
+}
+
+test("a fast partial read after an unthrottled poll gets one trailing observation without idle polling", async (t) => {
+  let now = Date.now() + 40_000;
+  t.mock.method(Date, "now", () => now);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const fixture = await setup(t, "trailing-read-cooldown");
+  useRegistry.setState({ inventory: inventory(), followState: null, busy: null, cooldown: null, loading: false });
+  const held = deferred<Awaited<ReturnType<RegistryApi["followTargets"]>>>();
+  let throttled = false;
+  const polls: number[] = [];
+  t.mock.method(registryApi, "throttle", async () => { polls.push(now); return { throttled, retryAt: throttled ? now + 30_000 : null, serverTime: now, reason: throttled ? "throttle" : null }; });
+  t.mock.method(registryApi, "followTargets", async () => held.promise);
+  const renderer = await fixture.mount();
+  let pending!: Promise<unknown>;
+  await act(async () => { pending = useRegistry.getState().loadTargets(true); });
+  assert.equal(polls.length, 1);
+  assert.equal(useRegistry.getState().cooldown, null);
+  await act(async () => { throttled = true; held.resolve({ targets: [], errors: ["Provider read failed after the first status response"] }); await pending; });
+  assert.equal(useRegistry.getState().pendingProviderReads, 0);
+  assert.equal(polls.length, 1, "completion must respect the status read frequency limit");
+  await act(async () => { now += 999; t.mock.timers.tick(999); });
+  assert.equal(polls.length, 1);
+  await act(async () => { now += 1; t.mock.timers.tick(1); });
+  assert.equal(polls.length, 2);
+  assert.equal(useRegistry.getState().cooldown?.remainingSeconds, 30);
+  assert.ok(renderer.root.findAll(node => node.type === "p" && node.children.includes("Tableau is limiting requests. Waiting about 30 seconds.")).length);
+  await act(async () => { throttled = false; now += 1000; t.mock.timers.tick(1000); });
+  assert.equal(useRegistry.getState().cooldown, null);
+  const settled = polls.length;
+  await act(async () => { now += 5000; t.mock.timers.tick(5000); });
+  assert.equal(polls.length, settled, "idle Manager work must not keep polling local status");
+});
+
+
+for (const [index, stage] of ["fields", "count", "values"].entries()) test(`pending dimension ${stage} exposes the shared cooldown`, async (t) => {
+  const now = Date.now() + 60_000 + index * 2_000;
+  t.mock.method(Date, "now", () => now);
+  const fixture = await setup(t, `dimension-read-${index}`);
+  useRegistry.setState({ inventory: inventory(), followState: null, busy: null, cooldown: null, loading: false });
+  const held = deferred<any>();
+  const fields = { fields: [{ id: "region", name: "Region", label: "Region", dataType: "STRING", table: "Orders" }], sourceContextId: "opaque" };
+  let polls = 0;
+  t.mock.method(registryApi, "throttle", async () => { polls++; return { throttled: true, retryAt: now + 40_000, serverTime: now, reason: "throttle" }; });
+  t.mock.method(pulseDimensionalForkApi, "fields", async () => stage === "fields" ? held.promise : fields);
+  t.mock.method(pulseDimensionalForkApi, "count", async () => stage === "count" ? held.promise : { count: 2 });
+  t.mock.method(pulseDimensionalForkApi, "values", async () => held.promise);
+  const manager = await fixture.mount();
+  let dimension!: ReactTestRenderer;
+  await act(async () => { dimension = create(<DimensionalFork sources={[{ id: "metric", label: "Revenue" }]} clauses={[]} context={{ owner: session }} onChange={() => {}} onEditingState={() => {}} onCompatibilityResolved={() => {}} />); });
+  t.after(() => act(() => dimension.unmount()));
+  await act(async () => { dimension.root.findAll(node => node.type === "button" && node.children.includes("Add filters"))[0].props.onClick(); });
+  if (stage !== "fields") await act(async () => { dimension.root.findByProps({ "aria-label": "Dimension field" }).props.onChange({ target: { value: "region" } }); });
+  assert.ok(useRegistry.getState().pendingProviderReads > 0);
+  assert.equal(polls, 1, "sequential read stages share the same bounded status cadence");
+  assert.ok(manager.root.findAll(node => node.type === "p" && node.children.includes("Tableau is limiting requests. Waiting about 40 seconds.")).length);
+  assert.equal(manager.root.findAll(node => node.type === "button" && node.children.includes("Create variants"))[0].props.disabled, true);
+  await act(async () => { held.resolve(stage === "fields" ? fields : stage === "count" ? { count: 2000 } : { values: [], truncated: false }); });
+  assert.equal(useRegistry.getState().pendingProviderReads, 0);
 });

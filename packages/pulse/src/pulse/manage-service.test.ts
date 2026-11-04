@@ -483,6 +483,7 @@ test('follow returns every exact metric-target result, treats existing group fol
     targetKind: 'GROUP',
     status: 'already_followed',
     ok: true,
+    sent: false,
   });
   assert.equal(result[250]?.status, 'failed');
   assert.equal(result[300]?.status, 'already_followed');
@@ -521,6 +522,7 @@ test('unfollow reports and retries each exact metric-target pair independently',
     targetKind: 'GROUP',
     status: 'unfollowed',
     ok: true,
+    sent: true,
   }]);
 });
 

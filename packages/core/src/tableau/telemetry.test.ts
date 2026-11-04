@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,7 +8,7 @@ import { finishObservedTableauResponse, logTableauEvent, observedTableauFetch, r
 
 const dataDir = mkdtempSync(join(tmpdir(), 'pulse-telemetry-'));
 process.env.PULSE_METRIC_STUDIO_DATA_DIR = dataDir;
-const { getJson, postJson, tableauFetch } = await import('./rest-client.js');
+const { getJson, postJson, tableauFetch, MAX_CONCURRENT_TABLEAU_REQUESTS, TableauThrottleError } = await import('./rest-client.js');
 const sessions = await import('./session.js');
 const { closeDb } = await import('../db/index.js');
 const { discoverRestApiVersion, patSignin } = await import('./signin.js');
@@ -142,28 +143,78 @@ test('central projection rejects arbitrary fields, unrecognized paths, unsafe ID
   assert.doesNotMatch(JSON.stringify(records), /SECRET|RESPONSE-BODY/);
 });
 
-test('concurrent requests keep their own request and stage context across admission and dispatch events', async (t) => {
-  const records: Record[] = [];
-  const now = Date.now;
-  let elapsed = 0;
-  // Force measurable admission time so this protects context on gate events too.
-  t.mock.method(Date, 'now', () => now() + elapsed++);
-  let sends = 0;
-  globalThis.fetch = async () => { sends++; await new Promise(resolve => setTimeout(resolve, 5)); return Response.json({}); };
-  await Promise.all(['one', 'two'].map(reqId => collect(reqId, records, () => withTableauOperation(reqId === 'one' ? 'fork_source' : 'dimensions_source', () => getJson(session(), '/api/-/pulse/definitions')))));
-  const expected = new Map([['one', 'fork_source'], ['two', 'dimensions_source']]);
-  assert.equal(sends, 2);
-  const attempts = records.filter(record => record.event === 'tableau.attempt');
-  assert.deepEqual(attempts.map(record => [record.reqId, record.operation]).sort(), [...expected.entries()]);
-  assert.ok(attempts.every(record => record.sent === true));
-  const admissions = records.filter(record => record.event === 'tableau.gate_wait');
-  assert.ok(admissions.length > 0);
-  assert.ok(admissions.every(record => record.sent === false));
-  for (const record of records) {
-    assert.ok(expected.has(String(record.reqId)));
-    assert.equal(record.operation, expected.get(String(record.reqId)));
-  }
-});
+for (const outcome of ['capacity grant', 'throttle refusal'] as const) {
+  test(`a shared-identity ${outcome} retains the queued request's context and log sink`, async (t) => {
+    const owner = session();
+    const recordsA: Record[] = [];
+    const recordsB: Record[] = [];
+    const tracing = new AsyncLocalStorage<string>();
+    const now = Date.now;
+    let elapsed = 0;
+    // Make capacity wait measurable without depending on wall-clock timer precision.
+    t.mock.method(Date, 'now', () => now() + elapsed++);
+    const run = <T>(reqId: string, records: Record[], callback: () => T) => tracing.run(reqId, () => runWithTableauTelemetry({
+      reqId, appMethod: 'POST', appPath: '/api/pulse/metrics/fork?filter=SECRET-FILTER',
+      log: record => records.push({ ...record, traceContext: tracing.getStore() }),
+    }, () => withTableauOperation(reqId === 'A' ? 'fork_source' : 'dimensions_source', callback)));
+    const bodies: ReadableStreamDefaultController<Uint8Array>[] = [];
+    let allStarted!: () => void;
+    const started = new Promise<void>(resolve => { allStarted = resolve; });
+    let releaseThrottle!: () => void;
+    const throttled = new Promise<Response>(resolve => {
+      releaseThrottle = () => resolve(new Response('{}', { status: 429, headers: { 'Retry-After': '3600' } }));
+    });
+    let sends = 0;
+    globalThis.fetch = async () => {
+      const send = ++sends;
+      if (send === MAX_CONCURRENT_TABLEAU_REQUESTS) allStarted();
+      if (send > MAX_CONCURRENT_TABLEAU_REQUESTS) return Response.json({});
+      if (send === 1 && outcome === 'throttle refusal') return throttled;
+      return new Response(new ReadableStream<Uint8Array>({ start(controller) { bodies.push(controller); } }));
+    };
+    const path = '/api/-/pulse/definitions?filter=SECRET-FILTER';
+    const active = run('A', recordsA, () => Promise.allSettled(Array.from({ length: MAX_CONCURRENT_TABLEAU_REQUESTS }, () => getJson(owner, path))));
+    await started;
+    const queued = run('B', recordsB, () => getJson(owner, path));
+    assert.equal(sends, MAX_CONCURRENT_TABLEAU_REQUESTS, 'the ninth request waits behind the same identity');
+    const queuedResult = outcome === 'throttle refusal'
+      ? assert.rejects(queued, (error: unknown) => error instanceof TableauThrottleError && !error.sent)
+      : queued;
+    try {
+      if (outcome === 'throttle refusal') { releaseThrottle(); await queuedResult; }
+    } finally {
+      for (const body of bodies) { body.enqueue(new TextEncoder().encode('{}')); body.close(); }
+    }
+    const [activeResults] = await Promise.all([active, queuedResult]);
+    assert.equal(activeResults.filter(result => result.status === 'rejected').length, outcome === 'throttle refusal' ? 1 : 0);
+    assert.equal(sends, outcome === 'throttle refusal' ? MAX_CONCURRENT_TABLEAU_REQUESTS : MAX_CONCURRENT_TABLEAU_REQUESTS + 1);
+    const gate = recordsB.find(record => record.event === (outcome === 'throttle refusal' ? 'tableau.gate_rejected' : 'tableau.gate_wait'));
+    assert.ok(gate, 'the queued request logs admission in its own sink');
+    assert.equal(gate.sent, false);
+    assert.ok(Number(gate.waitedMs) > 0);
+    if (outcome === 'capacity grant') {
+      const attempt = recordsB.find(record => record.event === 'tableau.attempt');
+      assert.ok(attempt);
+      assert.equal(gate.callId, attempt.callId);
+      assert.equal(gate.attempt, attempt.attempt);
+    } else {
+      assert.equal(gate.reason, 'throttle_deadline');
+      assert.equal(recordsB.length, 1, 'local refusal has no provider attempt');
+      assert.ok(Number(gate.holdMs) >= 3_599_000);
+    }
+    for (const [records, reqId, operation] of [[recordsA, 'A', 'fork_source'], [recordsB, 'B', 'dimensions_source']] as const) {
+      assert.ok(records.length > 0);
+      for (const record of records) {
+        assert.equal(record.reqId, reqId);
+        assert.equal(record.operation, operation);
+        assert.equal(record.traceContext, reqId, 'the log sink sees the originating tracing context');
+        assert.equal(record.appPath, '/api/pulse/metrics/fork');
+        assert.equal(record.path, '/api/-/pulse/definitions');
+      }
+      assert.doesNotMatch(JSON.stringify(records), /SECRET/);
+    }
+  });
+}
 
 test('attempt completion includes body wait and logs once when the body fails', async () => {
   const records: Record[] = [];

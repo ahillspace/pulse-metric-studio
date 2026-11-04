@@ -2,7 +2,13 @@ import type { PulseInventoryResponse, PulseInventoryPatch } from "@pulse-metric-
 
 /** Merge only backend-normalized rows; the snapshot remains the deletion authority. */
 export function applyInventoryPatch(inventory: PulseInventoryResponse, patch: PulseInventoryPatch): PulseInventoryResponse {
+  if (patch.lifetimeId !== inventory.lifetimeId) return inventory;
   if (patch.revision <= (inventory.revision ?? -1)) return inventory;
+  if (patch.inventory) {
+    const snapshot = patch.inventory;
+    return snapshot.lifetimeId === patch.lifetimeId && snapshot.revision === patch.revision &&
+      snapshot.snapshotId === patch.snapshotId && snapshot.viewId === patch.viewId ? snapshot : inventory;
+  }
   const removedDefinitions = new Set(patch.removedDefinitionIds);
   const removedMetrics = new Set(patch.removedMetricIds);
   const definitions = inventory.definitions.filter(definition => !removedDefinitions.has(definition.definitionId))

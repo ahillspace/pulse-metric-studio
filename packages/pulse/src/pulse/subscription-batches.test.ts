@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, test } from 'node:test';
-import { clearSession, setSession, type TableauSession } from '@pulse-metric-studio/core';
-import { followTargets } from '../application/subscriptions.js';
+import { clearSession, setSession, postJson, type TableauSession } from '@pulse-metric-studio/core';
+import { defaultDependencies } from '../application/registry-dependencies.js';
+import { followTargets, unfollowTargets } from '../application/subscriptions.js';
 import Fastify from 'fastify';
 import { registerPulseRoutes } from './routes.js';
 const originalFetch = globalThis.fetch;
@@ -103,5 +104,72 @@ test('a conflict verification 401 leaves submitted recipients unknown and later 
     assert.match(result.results[0].error, /401001/);
     assert.equal(posts, 1);
     assert.deepEqual(calls, ['GET metric', 'GET later-metric', 'POST', 'GET metric']);
+  } finally { await app.close(); }
+});
+
+for (const action of ['follow', 'unfollow'] as const) test(`${action} refuses known cooldown before any subscription preflight`, async () => {
+  // A distinct owner isolates gate lifetime from other tests.
+  const owner = { ...session, userId: `cooldown-${action}` }; setSession(owner, { connectionId: 'connection', patSecret: '' });
+  let calls = 0;
+  globalThis.fetch = async () => { calls++; return Response.json({ error: 'limited' }, { status: 429, headers: { 'Retry-After': '60' } }); };
+  await assert.rejects(postJson(owner, '/api/-/pulse/test', {}));
+  const before = calls;
+  let preflight = 0;
+  const result = await (action === 'follow' ? followTargets : unfollowTargets)(owner, { operations }, { ...defaultDependencies, listSubscriptions: async () => { preflight++; return []; } });
+  assert.equal(preflight, 0, 'Admission must refuse before subscription preflight even when adapters are injected.');
+  assert.equal(calls, before);
+  assert.ok(result.every(item => item.status === 'not_attempted' && item.sent === false && item.throttle?.retryAt));
+});
+
+test('real follow route preserves sent throttle receipts and stops later metric envelopes', async () => {
+  const owner = { ...session, userId: 'sent-follow-throttle' }; setSession(owner, { connectionId: 'connection', patSecret: '' });
+  let posts = 0;
+  globalThis.fetch = async (_input, init) => {
+    if (init?.method === 'GET') return Response.json({ subscriptions: [] });
+    posts++; return Response.json({ error: 'limited' }, { status: 429, headers: { 'Retry-After': '60' } });
+  };
+  const app = Fastify(); registerPulseRoutes(app);
+  try {
+    const response = await app.inject({ method: 'POST', url: '/api/pulse/follow', payload: { context: { connectionId: 'connection', serverUrl: owner.serverUrl, siteId: owner.siteId, datasourceLuid: 'datasource' }, operations: [operations[0], { ...operations[1], metricId: 'later' }] } });
+    assert.equal(posts, 1);
+    assert.equal(response.statusCode, 207, response.body);
+    const body = response.json();
+    assert.equal(body.results[0].status, 'failed'); assert.equal(body.results[0].sent, true);
+    assert.equal(body.results[1].status, 'not_attempted'); assert.equal(body.results[1].sent, false);
+    assert.equal(body.throttle.reason, 'throttle'); assert.equal(body.sent, true); assert.equal(body.stopped, true);
+  } finally { await app.close(); }
+});
+
+
+test('real unfollow route preserves rejected and unsent mutation dispositions', async () => {
+  const owner = { ...session, userId: 'sent-unfollow-throttle' }; setSession(owner, { connectionId: 'connection', patSecret: '' });
+  const calls: string[] = [];
+  globalThis.fetch = async (_input, init) => {
+    calls.push(String(init?.method));
+    return init?.method === 'GET' ? Response.json({ subscriptions: [{ id: 'subscription', follower: { user_id: 'recipient-a' } }] }) : Response.json({ error: 'limited' }, { status: 429, headers: { 'Retry-After': '60' } });
+  };
+  const app = Fastify(); registerPulseRoutes(app);
+  try {
+    const response = await app.inject({ method: 'POST', url: '/api/pulse/unfollow', payload: { context: { connectionId: 'connection', serverUrl: owner.serverUrl, siteId: owner.siteId, datasourceLuid: 'datasource' }, operations: [operations[0], { ...operations[1], metricId: 'later' }] } });
+    assert.equal(response.statusCode, 207, response.body);
+    const body = response.json();
+    assert.deepEqual(body.results.map((item: { status: string; sent: boolean }) => [item.status, item.sent]), [['failed', true], ['not_attempted', false]]);
+    assert.equal(body.throttle.reason, 'throttle'); assert.equal(body.throttle.sent, true); assert.equal(body.stopped, true);
+    assert.deepEqual(calls, ['GET', 'DELETE']);
+  } finally { await app.close(); }
+});
+
+test('throttled subscription preflight returns an entirely unsent HTTP429 receipt', async () => {
+  const owner = { ...session, userId: 'preflight-follow-throttle' }; setSession(owner, { connectionId: 'connection', patSecret: '' });
+  const calls: string[] = [];
+  globalThis.fetch = async (_input, init) => { calls.push(String(init?.method)); return Response.json({ error: 'limited' }, { status: 429, headers: { 'Retry-After': '60' } }); };
+  const app = Fastify(); registerPulseRoutes(app);
+  try {
+    const response = await app.inject({ method: 'POST', url: '/api/pulse/follow', payload: { context: { connectionId: 'connection', serverUrl: owner.serverUrl, siteId: owner.siteId, datasourceLuid: 'datasource' }, operations: [operations[0]] } });
+    assert.equal(response.statusCode, 429, response.body);
+    const body = response.json();
+    assert.equal(body.results[0].status, 'not_attempted'); assert.equal(body.results[0].sent, false);
+    assert.equal(body.throttle.sent, false); assert.equal(body.sent, false); assert.equal(body.stopped, true);
+    assert.deepEqual(calls, ['GET']);
   } finally { await app.close(); }
 });

@@ -291,12 +291,14 @@ export class PulseForkPlanService {
           if (typeof response.created !== 'boolean' || typeof response.metricId !== 'string' || !response.metricId.trim()) throw new Error('Tableau returned invalid creation fields.');
           if (providerMetric) {
             if ((providerMetric.id !== undefined && providerMetric.id !== response.metricId) || (providerMetric.metadata?.id !== undefined && providerMetric.metadata.id !== response.metricId)) throw new Error('Tableau returned conflicting metric identifiers.');
-            const actualDefinition = metricDefinitionId(providerMetric);
-            const actualSite = providerMetric.site_id ?? providerMetric.site?.id;
-            const actualSpecification = metricSpecification(providerMetric);
-            const actualDatasource = isRecord(actualSpecification?.datasource) ? actualSpecification.datasource.id : undefined;
-            if ((actualDefinition && actualDefinition !== source.definitionId) || (actualSite && actualSite !== capturedSiteId) || (actualDatasource && actualDatasource !== source.datasourceLuid)) throw new Error('Tableau returned conflicting metric ownership.');
-            if (actualSpecification) {
+            const definitions = [providerMetric.definition_id, providerMetric.specification_reference?.definition_id, providerMetric.definition?.metadata?.id];
+            const sites = [providerMetric.site_id, providerMetric.site?.id];
+            if (definitions.some(id => id !== undefined && id !== source.definitionId) || sites.some(id => id !== undefined && id !== capturedSiteId)) throw new Error('Tableau returned conflicting metric ownership.');
+            for (const actualSpecification of [providerMetric.specification, providerMetric.metric_specification]) {
+              if (actualSpecification === undefined) continue;
+              if (!isRecord(actualSpecification)) throw new Error('Tableau returned an invalid metric specification.');
+              const actualDatasource = isRecord(actualSpecification.datasource) ? actualSpecification.datasource.id : undefined;
+              if (actualDatasource !== undefined && actualDatasource !== source.datasourceLuid) throw new Error('Tableau returned conflicting metric ownership.');
               const comparable = structuredClone(actualSpecification); delete comparable.datasource;
               if (canonicalDestination(comparable) !== canonicalDestination(specification)) throw new Error('Tableau returned a conflicting metric specification.');
             }

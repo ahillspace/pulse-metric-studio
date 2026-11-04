@@ -53,6 +53,7 @@ export function operationResult(
     targetKind: operation.target.kind,
     status,
     ok,
+    sent: status !== 'not_attempted' && status !== 'not_followed',
     ...(error ? { error: boundedProviderDiagnostic(error).message } : {}),
   };
 }

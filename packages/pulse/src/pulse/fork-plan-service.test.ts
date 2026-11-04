@@ -352,6 +352,23 @@ test('classifies a complete provider failure as 502', async () => {
   assert.match(summary.results[0]!.error ?? '', /invalid specification/);
 });
 
+for (const aliases of [
+  { definition_id: 'definition-1', specification_reference: { definition_id: 'foreign' } },
+  { definition_id: 'definition-1', definition: { metadata: { id: 'foreign' } } },
+  { site_id: 'site-id', site: { id: 'foreign' } },
+  { specification: { filters: [] }, metric_specification: { filters: [{ unexpected: true }] } },
+]) test(`real getOrCreate adapter rejects conflicting supplied aliases ${JSON.stringify(aliases)}`, async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_input, init) => Response.json({ is_metric_created: true, metric: { id: 'fork-1', ...aliases, ...('specification' in aliases ? { specification: JSON.parse(String(init?.body)).specification } : {}) } });
+  try {
+    const summary = await new PulseForkPlanService(dependencies({ getOrCreate: getOrCreatePulseMetric })).forkMetrics(session, { version: 1, sourceMetricIds: ['metric-1'], timeframe: { key: 'LAST_30_DAYS' }, clauses: [] });
+    assert.equal(summary.results[0]?.status, 'ownership_mismatch');
+    assert.equal(summary.results[0]?.creationStatus, 'created');
+    assert.equal(summary.results[0]?.metric, undefined);
+    assert.equal(summary.inventoryPatch, undefined);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test('validates and canonicalizes the combined request', () => {
   assert.deepEqual(canonicalizeForkPlanRequest({
     version: 1,

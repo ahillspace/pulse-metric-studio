@@ -51,7 +51,7 @@ export const ExistingMetrics = memo(function ExistingMetrics({ visible = true }:
   const session = useConnection((state) => state.session);
   const registry = useRegistry(useShallow((state) => ({
     inventory: state.inventory, followState: state.followState,
-    loading: state.loading, followLoading: state.followLoading, error: state.error,
+    pendingProviderReads: state.pendingProviderReads, loading: state.loading, followLoading: state.followLoading, error: state.error,
     cooldown: state.cooldown, pollCooldown: state.pollCooldown,
     busy: state.busy, results: state.results, createdMetricIds: state.createdMetricIds,
     deletePlan: state.deletePlan, deleteLoading: state.deleteLoading,
@@ -62,7 +62,7 @@ export const ExistingMetrics = memo(function ExistingMetrics({ visible = true }:
     dismissResults: state.dismissResults, loadMoreFollowState: state.loadMoreFollowState,
   })));
   useEffect(() => {
-    if (!registry.busy && !registry.cooldown) return;
+    if (!registry.pendingProviderReads && !registry.busy && !registry.cooldown) return;
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const poll = async () => {
@@ -71,7 +71,7 @@ export const ExistingMetrics = memo(function ExistingMetrics({ visible = true }:
     };
     void poll();
     return () => { stopped = true; if (timer) clearTimeout(timer); };
-  }, [Boolean(registry.busy || registry.cooldown), sessionOwnerKey(session)]);
+  }, [Boolean(registry.pendingProviderReads || registry.busy || registry.cooldown), sessionOwnerKey(session)]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [onlyFollowed, setOnlyFollowed] = useState(false);
   const [plan, setPlan] = useState<{ selectedMetricIds: string[] }>({

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { pulseDimensionalForkApi, type DimensionContext } from "../dimensional-fork-api";
+import { useRegistry } from "../registry/controller";
 import { createRequestSequencer } from "../dimensional-fork-requests";
 import {
   applyDomainToggle,
@@ -74,6 +75,7 @@ export function DimensionalFork({
   const [filtersRequested, setFiltersRequested] = useState(false);
   const sourceContextId = useRef<string | undefined>();
   const requestContext = () => ({ ...context, sourceContextId: sourceContextId.current });
+  const read = <T,>(request: () => Promise<T>) => useRegistry.getState().trackRead(request, context.owner);
   const [fields, setFields] = useState<PulseFilterDimensionField[]>([]);
   const [fieldId, setFieldId] = useState("");
   const [valueContext, setValueContext] = useState("");
@@ -118,8 +120,7 @@ export function DimensionalFork({
     if (!filtersRequested || sourceMetricIds.length === 0) return;
 
     setFieldsLoading(true);
-    void pulseDimensionalForkApi
-      .fields(sourceMetricIds, requestContext())
+    void read(() => pulseDimensionalForkApi.fields(sourceMetricIds, requestContext()))
       .then((response) => {
         if (!fieldsSeqRef.current.isLatest(token)) return;
         sourceContextId.current = response.sourceContextId;
@@ -163,11 +164,11 @@ export function DimensionalFork({
     setValuesLoading(true);
     void (async () => {
       try {
-        const { count } = await pulseDimensionalForkApi.count(
+        const { count } = await read(() => pulseDimensionalForkApi.count(
           sourceMetricIds,
           fieldId,
           requestContext(),
-        );
+        ));
         if (!valuesSeqRef.current.isLatest(token)) return;
         const mode = chooseValueMode(count);
         setMemberCount(count);
@@ -178,12 +179,12 @@ export function DimensionalFork({
         setExclude(existingClause?.exclude ?? false);
 
         if (mode !== "fetch-all") return;
-        const page = await pulseDimensionalForkApi.values(
+        const page = await read(() => pulseDimensionalForkApi.values(
           sourceMetricIds,
           fieldId,
           "",
           requestContext(),
-        );
+        ));
         if (!valuesSeqRef.current.isLatest(token)) return;
         const values = uniqueDimensionValues(page.values);
         setDomain(values);
@@ -225,8 +226,7 @@ export function DimensionalFork({
     setValuesLoading(true);
     setValuesError(null);
     const timer = window.setTimeout(() => {
-      void pulseDimensionalForkApi
-        .values(sourceMetricIds, fieldId, search.trim(), requestContext())
+      void read(() => pulseDimensionalForkApi.values(sourceMetricIds, fieldId, search.trim(), requestContext()))
         .then((page) => {
           if (!searchSeqRef.current.isLatest(token)) return;
           const values = uniqueDimensionValues(page.values);
@@ -363,8 +363,7 @@ export function DimensionalFork({
     searchLoadingRef.current = false;
     setAllLoading(true);
     setValuesError(null);
-    void pulseDimensionalForkApi
-      .values(sourceMetricIds, fieldId, "", { ...requestContext(), all: true })
+    void read(() => pulseDimensionalForkApi.values(sourceMetricIds, fieldId, "", { ...requestContext(), all: true }))
       .then((page) => {
         if (!valuesSeqRef.current.isLatest(token)) return;
         const values = uniqueDimensionValues(page.values);

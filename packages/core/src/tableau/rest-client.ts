@@ -9,7 +9,7 @@
 
 import { getSessionContext, getStoredConnection, isSessionCurrent, type TableauSessionContext } from './session.js';
 import { parseTableauProviderError, safeTableauProviderCode, type TableauProviderErrorInfo } from './provider-error-info.js';
-import { createTableauCallTrace, observedTableauFetch, finishObservedTableauResponse, logTableauEvent, tableauRetryAfterMs, withTableauRetryReason, type TableauCallTrace } from './telemetry.js';
+import { createTableauCallTrace, observedTableauFetch, finishObservedTableauResponse, captureTableauEventLogger, tableauRetryAfterMs, withTableauRetryReason, type TableauCallTrace } from './telemetry.js';
 import type { TableauThrottleMetadata, TableauThrottleStatus } from '@pulse-metric-studio/shared';
 export { parseTableauProviderError, safeTableauProviderCode, type TableauProviderErrorInfo } from './provider-error-info.js';
 
@@ -347,6 +347,7 @@ export class TableauRequestGate {
 
   async run<T>(task: (permit: GatePermit) => Promise<T>, deadline: number, signal?: AbortSignal | null, telemetry?: { trace: TableauCallTrace; method: string; path: string }): Promise<T> {
     const queuedAt = Date.now();
+    const logEvent = captureTableauEventLogger();
     const permit = await new Promise<GatePermit>((resolve, reject) => {
       let settled = false;
       const cleanup = () => { clearTimeout(timeout); signal?.removeEventListener('abort', abort); const index = this.waiting.indexOf(waiter); if (index >= 0) this.waiting.splice(index, 1); };
@@ -356,14 +357,14 @@ export class TableauRequestGate {
           if (settled) return;
           settled = true;
           cleanup();
-          if (telemetry && Date.now() > queuedAt) logTableauEvent({ event: 'tableau.gate_wait', callId: telemetry.trace.callId, attempt: telemetry.trace.attempt + 1, method: telemetry.method, path: telemetry.path, holdMs: Math.max(0, this.resumeAt - queuedAt), waitedMs: Date.now() - queuedAt, remainingMs: Math.max(0, deadline - Date.now()), sent: false });
+          if (telemetry && Date.now() > queuedAt) logEvent({ event: 'tableau.gate_wait', callId: telemetry.trace.callId, attempt: telemetry.trace.attempt + 1, method: telemetry.method, path: telemetry.path, holdMs: Math.max(0, this.resumeAt - queuedAt), waitedMs: Date.now() - queuedAt, remainingMs: Math.max(0, deadline - Date.now()), sent: false });
           resolve(value);
         },
         fail: (error) => {
           if (settled) return;
           settled = true;
           cleanup();
-          if (telemetry) logTableauEvent({ event: 'tableau.gate_rejected', callId: telemetry.trace.callId, attempt: telemetry.trace.attempt + 1, method: telemetry.method, path: telemetry.path, holdMs: Math.max(0, this.resumeAt - Date.now()), waitedMs: Date.now() - queuedAt, remainingMs: Math.max(0, deadline - Date.now()), reason: error.status === 429 ? 'throttle_deadline' : 'capacity_timeout', sent: false });
+          if (telemetry) logEvent({ event: 'tableau.gate_rejected', callId: telemetry.trace.callId, attempt: telemetry.trace.attempt + 1, method: telemetry.method, path: telemetry.path, holdMs: Math.max(0, this.resumeAt - Date.now()), waitedMs: Date.now() - queuedAt, remainingMs: Math.max(0, deadline - Date.now()), reason: error.status === 429 ? 'throttle_deadline' : 'capacity_timeout', sent: false });
           reject(error);
         },
       };
