@@ -75,7 +75,7 @@ export function DimensionalFork({
   const [filtersRequested, setFiltersRequested] = useState(false);
   const sourceContextId = useRef<string | undefined>();
   const requestContext = () => ({ ...context, sourceContextId: sourceContextId.current });
-  const read = <T,>(request: () => Promise<T>) => useRegistry.getState().trackRead(request, context.owner);
+  const read = <T,>(request: () => Promise<T>) => useRegistry.getState().trackProviderOperation(request, context.owner);
   const [fields, setFields] = useState<PulseFilterDimensionField[]>([]);
   const [fieldId, setFieldId] = useState("");
   const [valueContext, setValueContext] = useState("");

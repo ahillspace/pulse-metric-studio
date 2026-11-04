@@ -1,7 +1,86 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { clearSession, setSession, type TableauSession } from '@pulse-metric-studio/core';
+import { clearSession, setSession, TableauThrottleError, type TableauSession } from '@pulse-metric-studio/core';
 import { resolveSourceCatalog, resolveSourceContext, type SourceDependencies } from './source-context.js';
+import { PulseForkPlanService, type PulseForkPlanDependencies } from './fork-plan-service.js';
+
+function sourceFixture(): { session: TableauSession; dependencies: SourceDependencies } {
+  const session: TableauSession = { serverUrl: 'https://source.example.test', siteContentUrl: 'site', siteId: 'site', userId: 'source-user', token: 'token', apiVersion: '3.27' };
+  setSession(session, { connectionId: 'connection', patSecret: '' });
+  return { session, dependencies: {
+    getMetric: async (_session, id) => ({ id, definition_id: 'definition', specification: { filters: [] } }),
+    getDefinition: async () => ({ metadata: { id: 'definition' }, specification: { datasource: { id: 'datasource' } }, extension_options: { allowed_dimensions: [] } }),
+    getCatalog: async () => { throw new Error('Timeframe variants do not read a catalog.'); },
+  } };
+}
+
+test('explicit fork retry reacquires a throttled source while preserving fresh good facts and handle identity', async () => {
+  const { session, dependencies: source } = sourceFixture();
+  const originalNow = Date.now; let now = 2_000_000; Date.now = () => now;
+  const metricReads: Record<string, number> = {}; let definitionReads = 0, writes = 0;
+  const dependencies: PulseForkPlanDependencies = { ...source,
+    getMetric: async (session, id) => {
+      metricReads[id] = (metricReads[id] ?? 0) + 1;
+      if (id === 'b' && metricReads[id] === 1) throw new TableauThrottleError({ retryAt: now + 1000, serverTime: now, reason: 'throttle', sent: true });
+      return source.getMetric(session, id);
+    },
+    getDefinition: async (session, id) => { definitionReads++; return source.getDefinition(session, id); },
+    queryValues: async () => { throw new Error('No filtered validation.'); },
+    getOrCreate: async () => { writes++; return { metricId: 'destination', created: true }; },
+  };
+  try {
+    const first = await resolveSourceContext(session, ['a', 'b'], {}, dependencies, dependencies);
+    assert.equal(first.failures.length, 1); assert.equal(writes, 0);
+    const acquiredAt = first.sources[0]!.acquiredAt;
+    now += 2000;
+    const summary = await new PulseForkPlanService(dependencies).forkMetrics(session, { version: 1, sourceContextId: first.id, sourceMetricIds: ['a', 'b'], timeframe: { key: 'LAST_30_DAYS' }, clauses: [] });
+    assert.equal(summary.failed, 0); assert.equal(summary.created, 1); assert.equal(summary.results.length, 2);
+    assert.deepEqual(metricReads, { a: 1, b: 2 }); assert.equal(definitionReads, 2); assert.equal(writes, 1);
+    const ready = await resolveSourceContext(session, ['b', 'a'], { sourceContextId: first.id }, dependencies, dependencies);
+    assert.equal(ready.id, first.id); assert.equal(ready.failures.length, 0); assert.equal(ready.sources.find(source => source.metricId === 'a')!.acquiredAt, acquiredAt);
+    assert.equal(ready.expiresAt, acquiredAt + 60_000);
+    assert.deepEqual(metricReads, { a: 1, b: 2 });
+    now = acquiredAt + 60_001;
+    const refreshed = await resolveSourceContext(session, ['a', 'b'], { sourceContextId: ready.id }, dependencies, dependencies);
+    assert.notEqual(refreshed.id, ready.id); assert.deepEqual(metricReads, { a: 2, b: 2 }); assert.equal(writes, 1);
+    assert.equal(refreshed.sources.find(source => source.metricId === 'b')!.acquiredAt, acquiredAt + 2000);
+  } finally { Date.now = originalNow; clearSession(); }
+});
+
+test('empty failed contexts retain usable handles but share missing-fact acquisition on explicit retry', async () => {
+  const { session, dependencies: source } = sourceFixture();
+  const originalNow = Date.now; let now = 3_000_000; Date.now = () => now;
+  let metricReads = 0, release!: () => void; const held = new Promise<void>(resolve => { release = resolve; });
+  const dependencies: SourceDependencies = { ...source, getMetric: async (session, id) => {
+    metricReads++;
+    if (metricReads === 1) throw new TableauThrottleError({ retryAt: now + 1000, serverTime: now, reason: 'throttle', sent: true });
+    await held; return source.getMetric(session, id);
+  } };
+  try {
+    const failed = await resolveSourceContext(session, ['a'], {}, dependencies, dependencies);
+    assert.equal(failed.sources.length, 0); assert.equal(failed.failures.length, 1);
+    now += 2000;
+    const first = resolveSourceContext(session, ['a'], {}, dependencies, dependencies);
+    const shared = resolveSourceContext(session, ['a'], { sourceContextId: failed.id }, dependencies, dependencies);
+    assert.equal(metricReads, 2); release();
+    const results = await Promise.all([first, shared]);
+    assert.ok(results.every(context => context.id === failed.id && context.sources.length === 1 && context.failures.length === 0));
+    assert.equal(metricReads, 2);
+  } finally { release(); Date.now = originalNow; clearSession(); }
+});
+
+test('a ready source handle never waits for unrelated pending acquisition', async () => {
+  const { session, dependencies: source } = sourceFixture();
+  let release!: () => void; const held = new Promise<void>(resolve => { release = resolve; });
+  const dependencies: SourceDependencies = { ...source, getMetric: async (session, id) => { if (id === 'a') await held; return source.getMetric(session, id); } };
+  const a = resolveSourceContext(session, ['a'], {}, dependencies, dependencies);
+  let lookup: ReturnType<typeof resolveSourceContext> | undefined;
+  try {
+    const b = await resolveSourceContext(session, ['b'], {}, dependencies, dependencies);
+    lookup = resolveSourceContext(session, ['b'], { sourceContextId: b.id }, dependencies, dependencies);
+    assert.equal(await Promise.race([lookup.then(() => true), new Promise<boolean>(resolve => setImmediate(() => resolve(false)))]), true);
+  } finally { release(); await Promise.allSettled([a, ...(lookup ? [lookup] : [])]); clearSession(); }
+});
 
 test('source and catalog freshness preserve acquisition time, share pending facts and reject another owner', async () => {
   const originalNow = Date.now; let now = 1_000_000; Date.now = () => now;

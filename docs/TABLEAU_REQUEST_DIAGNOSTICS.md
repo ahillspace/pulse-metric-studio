@@ -89,6 +89,8 @@ The first detail demand uses one shared discovery page and bounded targeted fall
 A demand cannot exceed 20 subscription calls; explicit continuation retains progress and respects site bounds of 20 pages and 2,000 records.
 These bounds are app preferences, not Tableau service limits.
 Cold or expired source facts and catalog metadata add required acquisition calls without changing the warm budgets.
+Explicit retries reacquire failed source facts without retaining transient failures for the successful-fact cache lifetime.
+Fresh successful sources keep their original acquisition times and avoid repeated reads during that recovery.
 Missing negative coverage remains unknown until targeted reads complete or site coverage receives user-led qualification.
 Personal-only requests retain the authority of the acquired scope rather than upgrading earlier site reads.
 Exhausted local page or record limits disable **Load more** and retain an explanatory diagnostic.
@@ -125,10 +127,13 @@ Queued gate events retain that same request attribution when another request rel
 Group attempt events by `reqId` and endpoint to count outbound calls per API request.
 Use the recorded step windows to group follow-up API requests into the same user action.
 Count only outbound attempt events as Tableau calls; local rejection and cooldown events do not represent additional requests.
-Pending Manager reads and writes acquire local cooldown status; a final local check captures fast terminal throttles.
+Owner-scoped Manager reads, previews, and writes acquire local cooldown status, including across navigation to a warm datasource.
+One bounded trailing local check captures fast terminal throttles without an idle polling loop.
+Healthy commands can overlap; owner activity observation does not serialize mutations.
 These status reads make no Tableau calls.
 Follow and unfollow receipts retain per-target and summary `sent` and `throttle` metadata.
 Known cooldown refuses these commands before subscription preflight, and a new throttle stops later metric envelopes.
+Throttled conflict verification retains submitted unknown outcomes and retry timing instead of treating the later read rejection as mutation failure.
 An entirely unsent throttle uses HTTP 429; a throttled response containing submitted mutations uses HTTP 207.
 Confirmed inventory receipts contain complete normalized snapshots with an owner-state lifetime and revision.
 Reordered receipts and superseded refreshes cannot discard confirmed local changes or replace newer inventory authority.

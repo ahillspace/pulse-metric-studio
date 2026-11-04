@@ -24,7 +24,10 @@ export interface SourceContext {
   id: string; scopeKey: string; sources: ResolvedSource[]; failures: Array<{ metricId: string; error: unknown }>; expiresAt: number;
   catalog?: DatasourceCatalog; catalogExpiresAt?: number; catalogRequest?: Promise<DatasourceCatalog>;
 }
-interface Store { owner: ReturnType<typeof getSessionContext>; coordinates: string; entries: Map<string, { expiresAt: number; promise: Promise<SourceContext> }> }
+interface SourceEntry {
+  id: string; ids: string[]; scopeKey: string; context?: SourceContext; pending?: Promise<SourceContext>;
+}
+interface Store { owner: ReturnType<typeof getSessionContext>; coordinates: string; entries: Map<string, SourceEntry> }
 const stores = new WeakMap<TableauSession, Map<object, Store>>();
 export const defaultSourceNamespace = {};
 function currentCoordinates(session: TableauSession): string { return JSON.stringify([session.serverUrl, session.siteId, session.userId]); }
@@ -43,25 +46,25 @@ export async function resolveSourceContext(session: TableauSession, sourceIds: s
   const key = JSON.stringify([ids, scopeKey]);
   const verify = () => { if (owner !== getSessionContext(session) || coordinates !== currentCoordinates(session)) throw new Error('The Tableau session changed while source context was loading.'); };
   if (input.sourceContextId) {
-    let found = false;
-    for (const entry of store.entries.values()) {
-      const context = await entry.promise; verify();
-      if (context.id === input.sourceContextId) {
-        found = true;
-        if (JSON.stringify([...context.sources.map(source => source.metricId), ...context.failures.map(failure => failure.metricId)].sort()) !== JSON.stringify(ids)) throw new Error('Source context does not match selected metrics.');
-        if (context.scopeKey === scopeKey && context.expiresAt > Date.now()) { logTableauEvent({ event: 'tableau.dimension_context', cacheHit: true }); return context; }
-        break;
-      }
-    }
-    if (!found) throw new Error('Source context is unavailable for this session. Refresh metrics and retry.');
+    // Handle identity is available before acquisition settles; unrelated pending entries never block lookup.
+    const matched = [...store.entries.values()].find(entry => entry.id === input.sourceContextId);
+    if (!matched) throw new Error('Source context is unavailable for this session. Refresh metrics and retry.');
+    if (JSON.stringify(matched.ids) !== JSON.stringify(ids)) throw new Error('Source context does not match selected metrics.');
   }
   const retained = store.entries.get(key);
-  if (retained && retained.expiresAt > Date.now()) { const context = await retained.promise; verify(); if (context.expiresAt > Date.now()) { logTableauEvent({ event: 'tableau.dimension_context', cacheHit: true }); return context; } }
+  if (retained?.pending) { const context = await retained.pending; verify(); logTableauEvent({ event: 'tableau.dimension_context', cacheHit: true }); return context; }
+  const previous = retained?.context;
+  const freshSources = new Map(previous?.sources.filter(source => source.acquiredAt + TTL > Date.now()).map(source => [source.metricId, source]));
+  if (previous && ids.every(id => freshSources.has(id))) { verify(); logTableauEvent({ event: 'tableau.dimension_context', cacheHit: true }); return previous; }
+  // Failed acquisitions are never reusable facts. Keep good facts at their original age and retry only missing sources.
+  const entry: SourceEntry = retained && (!previous || previous.expiresAt > Date.now()) ? retained : { id: randomUUID(), ids, scopeKey };
   logTableauEvent({ event: 'tableau.dimension_context', cacheHit: false });
   const promise = (async (): Promise<SourceContext> => {
     const definitionPromises = new Map<string, Promise<PulseDefinition>>();
     const outcomes = await mapWithConcurrency(ids, 5, async metricId => {
       try {
+      const cached = freshSources.get(metricId);
+      if (cached) return cached;
       const fact = seeded?.facts.get(metricId), fresh = fact && fact.acquiredAt + TTL > Date.now();
       const metric = fresh ? fact.metric : await withTableauOperation('dimensions_source', () => dependencies.getMetric(session, metricId));
       const returnedId = String(metric.id ?? metric.metadata?.id ?? '');
@@ -86,11 +89,16 @@ export async function resolveSourceContext(session: TableauSession, sourceIds: s
     const failures = outcomes.filter((outcome): outcome is { metricId: string; error: unknown } => 'error' in outcome);
     verify();
     if (new Set(sources.map(source => source.datasourceLuid)).size > 1) throw new Error('Selected source metrics must use the same datasource.');
-    return { id: randomUUID(), scopeKey, sources, failures, expiresAt: Math.min(Date.now() + TTL, ...sources.map(source => source.acquiredAt + TTL)) };
+    return { id: entry.id, scopeKey, sources, failures, expiresAt: Math.min(Date.now() + TTL, ...sources.map(source => source.acquiredAt + TTL)), ...(previous?.catalog ? { catalog: previous.catalog, catalogExpiresAt: previous.catalogExpiresAt } : {}) };
   })();
-  const entry = { expiresAt: Date.now() + TTL, promise }; store.entries.delete(key); store.entries.set(key, entry);
+  entry.pending = promise.then(context => {
+    // Retain successful facts only, while returning this attempt's failures to its callers.
+    entry.context = context.failures.length ? { ...context, failures: [] } : context;
+    return context;
+  }).finally(() => { entry.pending = undefined; });
+  store.entries.delete(key); store.entries.set(key, entry);
   while (store.entries.size > 8) store.entries.delete(store.entries.keys().next().value!);
-  try { return await promise; } catch (error) { if (store.entries.get(key) === entry) store.entries.delete(key); throw error; }
+  try { return await entry.pending; } catch (error) { if (store.entries.get(key) === entry) store.entries.delete(key); throw error; }
 }
 export async function resolveSourceCatalog(session: TableauSession, context: SourceContext, dependencies: SourceDependencies): Promise<DatasourceCatalog> {
   if (context.catalog && Math.min(context.expiresAt, context.catalogExpiresAt ?? 0) > Date.now()) return structuredClone(context.catalog);

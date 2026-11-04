@@ -1350,18 +1350,18 @@ test("provider read errors retain structured cooldown and fence pending work by 
   const held = deferred<never>();
   const store = fixture();
   store.getState().setContext(draft().context, "A", session);
-  const read = store.getState().trackRead(() => held.promise).catch(() => undefined);
-  assert.equal(store.getState().pendingProviderReads, 1);
+  const read = store.getState().trackProviderOperation(() => held.promise).catch(() => undefined);
+  assert.equal(store.getState().pendingProviderOperations, 1);
   store.getState().setContext(draft("b").context, "B", session);
-  assert.equal(store.getState().pendingProviderReads, 1, "same-owner work remains visible across datasources");
+  assert.equal(store.getState().pendingProviderOperations, 1, "same-owner work remains visible across datasources");
   held.reject(new PulseApiError("Wait", 429, undefined, undefined, { retryAt: 50_000, serverTime: 0, reason: "throttle", sent: true }));
   await read;
   assert.equal(store.getState().cooldown?.remainingSeconds, 50);
-  assert.equal(store.getState().pendingProviderReads, 0);
+  assert.equal(store.getState().pendingProviderOperations, 0);
   const stale = deferred<never>();
-  const old = store.getState().trackRead(() => stale.promise).catch(() => undefined);
+  const old = store.getState().trackProviderOperation(() => stale.promise).catch(() => undefined);
   store.getState().setContext(draft().context, "New owner", { ...session, sessionGeneration: 2 });
-  assert.equal(store.getState().pendingProviderReads, 0);
+  assert.equal(store.getState().pendingProviderOperations, 0);
   stale.reject(new PulseApiError("Old wait", 429, undefined, undefined, { retryAt: 90_000, serverTime: 0, reason: "throttle", sent: true }));
   await old;
   assert.equal(store.getState().cooldown, null);
@@ -1406,4 +1406,28 @@ test("complete receipt coordinates must match the normalized snapshot envelope",
     assert.equal(applyInventoryPatch(base, { ...patch, inventory: { ...patch.inventory, ...conflict } }), base);
   }
   assert.equal(applyInventoryPatch(base, patch), patch.inventory);
+});
+
+for (const replacementOwner of [false, true]) test(`owner activity permits healthy overlap and fences old completions (${replacementOwner ? "replacement owner" : "same owner"})`, async () => {
+  const first = deferred<PulseVariantSummary>(), second = deferred<PulseVariantSummary>();
+  let writes = 0;
+  const store = fixture({ fork: async () => ++writes === 1 ? first.promise : second.promise });
+  store.getState().setContext(draft().context, "A", session);
+  const command = { version: 1 as const, sourceMetricIds: ["metric"], clauses: [] };
+  const a = store.getState().fork(command, new Map());
+  assert.equal(store.getState().pendingProviderOperations, 1);
+  store.getState().setContext(draft("b").context, "B", replacementOwner ? { ...session, sessionGeneration: 2 } : session);
+  assert.equal(store.getState().busy, null);
+  const b = store.getState().fork(command, new Map());
+  assert.equal(writes, 2, "owner activity observes healthy work without adding mutation serialization");
+  assert.equal(store.getState().pendingProviderOperations, replacementOwner ? 1 : 2);
+  first.resolve({ attempted: 0, created: 0, existing: 0, failed: 0, pendingVisibility: 0, results: [] });
+  await a;
+  assert.equal(store.getState().pendingProviderOperations, 1, "old completion cannot decrement another pending owner's work");
+  assert.equal(store.getState().busy, "fork", "old completion cannot clear a newer visible mutation's busy state");
+  second.resolve({ attempted: 0, created: 0, existing: 0, failed: 0, pendingVisibility: 0, results: [] });
+  await b;
+  assert.equal(store.getState().pendingProviderOperations, 0);
+  assert.equal(store.getState().busy, null);
+  assert.equal(Object.keys(store.getState().outcomes).length, 2);
 });

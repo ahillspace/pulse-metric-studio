@@ -517,7 +517,7 @@ export async function batchCreateSubscriptions(session: TableauSession, items: S
           // A conflict says nothing about the other submitted identities. Read evidence, never replay writes.
           try { records = await listSubscriptionsForMetric(session, metricId); alreadyExists = true; }
           catch (verificationError) {
-            if (verificationError instanceof TableauError && verificationError.kind === 'auth')
+            if (verificationError instanceof TableauError && (verificationError.kind === 'auth' || verificationError.status === 429))
               throw new SubscriptionBatchInterrupted(verificationError, results, batch[0]!, batch, 'confirmation');
             records = [];
           }

@@ -428,7 +428,10 @@ export async function followTargets(
             for (const operation of batch) {
               if (results.has(followOperationKey(operation))) continue;
               const submitted = !(error instanceof SubscriptionBatchInterrupted) || error.failedTargets.some(item => item.metricId === operation.metricId && item.targetId === operation.target.id && item.targetType === operation.target.kind);
-              results.set(followOperationKey(operation), throttleFollowResult(session, operation, error, submitted && error.sent !== false));
+              const confirmation = error instanceof SubscriptionBatchInterrupted && error.phase === 'confirmation';
+              const result = throttleFollowResult(session, operation, error, submitted && (confirmation || error.sent !== false));
+              if (submitted && confirmation) result.status = 'unknown';
+              results.set(followOperationKey(operation), result);
             }
             break;
           }

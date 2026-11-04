@@ -213,9 +213,14 @@ Cancellation, expiry, network failure, and terminal non-success responses releas
 Queued requests observe their original deadline and never dispatch after expiration.
 An identity-scoped `GET /api/tableau/throttle` returns local cooldown state, `retryAt`, server time, and the throttle reason without contacting Tableau.
 Its optional expected-owner fence checks the complete connection, server, site, user, and session generation.
-Pending Manager reads and mutations poll this endpoint at most once per second to display shared cooldown, including extensions.
-A final local check after the last operation settles captures fast terminal throttles.
-Status polling stops when no work or cooldown remains.
+Owner-scoped Manager provider activity keeps local status observation active independently of the current screen or datasource.
+This activity includes inventory, relationships, counts, directories, follower details, dimension discovery, previews, and mutation requests.
+Navigation preserves observation while earlier owner work remains pending, including when the next datasource has warm inventory.
+Healthy mutation overlap remains allowed; activity tracking does not serialize commands.
+Pending work polls this endpoint at most once per second to display shared cooldown, including extensions.
+One bounded trailing local observation after the last provider request settles captures fast terminal throttles.
+Status responses require the captured owner to remain active; datasource navigation does not discard owner cooldown.
+Status polling stops when no work, trailing observation, or cooldown remains.
 New overlapping mutations are refused during known cooldown in both the interface and backend admission.
 Follow and unfollow admission runs before subscription preflight.
 Their per-target and summary receipts retain mutation dispatch and cooldown metadata.
@@ -331,6 +336,10 @@ Explicit refresh also bypasses the backend definition cache and replaces its con
 Concurrent fresh requests share their read; superseded cache fills cannot replace newer evidence.
 Normal navigation retains its cache and pending-request sharing.
 Bounded caches and pending reads include connection, principal, session generation, and datasource ownership.
+Source contexts retain only successful validated facts with their original acquisition times.
+An explicit retry reacquires missing or expired sources while preserving fresh successful sources and sharing matching pending acquisitions.
+Opaque source handles identify their canonical entry before acquisition settles, so ready handles never await unrelated pending contexts.
+Source-set and inventory-view fences still apply when a handle requests reacquisition.
 Returning to a datasource in the same session joins its pending read; another session cannot reuse its snapshots or follower state.
 Relationship reads share pending work per owned metric, including overlapping expanded selections.
 The retained inventory view shares one lazily acquired subscription discovery page across expansions and selections.
@@ -415,7 +424,9 @@ Potentially effective writes invalidate that evidence even when their outcome is
 Subscription writes group recipients by metric and match response identities to each requested recipient.
 The 200-recipient chunk is an app request-size bound, not a published Tableau maximum.
 Missing receipt identities remain unknown, and ambiguous writes are not replayed.
-Authentication loss during post-submission confirmation leaves submitted outcomes unknown and stops unsent work.
+Authentication loss or throttling during post-submission confirmation leaves submitted outcomes unknown and stops unsent work.
+A confirmation throttle retains retry timing and submitted mutation dispatch metadata, even if the verification read was refused locally.
+Its HTTP 207 receipt distinguishes submitted unknown targets from later unsent targets; the rejected read cannot establish mutation failure.
 A direct authentication rejection of the mutation retains its definitive failure outcome.
 See the [Pulse API reference](https://help.tableau.com/current/api/rest_api/en-us/REST/rest_api_ref_pulse.htm) for the supported subscription endpoint.
 Deletion review uses names and metric identities from the immutable inventory snapshot without changing reviewed IDs or fingerprints.
