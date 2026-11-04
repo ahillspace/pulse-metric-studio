@@ -1,4 +1,5 @@
 import { sanitizeProviderMessage } from '../types.js';
+import { readProviderBodyChunk } from './response-body.js';
 
 const MAX_ERROR_BODY_BYTES = 16_000;
 const MAX_DETAIL_LENGTH = 300;
@@ -14,10 +15,10 @@ const MAX_DETAIL_LENGTH = 300;
  * part of a "Bearer ..." style value) are removed in addition to the generic
  * credential-field redaction.
  */
-export async function readProviderErrorDetail(response: Response, credentials: Array<string | undefined> = []): Promise<string | undefined> {
+export async function readProviderErrorDetail(response: Response, credentials: Array<string | undefined> = [], signal?: AbortSignal): Promise<string | undefined> {
   let text: string;
   try {
-    text = await readBoundedText(response);
+    text = await readBoundedText(response, signal);
   } catch {
     return undefined;
   }
@@ -74,21 +75,21 @@ function errorMessageFrom(value: unknown, depth: number): string | undefined {
   return undefined;
 }
 
-async function readBoundedText(response: Response): Promise<string> {
+async function readBoundedText(response: Response, signal?: AbortSignal): Promise<string> {
   const reader = response.body?.getReader();
   if (!reader) return '';
   const chunks: Uint8Array[] = [];
   let bytes = 0;
   try {
     while (bytes < MAX_ERROR_BODY_BYTES) {
-      const { done, value } = await reader.read();
+      const { done, value } = await readProviderBodyChunk(reader, signal);
       if (done) break;
       const kept = value.subarray(0, MAX_ERROR_BODY_BYTES - bytes);
       chunks.push(kept);
       bytes += kept.byteLength;
     }
   } finally {
-    await reader.cancel().catch(() => undefined);
+    void reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
   return Buffer.concat(chunks).toString('utf8');
