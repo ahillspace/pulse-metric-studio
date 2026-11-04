@@ -108,7 +108,8 @@ test('native OpenCode options follow run and only catalog-supported options reac
 });
 
 test('native OpenCode model discovery uses the configured local run directory', async () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pulse-opencode-catalog-'));
+  // Real path: the child reports its working directory resolved, and macOS links the temporary folder through /private.
+  const directory = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'pulse-opencode-catalog-'));
   try {
     const runtime = processFixture(verboseModel('company/model', { id: 'model', name: 'Model', providerID: 'company' }), 0, `
       assert.equal(process.cwd(), ${JSON.stringify(directory)});

@@ -4,7 +4,9 @@ import { fileURLToPath } from 'node:url';
 import { publicReleaseEvidence, sha256File, sourceIdentityKey } from './release-provenance.mjs';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const defaultRepo = 'ahillspace/pulse-metric-studio';
+// The repository the source install scripts default to; staging rewrites it to the target release repository.
+const sourceRepo = 'ahillspace/pulse-metric-studio';
+const usage = 'usage: sh scripts/stage-release.sh --repo OWNER/NAME OUTPUT_DIRECTORY [INSTALLER ...]';
 function discover(directory, suffix) {
   return fs.existsSync(directory) ? fs.readdirSync(directory).filter((name) => name.endsWith(suffix)).map((name) => path.join(directory, name)) : [];
 }
@@ -25,10 +27,12 @@ function evidenceFor(installer, version, hash) {
 }
 
 export function stageRelease(repository, args) {
-  let releaseRepo = defaultRepo;
-  if (args[0] === '--repo') { releaseRepo = args[1]; args = args.slice(2); }
+  // Every release names its repository: installed copies take their update channel from the staged scripts.
+  if (args[0] !== '--repo') throw new Error(`--repo is required. ${usage}`);
+  const releaseRepo = args[1];
+  args = args.slice(2);
   if (typeof releaseRepo !== 'string' || !/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(releaseRepo)) throw new Error('--repo must look like OWNER/NAME.');
-  if (!args.length) throw new Error('usage: sh scripts/stage-release.sh [--repo OWNER/NAME] OUTPUT_DIRECTORY [INSTALLER ...]');
+  if (!args.length) throw new Error(usage);
   const output = path.resolve(args[0]);
   if (fs.existsSync(output) && (fs.lstatSync(output).isSymbolicLink() || !fs.statSync(output).isDirectory() || fs.readdirSync(output).length)) throw new Error('Release output must be an empty directory or a new path.');
   const version = JSON.parse(fs.readFileSync(path.join(repository, 'package.json'), 'utf8')).version;
@@ -67,8 +71,8 @@ export function stageRelease(repository, args) {
   const scripts = new Map();
   for (const name of ['install.sh', 'install.ps1']) {
     const script = fs.readFileSync(path.join(repository, 'scripts', name), 'utf8');
-    if (!script.includes(defaultRepo)) throw new Error(`scripts/${name} no longer mentions the default release repository.`);
-    scripts.set(name, script.replaceAll(defaultRepo, releaseRepo).replaceAll('\r\n', '\n'));
+    if (!script.includes(sourceRepo)) throw new Error(`scripts/${name} no longer mentions ${sourceRepo}; update stage-release.mjs.`);
+    scripts.set(name, script.replaceAll(sourceRepo, releaseRepo).replaceAll('\r\n', '\n'));
   }
   fs.mkdirSync(path.dirname(output), { recursive: true });
   const staged = fs.mkdtempSync(path.join(path.dirname(output), '.pulse-release-stage-'));
@@ -97,7 +101,8 @@ export function stageRelease(repository, args) {
   }
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Compare real paths: a checkout reached through a symlink must still run, not exit silently.
+if (process.argv[1] && fs.realpathSync(path.resolve(process.argv[1])) === fs.realpathSync(fileURLToPath(import.meta.url))) {
   try { const result = stageRelease(root, process.argv.slice(2)); console.log(`Staged ${result.installers} verified installers for ${result.version}.`); }
   catch (error) { console.error(`error: ${error.message}`); process.exitCode = 1; }
 }
