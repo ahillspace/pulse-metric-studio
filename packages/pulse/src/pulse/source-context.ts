@@ -57,7 +57,7 @@ export async function resolveSourceContext(session: TableauSession, sourceIds: s
   const freshSources = new Map(previous?.sources.filter(source => source.acquiredAt + TTL > Date.now()).map(source => [source.metricId, source]));
   if (previous && ids.every(id => freshSources.has(id))) { verify(); logTableauEvent({ event: 'tableau.dimension_context', cacheHit: true }); return previous; }
   // Failed acquisitions are never reusable facts. Keep good facts at their original age and retry only missing sources.
-  const entry: SourceEntry = retained && (!previous || previous.expiresAt > Date.now()) ? retained : { id: randomUUID(), ids, scopeKey };
+  const entry: SourceEntry = retained ?? { id: randomUUID(), ids, scopeKey };
   logTableauEvent({ event: 'tableau.dimension_context', cacheHit: false });
   const promise = (async (): Promise<SourceContext> => {
     const definitionPromises = new Map<string, Promise<PulseDefinition>>();

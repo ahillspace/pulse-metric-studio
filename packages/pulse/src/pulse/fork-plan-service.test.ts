@@ -764,3 +764,65 @@ test('variant routes deduplicate final destinations while preserving different t
     }
   } finally { globalThis.fetch = originalFetch; clearSession(); }
 });
+
+
+for (const concurrent of [false, true]) test(`dimension browser handle survives fact renewal through filtered create, concurrent=${concurrent}`, async () => {
+  const originalFetch = globalThis.fetch, originalNow = Date.now; let now = originalNow(); Date.now = () => now;
+  let version = 1, metricReads = 0, definitionReads = 0, metadataReads = 0, writes = 0;
+  const calls: string[] = [], created: Array<Record<string, any>> = [];
+  let release!: () => void, started!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; }), renewing = new Promise<void>(resolve => { started = resolve; });
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(String(input)); calls.push(url.pathname);
+    if (url.pathname.endsWith('/metrics/source')) {
+      metricReads++;
+      if (version === 2 && concurrent) { started(); await held; }
+      return Response.json({ metric: { id: 'source', definition_id: 'definition', specification: { filters: [], preserved: { version } } } });
+    }
+    if (url.pathname.endsWith('/definitions/definition')) { definitionReads++; return Response.json({ definition: { metadata: { id: 'definition' }, specification: { datasource: { id: 'datasource-1' } }, extension_options: { allowed_dimensions: ['Region', version === 1 ? 'OldOnly' : 'NewOnly'] } } }); }
+    if (url.pathname.endsWith('/datasources/datasource-1')) return Response.json({ datasource: { id: 'datasource-1', name: 'Orders' } });
+    if (url.pathname.endsWith('/read-metadata')) { metadataReads++; return Response.json({ data: ['Region', version === 1 ? 'OldOnly' : 'NewOnly'].map(fieldName => ({ fieldName, dataType: 'STRING', fieldRole: 'DIMENSION' })) }); }
+    if (url.pathname.endsWith('/query-datasource')) { const body = JSON.parse(String(init?.body)); return Response.json({ data: body.query.fields[0].function === 'COUNTD' ? [[version]] : [[version === 1 ? 'West' : 'East']] }); }
+    if (url.pathname.endsWith('/metrics:getOrCreate')) { writes++; created.push(JSON.parse(String(init?.body))); return Response.json({ is_metric_created: true, metric: { id: 'destination' } }); }
+    throw new Error(`Unexpected fake endpoint ${url.pathname}`);
+  };
+  const app = Fastify(); registerPulseRoutes(app);
+  const post = (url: string, payload: unknown) => app.inject({ method: 'POST', url, payload: JSON.stringify(payload), headers: { 'content-type': 'application/json' } });
+  try {
+    const fields = await post('/api/pulse/dimensions', { sourceMetricIds: ['source'] });
+    assert.equal(fields.statusCode, 200, fields.body);
+    const handle = fields.json().sourceContextId;
+    const input = { sourceMetricIds: ['source'], sourceContextId: handle, fieldId: 'Region' };
+    const initialCount = await post('/api/pulse/dimensions/count', input), initialValues = await post('/api/pulse/dimensions/values', input);
+    assert.equal(initialCount.json().count, 1); assert.deepEqual(initialValues.json().values.map((row: { value: string }) => row.value), ['West']);
+    version = 2; now += 61_000; const beforeRenewal = calls.length;
+    let count, values;
+    if (concurrent) {
+      const counting = post('/api/pulse/dimensions/count', input); const counted = counting.then(response => response);
+      await renewing;
+      const listing = post('/api/pulse/dimensions/values', input); const listed = listing.then(response => response);
+      await new Promise(resolve => setImmediate(resolve)); assert.equal(metricReads, 2);
+      release(); [count, values] = await Promise.all([counted, listed]);
+    } else { count = await post('/api/pulse/dimensions/count', input); values = await post('/api/pulse/dimensions/values', input); }
+    assert.equal(count.statusCode, 200, count.body); assert.equal(values.statusCode, 200, values.body);
+    assert.equal(count.json().count, 2); assert.deepEqual(values.json().values.map((row: { value: string }) => row.value), ['East']);
+    assert.equal(calls.length - beforeRenewal, 6, 'One shared source, definition, datasource, metadata renewal and two fresh answer queries.');
+    assert.deepEqual([metricReads, definitionReads, metadataReads], [2, 2, 2]);
+    const warmStart = calls.length;
+    const renewedFields = await post('/api/pulse/dimensions', { sourceMetricIds: ['source'], sourceContextId: handle });
+    assert.equal(renewedFields.json().sourceContextId, handle);
+    assert.deepEqual(renewedFields.json().fields.map((field: { name: string }) => field.name).sort(), ['NewOnly', 'Region']);
+    assert.equal((await post('/api/pulse/dimensions/count', { ...input, fieldId: 'OldOnly' })).statusCode, 422);
+    await post('/api/pulse/dimensions/count', input); await post('/api/pulse/dimensions/values', input);
+    assert.equal(calls.length, warmStart, 'Fresh answers and field eligibility stay local.');
+    const request = { version: 1, context: { connectionId: 'fixture', serverUrl: session.serverUrl, siteId: session.siteId, datasourceLuid: 'datasource-1' }, sourceMetricIds: ['source'], sourceContextId: handle, timeframe: { key: 'LAST_30_DAYS' }, clauses: [{ fieldId: 'Region', selection: { mode: 'VALUES', exclude: false, values: ['East'] } }] };
+    const result = await post('/api/pulse/metrics/fork', request);
+    assert.equal(result.statusCode, 200, result.body); assert.equal(result.json().created, 1);
+    assert.equal(calls.length - warmStart, 2, 'Healthy filtered create remains one validation query and one write.');
+    assert.equal(created[0]!.specification.preserved.version, 2);
+    assert.deepEqual(created[0]!.specification.filters[0].categorical_values, [{ string_value: 'East' }]);
+    const stale = await post('/api/pulse/metrics/fork', { ...request, clauses: [{ fieldId: 'Region', selection: { mode: 'VALUES', exclude: false, values: ['West'] } }] });
+    assert.equal(stale.json().failed, 1); assert.equal(writes, 1, 'Expired values cannot pass fresh filtered validation.');
+    assert.equal(calls.length - warmStart, 3);
+  } finally { release(); globalThis.fetch = originalFetch; Date.now = originalNow; await app.close(); clearSession(); }
+});

@@ -91,6 +91,8 @@ These bounds are app preferences, not Tableau service limits.
 Cold or expired source facts and catalog metadata add required acquisition calls without changing the warm budgets.
 Explicit retries reacquire failed source facts without retaining transient failures for the successful-fact cache lifetime.
 Fresh successful sources keep their original acquisition times and avoid repeated reads during that recovery.
+Retained browser handles survive fact renewal without extending source, catalog, or answer freshness.
+Concurrent count and value requests share one matching source and catalog renewal.
 Missing negative coverage remains unknown until targeted reads complete or site coverage receives user-led qualification.
 Personal-only requests retain the authority of the acquired scope rather than upgrading earlier site reads.
 Exhausted local page or record limits disable **Load more** and retain an explanatory diagnostic.

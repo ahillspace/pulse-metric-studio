@@ -339,7 +339,9 @@ Bounded caches and pending reads include connection, principal, session generati
 Source contexts retain only successful validated facts with their original acquisition times.
 An explicit retry reacquires missing or expired sources while preserving fresh successful sources and sharing matching pending acquisitions.
 Opaque source handles identify their canonical entry before acquisition settles, so ready handles never await unrelated pending contexts.
-Source-set and inventory-view fences still apply when a handle requests reacquisition.
+A retained handle identifies its owner, canonical source set, and inventory view independently of fact freshness.
+Source and catalog renewal preserves that handle, so later count, value, and create requests can use the original browser handle.
+Source-set and inventory-view changes create separate contexts; owner changes and bounded eviction reject unavailable handles.
 Returning to a datasource in the same session joins its pending read; another session cannot reuse its snapshots or follower state.
 Relationship reads share pending work per owned metric, including overlapping expanded selections.
 The retained inventory view shares one lazily acquired subscription discovery page across expansions and selections.

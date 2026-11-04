@@ -42,7 +42,7 @@ test('explicit fork retry reacquires a throttled source while preserving fresh g
     assert.deepEqual(metricReads, { a: 1, b: 2 });
     now = acquiredAt + 60_001;
     const refreshed = await resolveSourceContext(session, ['a', 'b'], { sourceContextId: ready.id }, dependencies, dependencies);
-    assert.notEqual(refreshed.id, ready.id); assert.deepEqual(metricReads, { a: 2, b: 2 }); assert.equal(writes, 1);
+    assert.equal(refreshed.id, ready.id); assert.deepEqual(metricReads, { a: 2, b: 2 }); assert.equal(writes, 1);
     assert.equal(refreshed.sources.find(source => source.metricId === 'b')!.acquiredAt, acquiredAt + 2000);
   } finally { Date.now = originalNow; clearSession(); }
 });
@@ -103,9 +103,31 @@ test('source and catalog freshness preserve acquisition time, share pending fact
     assert.equal(first.sources[0]!.acquiredAt, acquiredAt);
     now += 45_000;
     const expired = await resolveSourceContext(session, ['a', 'b'], { sourceContextId: first.id }, dependencies, dependencies);
-    assert.notEqual(expired.id, first.id); assert.equal(calls.metric, 4); assert.equal(calls.definition, 2);
+    assert.equal(expired.id, first.id); assert.equal(calls.metric, 4); assert.equal(calls.definition, 2);
+    await resolveSourceContext(session, ['b', 'a'], { sourceContextId: first.id }, dependencies, dependencies);
+    assert.equal(calls.metric, 4, 'The browser keeps using its original handle after fact renewal.');
     setSession(session, { connectionId: 'connection', patSecret: '' });
     await assert.rejects(() => resolveSourceContext(session, ['a', 'b'], { sourceContextId: expired.id }, dependencies, dependencies), /unavailable for this session/);
     assert.equal(calls.metric, 4, 'An owner mismatch never acquires provider facts.');
   } finally { Date.now = originalNow; clearSession(); }
+});
+
+test('stable retained handles still fence selected sources, inventory views, bounded eviction, and owner changes', async () => {
+  const { session, dependencies: source } = sourceFixture(); let reads = 0;
+  const dependencies: SourceDependencies = { ...source, getMetric: async (session, id) => { reads++; return source.getMetric(session, id); } };
+  try {
+    const original = await resolveSourceContext(session, ['a'], {}, dependencies, dependencies);
+    await assert.rejects(resolveSourceContext(session, ['b'], { sourceContextId: original.id }, dependencies, dependencies), /does not match selected metrics/);
+    assert.equal(reads, 1);
+    const newView = await resolveSourceContext(session, ['a'], { sourceContextId: original.id, snapshotId: 'different-inventory-view' }, dependencies, dependencies);
+    assert.notEqual(newView.id, original.id); assert.equal(reads, 2, 'A new view acquires separate source facts.');
+    let latest = newView;
+    for (let index = 0; index < 8; index++) latest = await resolveSourceContext(session, [`other-${index}`], {}, dependencies, dependencies);
+    const before = reads;
+    await assert.rejects(resolveSourceContext(session, ['a'], { sourceContextId: original.id }, dependencies, dependencies), /unavailable for this session/);
+    assert.equal(reads, before, 'Evicted handles never fall back to provider reads.');
+    setSession(session, { connectionId: 'connection', patSecret: '' });
+    await assert.rejects(resolveSourceContext(session, ['other-7'], { sourceContextId: latest.id }, dependencies, dependencies), /unavailable for this session/);
+    assert.equal(reads, before);
+  } finally { clearSession(); }
 });
