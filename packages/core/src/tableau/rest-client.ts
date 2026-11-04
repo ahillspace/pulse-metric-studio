@@ -454,18 +454,25 @@ async function rawFetch(
       const terminate = () => controller.abort();
       let resp: Response | undefined;
       try {
-        resp = await sendOnce(session, path, { ...init, signal, timeoutMs: Math.max(1, deadline - Date.now()) }, currentToken, context, trace, gate, permit, attempt);
-        // Refresh from conclusive headers: an optional 401 diagnostic body must not block reauthentication.
-        if (resp.status === 401 && refreshAuthentication && !authenticationAttempted && currentToken) {
+        for (;;) {
+          if (signal.aborted) throw requestCancelled();
+          if (Date.now() >= deadline) throw new TableauError('Tableau request timed out before dispatch.', 0, '', 'network');
+          // A queued request belongs to its captured session, but not its expired token.
+          // sendOnce still rejects a changed owner before any provider dispatch.
+          if (context && getSessionContext(session) === context && isSessionCurrent(session)) currentToken = session.token;
+          resp = await sendOnce(session, path, { ...init, signal, timeoutMs: Math.max(1, deadline - Date.now()) }, currentToken, context, trace, gate, permit, attempt);
+          // Refresh from conclusive headers: an optional 401 diagnostic body must not block reauthentication.
+          if (resp.status !== 401 || !refreshAuthentication || authenticationAttempted || !currentToken) break;
           finishObservedTableauResponse(resp);
           authenticationAttempted = true;
           if (Date.now() >= deadline) throw new TableauError('Tableau request timed out before authentication could refresh.', 0, '', 'network');
           const refreshed = await awaitAuthentication(reauthenticate(session, currentToken, context), deadline, signal);
-          if (refreshed) {
-            if (resp.body) await cancelBody(() => resp!.body!.cancel(), deadline, signal, terminate);
-            currentToken = session.token;
-            return { retry: 'authentication' as const };
-          }
+          if (!refreshed) break;
+          if (resp.body) await cancelBody(() => resp!.body!.cancel(), deadline, signal, terminate);
+          currentToken = session.token;
+          trace.retryReason = 'authentication';
+          // Keep the recovery lease through the authenticated replay and its body.
+          // A new 429 still installs a new generation before this permit is released.
         }
         if (resp.status === 429) {
           if (attempt < MAX_THROTTLE_RETRIES && (gate.status().retryAt ?? Date.now()) < deadline) {

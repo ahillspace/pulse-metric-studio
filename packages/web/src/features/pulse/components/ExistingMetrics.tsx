@@ -190,6 +190,8 @@ export const ExistingMetrics = memo(function ExistingMetrics({ visible = true }:
   // are still pending. A later local patch must not silently inspect new rows.
   const detailIdsKey = useMemo(() => JSON.stringify((onlyFollowed ? allMetrics : allMetrics.filter((metric) => expanded.has(metric.definitionId)))
     .map((metric) => metric.metricId).sort()), [onlyFollowed, inventoryViewId, expandedKey]);
+  const canLoadMoreFollowDetails = (JSON.parse(detailIdsKey) as string[])
+    .some(id => registry.followState?.availabilityByMetricId?.[id]?.canLoadMore === true);
   useEffect(() => {
     const state = useRegistry.getState();
     if (visible && connected && !registry.loading && !registry.followLoading &&
@@ -415,7 +417,7 @@ export const ExistingMetrics = memo(function ExistingMetrics({ visible = true }:
             not shown as confirmed zero.
           </p>
         ) : null}
-        {registry.followState?.coverage?.canLoadMore && detailIdsKey !== "[]" && <button className="btn small" disabled={registry.followLoading} onClick={() => void registry.loadMoreFollowState(JSON.parse(detailIdsKey) as string[])}>Load more follow details</button>}
+        {canLoadMoreFollowDetails && <button className="btn small" disabled={registry.followLoading} onClick={() => void registry.loadMoreFollowState(JSON.parse(detailIdsKey) as string[])}>Load more follow details</button>}
         {onlyFollowed && allMetrics.some((metric) =>
           registry.followState?.availabilityByMetricId?.[metric.metricId]?.relationshipStatus === "not_requested") && (
           <p role="status">Loading follow details. Metrics with unknown follow state remain visible.</p>

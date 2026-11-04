@@ -402,6 +402,7 @@ export const PulseFollowStateSchema = z.object({
       relationshipStatus: z.enum(['available', 'partial', 'unavailable', 'not_requested']),
       followerIdsStatus: z.enum(['available', 'partial', 'unavailable', 'not_requested']).optional(),
       followerCountStatus: z.enum(['available', 'unavailable', 'not_requested']),
+      canLoadMore: z.boolean().optional(),
       diagnostics: z.array(PulseProviderDiagnosticSchema),
     }),
   ),

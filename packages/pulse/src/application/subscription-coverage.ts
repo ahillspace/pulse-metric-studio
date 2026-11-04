@@ -1,4 +1,4 @@
-import { getSessionContext, type TableauSession } from '@pulse-metric-studio/core';
+import { getSessionContext, TableauError, type TableauSession } from '@pulse-metric-studio/core';
 import type { SubscriptionRecord } from '../pulse/pulse-client.js';
 import type { SubscriptionDependencies } from './registry-dependencies.js';
 import { getInventoryView } from './inventory-snapshots.js';
@@ -21,7 +21,7 @@ export function invalidateSubscriptionCoverage(session: TableauSession, metricId
     view.targeted.delete(id);
   }
 }
-export async function subscriptionCoverage(session: TableauSession, metricIds: string[], options: { snapshotId?: string; continueCoverage?: boolean; personalOnly?: boolean }, dependencies: SubscriptionDependencies): Promise<{ entries: Array<{ metricId: string; subscriptions: SubscriptionRecord[] | null; complete: boolean; diagnostic?: { message: string } }>; coverage: { status: 'available' | 'partial' | 'unavailable'; canLoadMore: boolean } }> {
+export async function subscriptionCoverage(session: TableauSession, metricIds: string[], options: { snapshotId?: string; continueCoverage?: boolean; personalOnly?: boolean }, dependencies: SubscriptionDependencies): Promise<{ entries: Array<{ metricId: string; subscriptions: SubscriptionRecord[] | null; complete: boolean; canLoadMore: boolean; diagnostic?: { message: string } }>; coverage: { status: 'available' | 'partial' | 'unavailable'; canLoadMore: boolean } }> {
   const owner = getSessionContext(session), coordinates = JSON.stringify([session.serverUrl, session.siteId, session.userId]);
   const sessionStores = stores.get(session) ?? new Map<object, CoverageStore>(); stores.set(session, sessionStores);
   let store = sessionStores.get(dependencies);
@@ -68,7 +68,10 @@ export async function subscriptionCoverage(session: TableauSession, metricIds: s
         if (target.seen.has(result.nextPageToken) || !result.subscriptions.length) { target.error = new Error('Subscription continuation is invalid.'); target.token = undefined; target.terminal = true; return; }
         target.seen.add(result.nextPageToken); target.token = result.nextPageToken;
         if (target.scanned >= 2000 || target.pages >= 20) stopAtLimit(target);
-      } catch (error) { if (version === target.version) target.error = error; }
+      } catch (error) {
+        if (error instanceof TableauError && error.kind === 'auth') throw error;
+        if (version === target.version) target.error = error;
+      }
     })().finally(() => { target.pending = undefined; });
     return target.pending;
   }
@@ -83,7 +86,7 @@ export async function subscriptionCoverage(session: TableauSession, metricIds: s
   const entries = [];
   for (const metricId of metricIds) {
     if (qualified && view.site.complete && view.siteEligible.has(metricId) && !view.invalidated.has(metricId)) {
-      entries.push({ metricId, subscriptions: view.site.records.filter(record => record.metricId === metricId), complete: true }); continue;
+      entries.push({ metricId, subscriptions: view.site.records.filter(record => record.metricId === metricId), complete: true, canLoadMore: false }); continue;
     }
     let target = view.targeted.get(metricId);
     if (!target) { target = fresh(); view.targeted.set(metricId, target); }
@@ -94,10 +97,11 @@ export async function subscriptionCoverage(session: TableauSession, metricIds: s
     const positive = view.invalidated.has(metricId) ? [] : view.site.records.filter(record => record.metricId === metricId);
     const records = target.complete ? target.records : [...positive, ...target.records].slice(0, 2000);
     const hasEvidence = target.complete || records.length > 0;
-    entries.push({ metricId, subscriptions: hasEvidence ? records : null, complete: target.complete, ...(!target.complete ? { diagnostic: { message: target.error instanceof Error ? target.error.message : 'Subscription coverage is partial. Load more follow details to continue.' } } : {}) });
+    const canLoadMore = !target.complete && !target.terminal && target.pages < 20 && target.scanned < 2000;
+    entries.push({ metricId, subscriptions: hasEvidence ? records : null, complete: target.complete, canLoadMore, ...(!target.complete ? { diagnostic: { message: target.error instanceof Error ? target.error.message : 'Subscription coverage is partial. Load more follow details to continue.' } } : {}) });
   }
   if (!current()) throw new Error('The Tableau session changed while subscription coverage was loading.');
   const complete = entries.every(entry => entry.complete);
-  const canLoadMore = Boolean(view.site.token && !view.site.terminal && view.site.pages < 20 && view.site.scanned < 2000) || entries.some(entry => !entry.complete && !view!.targeted.get(entry.metricId)?.terminal && (view!.targeted.get(entry.metricId)?.pages ?? 0) < 20 && (view!.targeted.get(entry.metricId)?.scanned ?? 0) < 2000);
+  const canLoadMore = entries.some(entry => entry.canLoadMore);
   return { entries, coverage: { status: complete ? 'available' : entries.some(entry => entry.subscriptions) ? 'partial' : 'unavailable', canLoadMore } };
 }

@@ -1,16 +1,28 @@
 import type { FollowState } from './registry/view-types';
 
+/** Coverage belongs to the retained metrics, never to the last completed batch. */
+function withFollowCoverage(state: FollowState, requested = Boolean(state.coverage)): FollowState {
+  const metrics = Object.values(state.availabilityByMetricId ?? {});
+  if (!requested && !metrics.some(metric => metric.canLoadMore !== undefined)) return state;
+  const statuses = metrics.map(metric => metric.relationshipStatus ?? metric.status);
+  return { ...state, coverage: {
+    status: statuses.every(status => status === 'available') ? 'available'
+      : statuses.length && statuses.every(status => status === 'unavailable') ? 'unavailable' : 'partial',
+    canLoadMore: metrics.some(metric => metric.canLoadMore === true),
+  } };
+}
+
 /** Restrict evidence before merging it so an obsolete overlapping metric cannot leak through. */
 export function selectFollowMetrics(state: FollowState, metricIds: string[]): FollowState {
   const selected = new Set(metricIds);
   const select = <T>(values: Record<string, T> | undefined): Record<string, T> =>
     Object.fromEntries(Object.entries(values ?? {}).filter(([id]) => selected.has(id)));
-  return { ...state,
+  return withFollowCoverage({ ...state,
     userFollowsByMetricId: select(state.userFollowsByMetricId), groupFollowsByMetricId: select(state.groupFollowsByMetricId),
     userFollowerIdsByMetricId: select(state.userFollowerIdsByMetricId), groupFollowerIdsByMetricId: select(state.groupFollowerIdsByMetricId),
     followerCountsByMetricId: select(state.followerCountsByMetricId), availabilityByMetricId: select(state.availabilityByMetricId),
     errors: state.errors.filter(error => metricIds.some(id => error.startsWith(`${id}:`))),
-  };
+  });
 }
 
 /** A failed targeted replacement must not leave old identities looking current. */
@@ -60,9 +72,8 @@ export function mergeFollowStates(states: FollowState[]): FollowState {
     assign(merged.availabilityByMetricId!, state.availabilityByMetricId);
     merged.errors.push(...state.errors);
     merged.groupContextUnavailable ||= state.groupContextUnavailable;
-    if (state.coverage) merged.coverage = state.coverage;
   }
-  return merged;
+  return withFollowCoverage(merged, states.some(state => Boolean(state.coverage)));
 }
 
 export function metricIsFollowed(followState: FollowState | null, metricId: string): boolean {

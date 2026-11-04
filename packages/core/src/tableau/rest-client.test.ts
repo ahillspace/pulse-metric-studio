@@ -12,7 +12,7 @@ process.env.PULSE_METRIC_STUDIO_DATA_DIR = dataDir;
 const sessions = await import('./session.js');
 const { closeDb } = await import('../db/index.js');
 const { registerTableauRoutes } = await import('./routes.js');
-const { tableauFetch, DEFAULT_MAX_RESPONSE_BYTES } = await import('./rest-client.js');
+const { tableauFetch, getJson, DEFAULT_MAX_RESPONSE_BYTES, MAX_CONCURRENT_TABLEAU_REQUESTS } = await import('./rest-client.js');
 const { patSignin } = await import('./signin.js');
 
 test.after(() => { sessions.clearSession(); closeDb(); rmSync(dataDir, { recursive: true, force: true }); });
@@ -24,6 +24,7 @@ async function fixture() {
   let holdSignin = false;
   let signinResponse: ServerResponse | undefined;
   const heldSignins: Array<{ response: ServerResponse; token: string }> = [];
+  let workHandler: ((request: IncomingMessage, response: ServerResponse) => void) | undefined;
   const handler = (req: IncomingMessage, res: ServerResponse) => {
     const path = req.url!;
     requests.push({ path, token: String(req.headers['x-tableau-auth'] ?? ''), host: req.headers.host! });
@@ -37,6 +38,7 @@ async function fixture() {
       res.statusCode = req.headers['x-tableau-auth'] === `token-${signins}` ? 200 : 401;
       res.end('{}');
     }
+    else if (workHandler) workHandler(req, res);
     else if (req.headers['x-tableau-auth'] === 'old') pending.push(res);
     else res.end('{}');
   };
@@ -56,6 +58,7 @@ async function fixture() {
   await app.register(sensible);
   registerTableauRoutes(app);
   return { app, session, b, pending, requests, get signins() { return signins; },
+    serveWork(handler: (request: IncomingMessage, response: ServerResponse) => void) { workHandler = handler; },
     hold() { holdSignin = true; },
     allowSignins() { holdSignin = false; },
     releaseSignin(status = 200) { for (const { response, token } of heldSignins.splice(0)) { response.statusCode = status; response.end(JSON.stringify({ credentials: { token, site: { id: 'site' }, user: { id: 'user' } } })); } holdSignin = false; },
@@ -444,3 +447,102 @@ test('queued request times out before a held capacity slot is released', async (
     assert.equal(calls, 9);
   } finally { release(); await Promise.all(active); globalThis.fetch = original; }
 });
+
+test('queued exact reads recover together after throttling and a successful token refresh', async (t) => {
+  const f = await fixture();
+  const firstWave: ServerResponse[] = [];
+  const freshBodies: Array<{ response: ServerResponse; id: string }> = [];
+  let workCalls = 0;
+  let expiredTokenCalls = 0;
+  let freshTokenCalls = 0;
+  const expiredTokenPaths: string[] = [];
+  const freshTokenPaths: string[] = [];
+  let releaseFreshBodies = false;
+  f.serveWork((req, res) => {
+    if (++workCalls <= MAX_CONCURRENT_TABLEAU_REQUESTS) { firstWave.push(res); return; }
+    if (req.headers['x-tableau-auth'] === 'old') { expiredTokenCalls++; expiredTokenPaths.push(req.url!); reject(res); return; }
+    assert.equal(req.headers['x-tableau-auth'], 'token-1');
+    freshTokenCalls++;
+    freshTokenPaths.push(req.url!);
+    const id = req.url!.split('/').at(-1)!;
+    if (releaseFreshBodies) res.end(JSON.stringify({ metric: { id } }));
+    else { res.write(' '); freshBodies.push({ response: res, id }); }
+  });
+  const reads = Array.from({ length: 25 }, (_, index) => getJson<{ metric: { id: string } }>(
+    f.session, `/api/-/pulse/metrics/${index}`, undefined, 4500,
+  ));
+  const results = Promise.allSettled(reads);
+  try {
+    await until(() => firstWave.length === MAX_CONCURRENT_TABLEAU_REQUESTS);
+    for (const response of firstWave) { response.writeHead(429, { 'Retry-After': '0' }); response.end('{}'); }
+    // The provider's first fresh response stays open to exercise the recovery body lease.
+    const settled = results.then(() => true);
+    const recovered = await Promise.race([
+      (async () => { await until(() => freshBodies.length > 0); return true; })().catch(() => false),
+      settled.then(() => false),
+    ]);
+    if (recovered) {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      assert.equal(freshTokenCalls, 1, 'the refreshed probe retains its lease until its body is consumed');
+    }
+    releaseFreshBodies = true;
+    for (const { response, id } of freshBodies) response.end(JSON.stringify({ metric: { id } }));
+    const outcomes = await results;
+    const summary = { successes: outcomes.filter(result => result.status === 'fulfilled').length, expiredTokenCalls, freshTokenCalls, signins: f.signins };
+    t.diagnostic(JSON.stringify(summary));
+    assert.equal(summary.successes, 25, JSON.stringify(summary));
+    assert.equal(recovered, true, 'the recovery probe must reach a fresh-token response before its original deadline');
+    assert.equal(expiredTokenCalls, 1, JSON.stringify(summary));
+    assert.equal(freshTokenCalls, 25, JSON.stringify(summary));
+    assert.equal(f.signins, 1, JSON.stringify(summary));
+    assert.equal(freshTokenPaths[0], expiredTokenPaths[0], 'the authenticated replay keeps the original recovery lease ahead of queued work');
+    assert.deepEqual(outcomes.map(result => result.status === 'fulfilled' ? result.value.metric.id : null), Array.from({ length: 25 }, (_, index) => String(index)));
+  } finally {
+    for (const response of firstWave) if (!response.writableEnded) response.end('{}');
+    for (const { response } of freshBodies) if (!response.writableEnded) response.end('{}');
+    await results;
+    await f.close();
+  }
+});
+
+for (const change of ['disconnect', 'replacement', 'reactivation'] as const) {
+  test(`throttled queued reads never adopt a new owner token after ${change} during refresh`, async () => {
+    const f = await fixture();
+    const firstWave: ServerResponse[] = [];
+    f.hold();
+    f.serveWork((_req, res) => {
+      if (firstWave.length < MAX_CONCURRENT_TABLEAU_REQUESTS) firstWave.push(res);
+      else reject(res);
+    });
+    const results = Promise.allSettled(Array.from({ length: 25 }, (_, index) => tableauFetch(
+      f.session, `/api/-/pulse/metrics/${index}`, { timeoutMs: 3500 },
+    )));
+    try {
+      await until(() => firstWave.length === MAX_CONCURRENT_TABLEAU_REQUESTS);
+      for (const response of firstWave) { response.writeHead(429, { 'Retry-After': '0' }); response.end('{}'); }
+      await until(() => f.signinPending);
+      const context = sessions.getSessionContext(f.session)!;
+      if (change === 'disconnect') sessions.clearSession();
+      else {
+        const next = change === 'reactivation' ? f.session : { ...f.session };
+        next.token = 'replacement-token';
+        sessions.setSession(next, { connectionId: context.connectionId, patSecret: 'a-secret' });
+      }
+      const replacement = sessions.getSession();
+      f.releaseSignin();
+      const outcomes = await results;
+      assert.equal(outcomes.some(result => result.status === 'fulfilled' && result.value.ok), false);
+      const sentReads = f.requests.filter(request => request.path.startsWith('/api/-/pulse/metrics/'));
+      assert.equal(sentReads.length, MAX_CONCURRENT_TABLEAU_REQUESTS + 1, 'queued stale owners must fail without dispatch');
+      assert.ok(sentReads.every(request => request.token === 'old'), 'the replacement token cannot reach paths captured by another session');
+      assert.equal(f.signins, 1);
+      assert.equal(sessions.getSession(), replacement);
+      if (replacement) assert.equal(replacement.token, 'replacement-token');
+    } finally {
+      f.releaseSignin();
+      for (const response of firstWave) if (!response.writableEnded) response.end('{}');
+      await results;
+      await f.close();
+    }
+  });
+}

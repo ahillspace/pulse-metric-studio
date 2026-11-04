@@ -206,6 +206,7 @@ export async function getFollowState(
       relationshipStatus,
       followerIdsStatus: !subscriptionAvailable ? "unavailable" : hasUnknownFollowerType || !entry.complete || options.personalOnly ? "partial" : "available",
       followerCountStatus,
+      canLoadMore: entry.canLoadMore,
       diagnostics,
     };
     result.errors.push(

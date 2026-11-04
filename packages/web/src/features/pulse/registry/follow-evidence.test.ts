@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { PulseFollowState } from "@pulse-metric-studio/shared";
 import { createRegistryController } from "./controller";
-import type { RegistryApi } from "../api/registry";
+import { registryApi, type RegistryApi } from "../api/registry";
 import { deferred, draft, inventory, session } from "../testing/fixtures";
+import { followStateLabel, selectFollowMetrics } from "../follow-state";
 
 function state(ids: string[], detail: boolean, count = 5, followed = true): PulseFollowState {
   return {
@@ -36,6 +37,109 @@ function fixture(overrides: Partial<RegistryApi> = {}, metricIds = ["metric", "o
   return createRegistryController(transport);
 }
 const turn = () => new Promise<void>(resolve => setImmediate(resolve));
+
+function covered(ids: string[], completed: number): PulseFollowState {
+  const result = state(ids, true);
+  result.coverage = { status: completed === ids.length ? "available" : "partial", canLoadMore: completed < ids.length };
+  ids.forEach((id, index) => {
+    result.availabilityByMetricId[id] = {
+      ...result.availabilityByMetricId[id]!,
+      status: index < completed ? "available" : "partial",
+      relationshipStatus: index < completed ? "available" : "unavailable",
+      canLoadMore: index >= completed,
+    };
+  });
+  return result;
+}
+
+test("205 demanded metrics retain the first batch's resumable coverage after the final five complete", async (t) => {
+  const ids = Array.from({ length: 205 }, (_, index) => `m${index}`);
+  t.mock.method(globalThis, "fetch", async (_url: RequestInfo | URL, init?: RequestInit) => {
+    const { metricIds: batch, detail } = JSON.parse(init!.body as string);
+    return Response.json(detail ? covered(batch, batch.length === 200 ? 19 : batch.length) : state(batch, false));
+  });
+  const store = fixture({ followState: registryApi.followState }, ids);
+  await store.getState().activateContext(draft().context, "A", session);
+  await store.getState().ensureFollowState(ids);
+  assert.equal(store.getState().followState?.coverage?.canLoadMore, true);
+  assert.equal(store.getState().followState?.coverage?.status, "partial");
+  assert.equal(Object.values(store.getState().followState!.availabilityByMetricId!).filter(value => value.canLoadMore).length, 181);
+  await store.getState().loadMoreFollowState(ids.slice(19, 200));
+  assert.equal(store.getState().followState?.coverage?.canLoadMore, false, "completing the unresolved targets clears continuation");
+});
+
+test("sequential expansions preserve only current demand's continuation and terminal replacements clear it", async () => {
+  let terminal = false;
+  const store = fixture({ followState: async (ids, detail = true) => {
+    if (!detail) return state(ids, false);
+    const result = covered(ids, ids[0] === "other" ? ids.length : 0);
+    if (terminal) {
+      result.coverage = { status: "unavailable", canLoadMore: false };
+      for (const availability of Object.values(result.availabilityByMetricId)) availability.canLoadMore = false;
+    }
+    return result;
+  } });
+  await store.getState().activateContext(draft().context, "A", session);
+  await store.getState().ensureFollowState(["metric"]);
+  await store.getState().ensureFollowState(["other"]);
+  assert.equal(selectFollowMetrics(store.getState().followState!, ["metric", "other"]).coverage?.canLoadMore, true);
+  assert.equal(selectFollowMetrics(store.getState().followState!, ["other"]).coverage?.canLoadMore, false, "collapsing the unresolved row removes active continuation");
+  assert.equal(selectFollowMetrics(store.getState().followState!, []).coverage?.canLoadMore, false);
+  terminal = true;
+  await store.getState().loadMoreFollowState(["metric"]);
+  assert.equal(store.getState().followState?.coverage?.canLoadMore, false);
+});
+
+test("a superseded resumable response cannot restore continuation after a completed replacement", async () => {
+  const obsolete = deferred<PulseFollowState>();
+  let details = 0;
+  const store = fixture({ followState: async (ids, detail = true) => !detail ? state(ids, false) : ++details === 1 ? obsolete.promise : covered(ids, ids.length) });
+  await store.getState().activateContext(draft().context, "A", session);
+  const old = store.getState().ensureFollowState(["metric"]);
+  await store.getState().refreshFollowState(["metric"]);
+  obsolete.resolve(covered(["metric"], 0)); await old;
+  assert.equal(store.getState().followState?.coverage?.canLoadMore, false);
+  assert.equal(store.getState().followState?.availabilityByMetricId?.metric.canLoadMore, false);
+});
+
+test("partial follow during pending inventory fences pre-write counts until a post-write count read", async (t) => {
+  const oldCounts = deferred<PulseFollowState>();
+  const countStarted = deferred<void>();
+  let countReads = 0;
+  let inventories = 0;
+  const throttle = { retryAt: 36_000, serverTime: 0, reason: "throttle", sent: true };
+  t.mock.method(globalThis, "fetch", async (url: RequestInfo | URL, init?: RequestInit) => {
+    if (String(url).includes("/api/tableau/throttle")) return Response.json({ throttled: false, retryAt: null, serverTime: 40_000, reason: null });
+    if (String(url).includes("/api/pulse/follow-state")) {
+      const { metricIds: ids, detail } = JSON.parse(init!.body as string);
+      if (!detail) { countReads++; if (countReads === 1) { countStarted.resolve(); return Response.json(await oldCounts.promise); } return Response.json(state(ids, false, 1)); }
+      const result = state(ids, true);
+      result.followerCountsByMetricId = {};
+      for (const availability of Object.values(result.availabilityByMetricId)) availability.followerCountStatus = "not_requested";
+      return Response.json(result);
+    }
+    assert.ok(String(url).includes("/api/pulse/follow"));
+    return Response.json({ stopped: true, throttle, results: [
+      { metricId: "metric", targetKind: "USER", targetId: session.userId, status: "followed", ok: true, sent: true },
+      { metricId: "other", targetKind: "USER", targetId: session.userId, status: "failed", ok: false, sent: true, throttle },
+    ] }, { status: 207 });
+  });
+  const store = fixture({
+    inventory: async () => { inventories++; const value = inventory(); value.definitions[0].metrics.push({ ...value.definitions[0].metrics[0], metricId: "other" }); return value; },
+    followState: registryApi.followState, follow: registryApi.follow, throttle: registryApi.throttle,
+  });
+  const initial = store.getState().activateContext(draft().context, "A", session);
+  await countStarted.promise;
+  await store.getState().follow("follow", ["metric", "other"].map(metricId => ({ metricId, target: { kind: "USER", id: session.userId } })), [], []);
+  oldCounts.resolve(state(["metric", "other"], false, 0)); await initial;
+  assert.equal(store.getState().followState?.availabilityByMetricId?.metric.followerCountStatus, "not_requested");
+  assert.equal(store.getState().followState?.followerCountsByMetricId.metric, undefined);
+  await store.getState().pollCooldown();
+  await store.getState().ensureFollowState(["metric"]);
+  assert.equal(countReads, 2, "inspection requests a post-invalidation count without refreshing inventory");
+  assert.equal(followStateLabel(store.getState().followState, "metric"), "You follow (1)");
+  assert.equal(inventories, 1);
+});
 
 for (const kind of ["follow", "unfollow", "unknown"] as const) {
   test(`post-${kind} reconciliation cannot join pre-write metric evidence`, async () => {
@@ -151,7 +255,8 @@ test("pending inventory overlays reject detail superseded by a later mutation", 
   await turn();
   counts.resolve(state(["metric", "other"], false, 1)); await initial;
   assert.equal(store.getState().followState?.availabilityByMetricId?.metric.relationshipStatus, "not_requested");
-  assert.equal(store.getState().followState?.followerCountsByMetricId.metric, 1);
+  assert.equal(store.getState().followState?.followerCountsByMetricId.metric, undefined, "pre-write counts cannot return during post-write reconciliation");
+  assert.equal(store.getState().followState?.followerCountsByMetricId.other, 1, "unaffected counts remain valid");
   latest.resolve(state(["metric"], true)); await mutation;
   assert.equal(store.getState().followState?.followerCountsByMetricId.metric, 5);
   assert.equal(store.getState().followState?.userFollowsByMetricId.metric, true);

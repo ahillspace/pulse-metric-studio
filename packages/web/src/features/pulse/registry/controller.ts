@@ -101,9 +101,9 @@ export function createRegistryController(
 ) {
   const idsFor = (inventory: PulseInventoryResponse) => inventory.definitions.flatMap(definition => definition.metrics.map(metric => metric.metricId));
   type MetricEvidence = { version: number; state: FollowState };
-  type DetailScope = { versions: Map<string, number>; evidence: Map<string, MetricEvidence>; pending: Map<string, Promise<MetricEvidence | null>> };
+  type DetailScope = { versions: Map<string, number>; countVersions: Map<string, number>; evidence: Map<string, MetricEvidence>; pending: Map<string, Promise<MetricEvidence | null>> };
   type InventoryIdentity = { detailScope: DetailScope };
-  type InventoryRead = { identity: InventoryIdentity; promise: Promise<CachedInventory>; inventory?: PulseInventoryResponse; details: Map<string, MetricEvidence>; detailScope: DetailScope };
+  type InventoryRead = { identity: InventoryIdentity; promise: Promise<CachedInventory>; inventory?: PulseInventoryResponse; details: Map<string, MetricEvidence>; detailScope: DetailScope; countVersions: Map<string, number> };
   type CachedInventory = { inventory: PulseInventoryResponse; followState: FollowState | null; loadedAt: number; operation: InventoryIdentity };
   const cache = new Map<string, CachedInventory>();
   const pending = new Map<string, InventoryRead>();
@@ -206,7 +206,7 @@ export function createRegistryController(
     const detailScopeFor = (scopeKey: string) => {
       let reads = detailScopes.get(scopeKey);
       if (!reads) {
-        reads = { versions: new Map(), evidence: new Map(), pending: new Map() };
+        reads = { versions: new Map(), countVersions: new Map(), evidence: new Map(), pending: new Map() };
         detailScopes.set(scopeKey, reads);
       }
       pruneDetailScopes();
@@ -223,7 +223,30 @@ export function createRegistryController(
         reads.pending.delete(id);
       }
     };
+    const withoutCounts = (state: FollowState | null, ids: string[]) => {
+      if (!state || !ids.length) return state;
+      const result = structuredClone(state);
+      for (const id of ids) {
+        delete result.followerCountsByMetricId[id];
+        const availability = result.availabilityByMetricId?.[id];
+        if (availability) {
+          availability.followerCountStatus = "not_requested";
+          if (availability.status === "available") availability.status = "partial";
+        }
+      }
+      return result;
+    };
+    const fenceCounts = (reads: DetailScope, versions: Map<string, number>, state: FollowState | null) =>
+      withoutCounts(state, [...versions].filter(([id, version]) => (reads.countVersions.get(id) ?? 0) !== version).map(([id]) => id));
+    const invalidateCounts = (scope: ReturnType<typeof capture>, ids: string[]) => {
+      const reads = detailScopeFor(scope.key);
+      for (const id of ids) reads.countVersions.set(id, (reads.countVersions.get(id) ?? 0) + 1);
+      const saved = cache.get(scope.key);
+      if (saved) retain(scope.key, { ...saved, followState: withoutCounts(saved.followState, ids) });
+      if (scope.key === activeKey()) set({ followState: withoutCounts(get().followState, ids) });
+    };
     const overlayDetails = (scope: ReturnType<typeof capture>, operation: InventoryRead, base: FollowState | null) => {
+      base = fenceCounts(operation.detailScope, operation.countVersions, base);
       const states: FollowState[] = [];
       const ids: string[] = [];
       for (const [id, evidence] of operation.details) {
@@ -432,7 +455,7 @@ export function createRegistryController(
           }
           detailScopes.delete(scope.key);
           const detailScope = detailScopeFor(scope.key);
-          operation = { identity: { detailScope }, promise: undefined!, details: new Map(), detailScope };
+          operation = { identity: { detailScope }, promise: undefined!, details: new Map(), detailScope, countVersions: new Map() };
           const read = operation;
           read.promise = (async (): Promise<CachedInventory> => {
             const inventory = rebaseInventory(scope.key, await get().trackProviderOperation(() => transport.inventory(scope.context!, scope.owner, options), scope.owner));
@@ -454,6 +477,7 @@ export function createRegistryController(
               const batches = Array.from({ length: Math.ceil(Math.min(800, ids.length - offset) / 200) },
                 (_, index) => ids.slice(offset + index * 200, offset + (index + 1) * 200));
               await Promise.all(batches.map(async (batch) => {
+                for (const id of batch) read.countVersions.set(id, detailScope.countVersions.get(id) ?? 0);
                 let state: FollowState;
                 try { state = await get().trackProviderOperation(() => transport.followState(batch, false, scope.owner), scope.owner); }
                 catch (error) {
@@ -874,6 +898,7 @@ export function createRegistryController(
         if (sentCount > 0) {
           const ids = [...new Set(results.filter(result => result.sent !== false && result.status !== "not_attempted").map(result => result.metricId))];
           supersedeDetails(scope, ids);
+          invalidateCounts(scope, ids);
           if (!get().cooldown) await readFollowState(scope, ids, true);
           else if (ids.length) {
             const deferred = unavailableFollowState(ids, "Follow details changed. Reload them after the Tableau request limit clears.");

@@ -205,6 +205,8 @@ A provider's `Retry-After` remains a minimum, including when its value is zero.
 Four throttle retries use client floors of 1, 2, 4, and 8 seconds, plus nonnegative jitter up to 250 milliseconds.
 The effective wait meets both the server minimum and the client floor.
 The retry budget and deadline survive authentication and REST version adaptation.
+Queued dispatch checks its captured session ownership before using the session's current token.
+Successful automatic reauthentication retries inside the admitted recovery permit, so queued requests do not cycle through obsolete credentials.
 The transport installs shared cooldown before releasing capacity to queued requests.
 After cooldown, one eligible queued request becomes the probe; the app sends no additional health request.
 A successful probe restores bounded concurrency only for its current cooldown generation.
@@ -347,7 +349,9 @@ Relationship reads share pending work per owned metric, including overlapping ex
 The retained inventory view shares one lazily acquired subscription discovery page across expansions and selections.
 The app requests 100 records per page; this preference is not a documented Tableau maximum.
 Incomplete or unqualified site coverage falls back to requested metrics without automatically scanning the entire site.
-One demand uses at most 20 subscription calls, including discovery and targeted pages.
+Each follow-state API request uses at most 20 subscription calls, including discovery and targeted pages.
+Larger interface demands use bounded batches and aggregate continuation from the currently demanded metrics rather than the last batch.
+Per-metric continuation ends when its scan completes, reaches a terminal limit, leaves the demand, or is superseded.
 Explicit continuation retains progress and limits site scanning to 20 pages and 2,000 records per view.
 Targeted scans use the same page and record bounds; each owner retains eight coverage views.
 Exhausted page or record budgets disable continuation and explain the terminal local limit.
@@ -358,8 +362,11 @@ The default backend keeps site-negative qualification disabled.
 Personal-only queries cannot establish group or all-follower absence.
 Unchanged metric IDs and group reuse existing evidence; cached group identities support local reprojection.
 Detail acquisition does not repeat batched summary counts or replace valid counts with missing fields.
+Unrecoverable authentication errors stop subscription acquisition and retain the API's authentication response instead of becoming partial coverage.
 Manual inventory refresh supersedes earlier relationship evidence; subscription reconciliation requests evidence dispatched after the relevant mutation.
 Late results cannot replace newer relationship evidence in the display, retained inventory, or pending inventory enrichment.
+Count invalidation also fences pending inventory enrichment per metric; an earlier count response cannot restore totals invalidated by a later mutation.
+Cooldown-deferred reconciliation leaves affected counts not requested until a subsequent count read completes.
 Inventory completion settles its loading flags independently of relationship merges while preserving their latest evidence.
 Automatic local persistence depends on stable context values and does not trigger a remote inventory refresh.
 The backend derives connection ownership from the active Tableau session and binds snapshots to that session generation, principal, connection, and datasource.

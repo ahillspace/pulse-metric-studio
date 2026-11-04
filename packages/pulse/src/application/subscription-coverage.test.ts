@@ -65,6 +65,7 @@ test('record exhaustion is terminal and explains why continuation is unavailable
   };
   const result = await getFollowState(fixture(), 'user', [], ['a'], { detail: true }, dependencies);
   assert.equal(result.coverage?.canLoadMore, false);
+  assert.equal(result.availabilityByMetricId.a?.canLoadMore, false);
   assert.match(result.errors.join(' '), /limit/i);
 });
 
@@ -78,6 +79,7 @@ for (const size of [2000, 2001]) for (const continuation of [false, true]) {
     assert.equal(first.entries[0]!.subscriptions!.length, 2000);
     assert.equal(first.entries[0]!.complete, size === 2000 && !continuation);
     assert.equal(first.coverage.canLoadMore, false);
+    assert.equal(first.entries[0]!.canLoadMore, false);
     if (size > 2000 || continuation) assert.match(first.entries[0]!.diagnostic!.message, /limit/i);
     const continued = await subscriptionCoverage(session, ['a'], { continueCoverage: true }, dependencies);
     assert.equal(calls, 2, 'A terminal scan never sends an extra page.');
@@ -123,6 +125,90 @@ test('first detail demand is capped at twenty pages with explicit retained conti
   assert.equal(first.userFollowsByMetricId.a, undefined);
   await getFollowState(session, 'user', [], ['a', 'b'], { detail: true }, dependencies);
   assert.equal(calls, 20, 'Partial coverage requires explicit continuation.');
-  await getFollowState(session, 'user', [], ['a', 'b'], { detail: true, continueCoverage: true }, dependencies);
+  const continued = await getFollowState(session, 'user', [], ['a', 'b'], { detail: true, continueCoverage: true }, dependencies);
   assert.ok(calls > 20 && calls <= 40);
+  assert.equal(continued.availabilityByMetricId.a?.canLoadMore, false, 'twenty scanned pages are terminal for that metric');
+  assert.equal(continued.availabilityByMetricId.b?.canLoadMore, true, 'a different metric retains its own continuation');
+});
+
+test('invalid repeated continuation is terminal for its metric', async () => {
+  const session = fixture(); let calls = 0;
+  const dependencies: SubscriptionDependencies = { ...defaultDependencies,
+    listSubscriptionPage: async (_session, input) => {
+      calls++;
+      return input.metricId ? { subscriptions: [{ metricId: input.metricId, follower: { id: 'user', type: 'USER' } }], nextPageToken: 'repeated' } : { subscriptions: [], nextPageToken: null };
+    },
+  };
+  const first = await getFollowState(session, 'user', [], ['a'], { detail: true }, dependencies);
+  assert.equal(calls, 3);
+  assert.equal(first.userFollowsByMetricId.a, true);
+  assert.equal(first.availabilityByMetricId.a?.canLoadMore, false);
+  assert.match(first.errors.join(' '), /invalid/i);
+  await getFollowState(session, 'user', [], ['a'], { detail: true, continueCoverage: true }, dependencies);
+  assert.equal(calls, 3);
+});
+
+for (const rejectedTarget of ['site', 'a', 'legacy'] as const) {
+  test(`authentication propagates immediately from ${rejectedTarget} coverage`, async () => {
+    const auth = new TableauError('Authentication expired.', 401, '', 'auth');
+    const calls: string[] = [];
+    const dependencies: SubscriptionDependencies = { ...defaultDependencies,
+      listSubscriptionPage: rejectedTarget === 'legacy' ? undefined : async (_session, input) => {
+        const target = input.metricId ?? 'site'; calls.push(target);
+        if (target === rejectedTarget) throw auth;
+        return { subscriptions: [], nextPageToken: null };
+      },
+      listSubscriptions: async (_session, metricId) => { calls.push(metricId); throw auth; },
+    };
+    await assert.rejects(subscriptionCoverage(fixture(), ['a', 'b'], {}, dependencies), error => error === auth);
+    assert.deepEqual(calls, rejectedTarget === 'site' ? ['site'] : rejectedTarget === 'a' ? ['site', 'a'] : ['a']);
+  });
+}
+
+test('recoverable failed pages retain positive evidence and resume only on explicit demand', async () => {
+  const session = fixture(); let calls = 0, recovering = false;
+  const dependencies: SubscriptionDependencies = { ...defaultDependencies,
+    listSubscriptionPage: async (_session, input) => {
+      calls++;
+      if (!input.metricId) return { subscriptions: [], nextPageToken: null };
+      if (!input.pageToken) return { subscriptions: [{ metricId: input.metricId, follower: { id: 'user', type: 'USER' } }], nextPageToken: 'last' };
+      if (!recovering) throw new TableauError('Temporarily unavailable.', 503);
+      return { subscriptions: [], nextPageToken: null };
+    },
+  };
+  const first = await getFollowState(session, 'user', [], ['a'], { detail: true }, dependencies);
+  assert.equal(first.userFollowsByMetricId.a, true);
+  assert.equal(first.availabilityByMetricId.a?.canLoadMore, true);
+  assert.equal(first.availabilityByMetricId.a?.relationshipStatus, 'partial');
+  assert.match(first.errors.join(' '), /Temporarily unavailable/);
+  await getFollowState(session, 'user', [], ['a'], { detail: true }, dependencies);
+  assert.equal(calls, 3, 'ordinary reads retain the partial result without retrying');
+  recovering = true;
+  const completed = await getFollowState(session, 'user', [], ['a'], { detail: true, continueCoverage: true }, dependencies);
+  assert.equal(calls, 4);
+  assert.equal(completed.userFollowsByMetricId.a, true);
+  assert.equal(completed.availabilityByMetricId.a?.relationshipStatus, 'available');
+  assert.equal(completed.availabilityByMetricId.a?.canLoadMore, false);
+  assert.equal(completed.coverage?.canLoadMore, false);
+});
+
+test('each batch reports per-metric continuation without erasing earlier unresolved demand', async () => {
+  const session = fixture(); const calls: string[] = [];
+  const dependencies: SubscriptionDependencies = { ...defaultDependencies,
+    listSubscriptionPage: async (_session, input) => { calls.push(input.metricId ?? 'site'); return { subscriptions: [], nextPageToken: null }; },
+  };
+  const firstIds = Array.from({ length: 200 }, (_, index) => `first-${index}`);
+  const first = await getFollowState(session, 'user', [], firstIds, { detail: true }, dependencies);
+  assert.equal(calls.length, 20);
+  assert.equal(Object.values(first.availabilityByMetricId).filter(value => value.canLoadMore).length, 181);
+  assert.equal(first.coverage?.canLoadMore, true);
+  const second = await getFollowState(session, 'user', [], ['last-1', 'last-2', 'last-3', 'last-4', 'last-5'], { detail: true }, dependencies);
+  assert.equal(calls.length, 25);
+  assert.equal(second.coverage?.canLoadMore, false);
+  assert.ok(Object.values(second.availabilityByMetricId).every(value => value.canLoadMore === false));
+  const unresolvedIds = firstIds.filter(metricId => first.availabilityByMetricId[metricId]?.canLoadMore);
+  const continued = await getFollowState(session, 'user', [], unresolvedIds, { detail: true, continueCoverage: true }, dependencies);
+  assert.equal(calls.length, 45);
+  assert.equal(Object.values(continued.availabilityByMetricId).filter(value => value.canLoadMore).length, 161);
+  assert.ok(Object.values(continued.availabilityByMetricId).slice(0, 20).every(value => value.canLoadMore === false));
 });

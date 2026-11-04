@@ -35,6 +35,21 @@ async function setup(t: import("node:test").TestContext, id = "a") {
   return { mount: async (visible = false) => { await act(async () => { renderer = create(<ExistingMetrics visible={visible} />); }); return renderer!; } };
 }
 
+test("Manager shows continuation only while the unresolved metric is expanded", async (t) => {
+  const fixture = await setup(t, "follow-demand");
+  const followState = unavailableFollowState(["metric"], "Fixture page budget exhausted");
+  followState.availabilityByMetricId!.metric.canLoadMore = true;
+  followState.coverage = { status: "partial", canLoadMore: true };
+  useRegistry.setState({ inventory: inventory(), followState, loading: false, followLoading: false });
+  const renderer = await fixture.mount();
+  const loadMore = () => renderer.root.findAll(node => node.type === "button" && node.children.includes("Load more follow details"));
+  assert.equal(loadMore().length, 0);
+  act(() => renderer.root.findAll(node => node.type === "button" && node.children.includes("Expand all"))[0].props.onClick());
+  assert.equal(loadMore().length, 1);
+  act(() => renderer.root.findAll(node => node.type === "button" && node.children.includes("Collapse all"))[0].props.onClick());
+  assert.equal(loadMore().length, 0);
+});
+
 test("enabled Manager Refresh shows new metrics before old follower enrichment finishes", async (t) => {
   const fixture = await setup(t, "manual-refresh");
   const oldFollowers = deferred<Awaited<ReturnType<RegistryApi["followState"]>>>();
