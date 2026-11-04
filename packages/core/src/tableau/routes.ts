@@ -9,6 +9,7 @@ import {
 import { apiPath, classifyStatus, DEFAULT_MAX_RESPONSE_BYTES, readBoundedBody, parseTableauProviderError, TableauError, type TableauSession } from './rest-client.js';
 import { invalidateFieldsCache, listDatasources } from './vds-fields.js';
 import { discoverRestApiVersion, patSignin } from './signin.js';
+import { createTableauCallTrace, observedTableauFetch, finishObservedTableauResponse, type TableauCallTrace } from './telemetry.js';
 import {
   clearSession,
   beginTableauUserAccessCheck,
@@ -231,16 +232,18 @@ export function registerTableauRoutes(
     return latest && latest.check !== check ? latest.result : currentStatusAfterSwitch();
   }
 
-  async function checkCurrentSessionStatus(session: TableauSession, check: TableauUserAccessCheck, retried = false): Promise<TableauStatusResult> {
+  async function checkCurrentSessionStatus(session: TableauSession, check: TableauUserAccessCheck, retried = false, trace: TableauCallTrace = createTableauCallTrace()): Promise<TableauStatusResult> {
+    if (retried) trace.retryReason = 'authentication';
     const checkedToken = session.token;
+    let response: Response | undefined;
     try {
-      const response = await fetchImpl(
+      response = await observedTableauFetch(
         `${session.serverUrl}${apiPath(session, `/sites/${encodeURIComponent(session.siteId)}/users/${encodeURIComponent(session.userId)}`)}`,
         {
           headers: { 'X-Tableau-Auth': checkedToken, Accept: 'application/json' },
           redirect: 'error',
           signal: AbortSignal.timeout(10_000),
-        },
+        }, trace, fetchImpl,
       );
       if (!response.ok) {
         const body = await readBoundedBody(response, DEFAULT_MAX_RESPONSE_BYTES, 10_000).catch(() => '');
@@ -248,17 +251,18 @@ export function registerTableauRoutes(
         throw new TableauError('Tableau profile check failed.', response.status, '', classifyStatus(response.status, body), info.providerCode, info);
       }
       const payload = await readBoundedBody(response, DEFAULT_MAX_RESPONSE_BYTES, 10_000).then(text => JSON.parse(text)).catch(() => null);
+      finishObservedTableauResponse(response);
       if (!isTableauUserAccessCheckCurrent(session, check)) return supersededStatus(session, check);
       if (session.token !== checkedToken) return retried
         ? { connected: true, reachable: true, restored: false, session: publicSession(session) }
-        : checkCurrentSessionStatus(session, check, true);
+        : checkCurrentSessionStatus(session, check, true, trace);
       captureCurrentUserName(session, payload);
       return { connected: true, reachable: true, restored: false, session: publicSession(session) };
     } catch (error) {
       if (!isTableauUserAccessCheckCurrent(session, check)) return supersededStatus(session, check);
       if (session.token !== checkedToken) return retried
         ? { connected: true, reachable: true, restored: false, session: publicSession(session) }
-        : checkCurrentSessionStatus(session, check, true);
+        : checkCurrentSessionStatus(session, check, true, trace);
       if (error instanceof TableauError && error.kind === 'auth') {
         clearSession();
         return { connected: false, hasStoredProfile: getStoredConnection() != null };
@@ -277,7 +281,7 @@ export function registerTableauRoutes(
       const detail = status ? `failed (HTTP ${status}${code ? `, code ${code}` : ''})` : timeout ? 'timed out' : 'could not reach the server';
       return { connected: true, reachable: false, session: publicSession(session),
         availabilityError: `The Tableau account profile check ${detail}. Retry connection status to check again.` };
-    }
+    } finally { finishObservedTableauResponse(response); }
   }
 
   app.get('/api/tableau/connections', async () => ({ connections: listConnections() }));
@@ -433,13 +437,8 @@ export function registerTableauRoutes(
 
   app.get('/api/datasources', async () => {
     const session = requireSession();
-    try {
-      const datasources = await listDatasources(session);
-      return { datasources };
-    } catch (error) {
-      app.log.warn({ err: error }, 'listDatasources failed');
-      throw error;
-    }
+    const datasources = await listDatasources(session);
+    return { datasources };
   });
 
   app.get('/api/datasources/:luid/fields', async (req) => {
@@ -783,14 +782,15 @@ async function ensureCurrentUserName(
   fetchImpl: typeof fetch,
 ): Promise<void> {
   const check = beginTableauUserAccessCheck(session);
+  let response: Response | undefined;
   try {
-    const response = await fetchImpl(
+    response = await observedTableauFetch(
       `${session.serverUrl}${apiPath(session, `/sites/${encodeURIComponent(session.siteId)}/users/${encodeURIComponent(session.userId)}`)}`,
       {
         headers: { 'X-Tableau-Auth': session.token, Accept: 'application/json' },
         redirect: 'error',
         signal: AbortSignal.timeout(10_000),
-      },
+      }, createTableauCallTrace(), fetchImpl,
     );
     if (!response.ok) {
       if (isTableauUserAccessCheckCurrent(session, check)) markTableauUserAccessUnavailable(session, response.status === 403 || response.status === 404);
@@ -801,5 +801,5 @@ async function ensureCurrentUserName(
   } catch {
     if (isTableauUserAccessCheckCurrent(session, check)) markTableauUserAccessUnavailable(session);
     // display name is best-effort; the picker falls back to a generic "(you)" label
-  }
+  } finally { finishObservedTableauResponse(response); }
 }

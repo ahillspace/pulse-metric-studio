@@ -1,4 +1,5 @@
 import { readBoundedBody, redactCredentials, TableauError } from './rest-client.js';
+import { createTableauCallTrace, observedTableauFetch, finishObservedTableauResponse } from './telemetry.js';
 
 const MAX_SIGNIN_RESPONSE_BYTES = 1024 * 1024;
 
@@ -27,11 +28,24 @@ function extractAttr(xml: string, tag: string, attr: string): string | null {
 
 /** Ask the pod which REST API versions it supports. */
 export async function discoverRestApiVersion(serverUrl: string): Promise<string> {
+  let resp: Response | undefined;
   try {
-    const resp = await fetch(`${serverUrl}/api/-/serverInfo`, {
-      headers: { Accept: 'application/json' },
-      signal: AbortSignal.timeout(10_000),
-    });
+    const signal = AbortSignal.timeout(10_000);
+    const trace = createTableauCallTrace();
+    let url = `${serverUrl}/api/-/serverInfo`;
+    // Discovery is an uncredentialed GET. Follow its existing redirects explicitly so every hop is visible.
+    for (let redirects = 0; ; redirects++) {
+      resp = await observedTableauFetch(url, { headers: { Accept: 'application/json' }, signal, redirect: 'manual' }, trace);
+      const location = [301, 302, 303, 307, 308].includes(resp.status) ? resp.headers.get('location') : null;
+      if (!location) break;
+      if (resp.body) void resp.body.cancel().catch(() => {});
+      finishObservedTableauResponse(resp);
+      if (redirects >= 20) return FALLBACK_API_VERSION;
+      const next = new URL(location, url);
+      if (!['https:', 'http:'].includes(next.protocol) || next.username || next.password) return FALLBACK_API_VERSION;
+      url = next.href;
+      trace.retryReason = 'redirect';
+    }
     if (!resp.ok) return FALLBACK_API_VERSION;
     const data = JSON.parse(await readBoundedBody(resp, MAX_SIGNIN_RESPONSE_BYTES, 10_000)) as {
       serverInfo?: { restApiVersion?: { number?: string; legacyUrl?: string } };
@@ -43,6 +57,8 @@ export async function discoverRestApiVersion(serverUrl: string): Promise<string>
     return match ? match[1] : FALLBACK_API_VERSION;
   } catch {
     return FALLBACK_API_VERSION;
+  } finally {
+    finishObservedTableauResponse(resp);
   }
 }
 
@@ -56,7 +72,7 @@ export async function patSignin(input: {
   const url = `${input.serverUrl}/api/${input.apiVersion}/auth/signin`;
   let resp: Response;
   try {
-    resp = await fetch(url, {
+    resp = await observedTableauFetch(url, {
       method: 'POST',
       redirect: 'error',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
@@ -73,23 +89,25 @@ export async function patSignin(input: {
     throw new TableauError(`Could not reach ${input.serverUrl}: ${(e as Error).message}`, 0, '', 'network');
   }
 
-  if (!resp.ok) {
-    const text = redactCredentials(await readBoundedBody(resp, MAX_SIGNIN_RESPONSE_BYTES, 20_000).catch(() => ''), [input.patSecret]);
-    throw new TableauError(
-      `Tableau rejected sign-in (${resp.status}). Check PAT name/secret and site.`,
-      resp.status,
-      text.slice(0, 400),
-      classifySigninStatus(resp.status),
-    );
-  }
+  try {
+    if (!resp.ok) {
+      const text = redactCredentials(await readBoundedBody(resp, MAX_SIGNIN_RESPONSE_BYTES, 20_000).catch(() => ''), [input.patSecret]);
+      throw new TableauError(
+        `Tableau rejected sign-in (${resp.status}). Check PAT name/secret and site.`,
+        resp.status,
+        text.slice(0, 400),
+        classifySigninStatus(resp.status),
+      );
+    }
 
-  const body = await parseSigninBody(resp);
-  const token = body.token;
-  const siteId = body.siteId;
-  const userId = body.userId;
-  if (!token || !siteId) throw new TableauError('Sign-in response missing token/site id', resp.status, '');
-  if (!userId) throw new TableauError('Sign-in response missing user id', resp.status, '');
-  return { token, siteId, userId };
+    const body = await parseSigninBody(resp);
+    const token = body.token;
+    const siteId = body.siteId;
+    const userId = body.userId;
+    if (!token || !siteId) throw new TableauError('Sign-in response missing token/site id', resp.status, '');
+    if (!userId) throw new TableauError('Sign-in response missing user id', resp.status, '');
+    return { token, siteId, userId };
+  } finally { finishObservedTableauResponse(resp); }
 }
 
 async function parseSigninBody(resp: Response): Promise<{ token?: string; siteId?: string; userId?: string }> {

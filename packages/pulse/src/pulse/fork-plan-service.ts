@@ -2,6 +2,7 @@ import type { TableauSession } from '@pulse-metric-studio/core';
 import {
   getFieldCatalog,
   TableauError,
+  withTableauOperation,
 } from '@pulse-metric-studio/core';
 import type {
   PulseVariantRequestV1,
@@ -366,7 +367,7 @@ export class PulseForkPlanService {
     definitionPromises: Map<string, Promise<PulseDefinition>>,
     requiresAllowedDimensions: boolean,
   ): Promise<ResolvedSource> {
-    const metric = await this.dependencies.getMetric(session, sourceMetricId);
+    const metric = await withTableauOperation('fork_source', () => this.dependencies.getMetric(session, sourceMetricId));
     const returnedMetricId = String(
       metric.id ?? metric.metadata?.id ?? '',
     ).trim();
@@ -390,10 +391,10 @@ export class PulseForkPlanService {
 
     let definitionPromise = definitionPromises.get(definitionId);
     if (!definitionPromise) {
-      definitionPromise = this.dependencies.getDefinition(
+      definitionPromise = withTableauOperation('fork_source', () => this.dependencies.getDefinition(
         session,
         definitionId,
-      );
+      ));
       definitionPromises.set(definitionId, definitionPromise);
     }
     const definition = await definitionPromise;
@@ -438,7 +439,7 @@ export class PulseForkPlanService {
     request: PulseForkPlanRequestV1,
   ): Promise<ResolvedClause[]> {
     if (request.clauses.length === 0) return [];
-    const catalog = await this.dependencies.getCatalog(session, datasourceLuid);
+    const catalog = await withTableauOperation('fork_catalog', () => this.dependencies.getCatalog(session, datasourceLuid));
     if (catalog.source !== 'vds') {
       throw new Error(
         vdsCatalogFailureMessage(catalog),
@@ -464,12 +465,12 @@ export class PulseForkPlanService {
       // Validate the selected values with a targeted set-filter query bounded by
       // the selection size, not the domain size. This confirms values from
       // large (search-required) dimensions that lie beyond any bounded listing.
-      const rows = await this.dependencies.queryValues(session, {
+      const rows = await withTableauOperation('fork_filter_validation', () => this.dependencies.queryValues(session, {
         datasourceLuid,
         fieldName: clause.fieldName,
         rowLimit: clause.values.length,
         matchValues: clause.values,
-      });
+      }));
       const present = normalizedDomain(rows);
       if (clause.values.some((value) => !present.has(value))) {
         throw new Error(

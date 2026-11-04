@@ -1,5 +1,5 @@
 import type { TableauSession } from '@pulse-metric-studio/core';
-import { TableauError } from '@pulse-metric-studio/core';
+import { TableauError, logTableauEvent, withTableauOperation } from '@pulse-metric-studio/core';
 import type {
   PulseDefinitionNode,
   PulseInventoryResponse,
@@ -54,8 +54,8 @@ export async function getExistingMetrics(
 ): Promise<ExistingMetricsResult> {
   const inventory =
     dependencies === defaultDependencies
-      ? await cachedDefinitionInventory(session, dependencies, options)
-      : await dependencies.listDefinitions(session);
+      ? await withTableauOperation('inventory', () => cachedDefinitionInventory(session, dependencies, options))
+      : await withTableauOperation('inventory', () => dependencies.listDefinitions(session));
   const failures: InventoryFailure[] = [];
   let metricsTruncated = false;
   const matching: PulseDefinition[] = [];
@@ -118,7 +118,7 @@ export async function getExistingMetrics(
         ReturnType<InventoryDependencies['listMetrics']>
       >;
       try {
-        listed = await dependencies.listMetrics(session, definitionId);
+        listed = await withTableauOperation('inventory', () => dependencies.listMetrics(session, definitionId));
       } catch (error) {
         if (error instanceof TableauError && error.kind === 'auth') throw error;
         failures.push({
@@ -130,6 +130,14 @@ export async function getExistingMetrics(
       }
 
       const summaries = Array.isArray(listed) ? listed : listed.metrics;
+      logTableauEvent({
+        event: 'tableau.inventory_listing', definitionId,
+        metricCount: summaries.length,
+        specificationCount: summaries.filter((metric) => isRecord(metric) && isRecord(metric.specification)).length,
+        metricSpecificationCount: summaries.filter((metric) => isRecord(metric) && isRecord(metric.metric_specification)).length,
+        usableSpecificationCount: summaries.filter((metric) => isRecord(metric) && metricSpecification(metric)).length,
+        isDefaultCount: summaries.filter((metric) => isRecord(metric) && typeof metric.is_default === 'boolean').length,
+      });
       const incomplete = !Array.isArray(listed) && listed.truncated;
       if (!Array.isArray(listed) && incomplete) {
         metricsTruncated = true;
@@ -169,7 +177,7 @@ export async function getExistingMetrics(
           try {
             metric = listedDefinitionId && metricSpecification(listedMetric) && typeof listedMetric.is_default === 'boolean'
               ? listedMetric
-              : await dependencies.getMetric(session, metricId);
+              : await withTableauOperation('inventory_get_metric', () => dependencies.getMetric(session, metricId));
           } catch (error) {
             if (error instanceof TableauError && error.kind === 'auth')
               throw error;

@@ -528,10 +528,23 @@ The [audit recommendation](ARCHITECTURE_AUDIT.md#findings-and-recommendations) s
 
 ## Diagnose failures
 
-Desktop and backend log files each retain one 1 MiB active file and two 1 MiB archives.
+Backend logs retain one 16 MiB active file and two 16 MiB archives.
+Desktop logs retain one 1 MiB active file and two 1 MiB archives.
 Fixed-size pipe readers bound continuous backend output; startup also bounds oversized files from older versions.
-This limits the two managed log sets to 6 MiB combined without retaining entire output lines in memory.
+This limits the two managed log sets to 51 MiB combined without retaining entire output lines in memory.
 Logging failures do not stop pipe consumption, and shutdown bounds the wait for reader threads.
+
+Tableau request diagnostics run at info level regardless of the configured log level.
+Core owns request context propagation and a single allowlist for diagnostic fields.
+Every outbound attempt records its endpoint, HTTP method, status, duration, attempt number, and retry reason.
+Request paths omit query strings and redact dynamic path segments except opaque resource identifiers.
+The diagnostics exclude credentials, tokens, request and response bodies, filter values, and arbitrary error text.
+Throttle events distinguish Tableau responses, shared cooldown waits, and local rejections that never reach Tableau.
+Pulse adds bounded counts and operation labels for inventory, dimensions, subscriptions, metric creation, and reconciliation.
+Server request IDs connect these events to the API request that triggered them.
+Successful routine health requests omit their API completion line; failures and their outbound Tableau attempts remain visible.
+The larger backend budget preserves substantially more working-session history while retaining a fixed disk limit.
+See the [Tableau diagnostics test procedure](TABLEAU_REQUEST_DIAGNOSTICS.md) for build instructions, measurement steps, and log locations.
 
 For OpenCode, reproduce the same model with an ordinary CLI invocation before diagnosing account access.
 Reproduce the configured executable and prefix options before diagnosing native configuration, provider access, or tool permissions.

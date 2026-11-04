@@ -197,6 +197,9 @@ test('metadata catalog parser terminates for malformed references and preserves 
     '// [Other].[Sales]\n[Sales]', '/* [Other].[Sales] */ [Sales]', '[Revenue // note] * 2', '[A].[B]'];
   const script = `
     import { fetchFieldsViaMetadataGraphql } from ${JSON.stringify(new URL('./metadata-fallback.ts', import.meta.url).href)};
+    import { configureTableauTelemetry } from ${JSON.stringify(new URL('./telemetry.ts', import.meta.url).href)};
+    // This watchdog fixture reserves stdout for its parser results.
+    configureTableauTelemetry(() => {});
     const formulas = ${JSON.stringify(formulas)};
     const results = [];
     for (const formula of formulas) {

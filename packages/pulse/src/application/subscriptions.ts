@@ -4,6 +4,7 @@ import {
   apiPath,
   getJson,
   isPastEndError,
+  withTableauOperation,
 } from "@pulse-metric-studio/core";
 import type {
   PulseFollowOperation,
@@ -85,7 +86,7 @@ export async function getFollowState(
 
   let countResult: FollowerCountBatchResult;
   try {
-    countResult = await dependencies.followerCounts(session, uniqueMetricIds);
+    countResult = await withTableauOperation('follow_state', () => dependencies.followerCounts(session, uniqueMetricIds));
   } catch (error) {
     if (error instanceof TableauError && error.kind === "auth") throw error;
     const message = diagnosticMessage(boundedProviderDiagnostic(error));

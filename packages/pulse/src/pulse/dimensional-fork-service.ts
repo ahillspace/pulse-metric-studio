@@ -1,6 +1,8 @@
 import {
   getFieldCatalog,
   getSessionContext,
+  logTableauEvent,
+  withTableauOperation,
   type TableauSession,
 } from '@pulse-metric-studio/core';
 import {
@@ -136,10 +138,10 @@ export class PulseDimensionalForkService {
         'The selected field is not eligible for every source metric.',
         422,
       );
-    const count = await this.dependencies.queryCount(session, {
+    const count = await withTableauOperation('dimensions_values', () => this.dependencies.queryCount(session, {
       datasourceLuid: context.datasourceLuid,
       fieldName: field.name,
-    });
+    }));
     return { fieldId, count };
   }
 
@@ -185,12 +187,12 @@ export class PulseDimensionalForkService {
 
     const rowLimit =
       search || input.all ? DIMENSION_VALUE_FETCH_CEILING : FETCH_ALL_ROW_LIMIT;
-    const rows = await this.dependencies.queryValues(session, {
+    const rows = await withTableauOperation('dimensions_values', () => this.dependencies.queryValues(session, {
       datasourceLuid: context.datasourceLuid,
       fieldName: field.name,
       rowLimit,
       ...(search ? { contains: search } : {}),
-    });
+    }));
     const normalized = normalizeDistinctStringValues(rows);
     const truncated = rows.length >= rowLimit || normalized.hadUnsupportedValue;
     return {
@@ -218,11 +220,13 @@ export class PulseDimensionalForkService {
     const key = JSON.stringify(sourceMetricIds);
     const existing = retained.entries.get(key);
     if (existing && existing.expiresAt > Date.now()) {
+      logTableauEvent({ event: 'tableau.dimension_context', cacheHit: true });
       const context = await existing.request;
       if (getSessionContext(session) !== owner || JSON.stringify([session.serverUrl, session.siteId, session.userId]) !== coordinates)
         throw new PulseDimensionalForkError('The Tableau session changed while dimension context was loading.', 409);
       return context;
     }
+    logTableauEvent({ event: 'tableau.dimension_context', cacheHit: false });
     const request = this.loadContext(session, sourceMetricIds);
     const entry = { expiresAt: Date.now() + 60_000, request };
     retained.entries.delete(key);
@@ -245,7 +249,7 @@ export class PulseDimensionalForkService {
       PROVIDER_CONCURRENCY,
       async (metricId) => ({
         metricId,
-        metric: await this.dependencies.getMetric(session, metricId),
+        metric: await withTableauOperation('dimensions_source', () => this.dependencies.getMetric(session, metricId)),
       }),
     );
     const definitionPromises = new Map<string, Promise<PulseDefinition>>();
@@ -286,7 +290,7 @@ export class PulseDimensionalForkService {
       async (source): Promise<ResolvedSource> => {
         let definitionPromise = definitionPromises.get(source.definitionId);
         if (!definitionPromise) {
-          definitionPromise = this.dependencies.getDefinition(session, source.definitionId);
+          definitionPromise = withTableauOperation('dimensions_source', () => this.dependencies.getDefinition(session, source.definitionId));
           definitionPromises.set(source.definitionId, definitionPromise);
         }
         const definition = await definitionPromise;
@@ -335,7 +339,7 @@ export class PulseDimensionalForkService {
         422,
       );
     }
-    const catalog = await this.dependencies.getCatalog(session, datasourceLuid);
+    const catalog = await withTableauOperation('dimensions_catalog', () => this.dependencies.getCatalog(session, datasourceLuid));
     if (catalog.source !== 'vds') {
       throw new PulseDimensionalForkError(
         vdsCatalogFailureMessage(catalog),

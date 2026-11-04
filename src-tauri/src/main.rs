@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use bounded_log::{BoundedLog, LogDrains, LOG_ARCHIVES, LOG_BYTES};
+use bounded_log::{BoundedLog, LogDrains, LOG_ARCHIVES, LOG_BYTES, SERVER_LOG_BYTES};
 use pulse_transport::{pulse_api_request, PulseTransport};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -384,7 +384,7 @@ fn main() {
             );
 
             let server_log_path = data_directory.join(format!("{}-server.log", identity.log_slug));
-            let server_log = BoundedLog::open(server_log_path, LOG_BYTES, LOG_ARCHIVES)?;
+            let server_log = BoundedLog::open(server_log_path, SERVER_LOG_BYTES, LOG_ARCHIVES)?;
 
             let pulse_transport = PulseTransport { port, token: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()) };
 

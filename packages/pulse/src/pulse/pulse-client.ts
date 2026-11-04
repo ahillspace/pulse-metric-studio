@@ -1,6 +1,6 @@
 interface PulseDefinitionResponse { definition?: { metadata?: { id?: string; name?: string } } }
 import type { TableauSession } from '@pulse-metric-studio/core';
-import { TableauError,TableauResponseSizeError,apiPath,deleteReq,getJson,isPastEndError,postJson } from '@pulse-metric-studio/core';
+import { TableauError,TableauResponseSizeError,apiPath,deleteReq,getJson,isPastEndError,postJson,logTableauEvent,withTableauOperation } from '@pulse-metric-studio/core';
 import { boundedProviderDiagnostic,type PulseProviderDiagnostic } from './provider-diagnostics.js';
 import { pulseOperationErrorMessage } from './operation-errors.js';
 
@@ -248,13 +248,15 @@ export async function getOrCreatePulseMetric(
     definition_id: input.definitionId,
     specification: input.specification,
   };
-  const data = await postJson<any>(session, `${PULSE}/metrics:getOrCreate`, body, {
+  const data = await withTableauOperation('get_or_create', () => postJson<any>(session, `${PULSE}/metrics:getOrCreate`, body, {
     accept: 'application/vnd.tableau.metricqueryservice.v1.GetOrCreateMetricResponse+json',
     contentType: 'application/vnd.tableau.metricqueryservice.v1.GetOrCreateMetricRequest+json',
-  });
+  }));
   const created = requireMetricCreatedFlag(data);
+  const metricId = data?.metric?.metadata?.id ?? data?.metric?.id ?? null;
+  logTableauEvent({ event: 'tableau.get_or_create', metricId, isMetricCreated: created });
   return {
-    metricId: data?.metric?.metadata?.id ?? data?.metric?.id ?? null,
+    metricId,
     metricApiName: data?.metric?.metadata?.name ?? data?.metric?.name,
     created,
     raw: data,
@@ -422,10 +424,11 @@ export async function listSubscriptionsForMetric(session: TableauSession, metric
   for (let page = 0; page < 1000; page++) {
     const query = new URLSearchParams({ metric_id: metricId });
     if (token) query.set('page_token', token);
-    const data = await getJson<unknown>(session, `${PULSE}/subscriptions?${query}`);
+    const data = await withTableauOperation('subscriptions', () => getJson<unknown>(session, `${PULSE}/subscriptions?${query}`));
     const records = normalizeSubscriptionEnvelope(data);
     subscriptions.push(...records);
     const next = isRecord(data) ? data.next_page_token : undefined;
+    logTableauEvent({ event: 'tableau.subscriptions_page', metricId, page: page + 1, recordCount: records.length, hasNextPage: next !== undefined && next !== '' });
     if (next === undefined || next === '') return subscriptions;
     if (typeof next !== 'string' || !next.trim() || seenTokens.has(next) || !records.length)
       throw new TableauError('Pulse follower inventory has an invalid continuation.', 502);

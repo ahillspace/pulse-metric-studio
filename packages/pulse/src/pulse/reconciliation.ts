@@ -1,5 +1,5 @@
 import type { TableauSession } from '@pulse-metric-studio/core';
-import { TableauError } from '@pulse-metric-studio/core';
+import { TableauError, logTableauEvent, withTableauOperation } from '@pulse-metric-studio/core';
 import { boundedProviderDiagnostic,type PulseProviderDiagnostic } from './provider-diagnostics.js';
 import { sessionCacheKey } from './session-cache-key.js';
 import {
@@ -60,11 +60,12 @@ export async function reconcileMetricOwnership(
     const delay = delaysMs[attempt] ?? 0;
     if (delay > 0) await dependencies.wait(delay);
     if (sessionCacheKey(session) !== owner) throw new TableauError('The Tableau session changed during visibility reconciliation.', 401, '', 'auth');
+    logTableauEvent({ event: 'tableau.reconciliation_poll', metricId: expected.metricId, poll: attempt + 1 });
 
     if (!ownershipVerified) {
       let metric: PulseExactMetric;
       try {
-        metric = await dependencies.getMetric(session, expected.metricId);
+        metric = await withTableauOperation('reconciliation', () => dependencies.getMetric(session, expected.metricId));
         exactMetricResolved = true;
       } catch (error) {
         if (error instanceof TableauError && error.kind === 'auth') throw error;
@@ -91,7 +92,7 @@ export async function reconcileMetricOwnership(
 
       let definition: PulseDefinition;
       try {
-        definition = await dependencies.getDefinition(session, actualDefinitionId);
+        definition = await withTableauOperation('reconciliation', () => dependencies.getDefinition(session, actualDefinitionId));
       } catch (error) {
         if (error instanceof TableauError && error.kind === 'auth') throw error;
         return failed(expected.metricId, attempt + 1, error, true);
@@ -116,7 +117,7 @@ export async function reconcileMetricOwnership(
     }
 
     try {
-      const inventory = await dependencies.listMetrics(session, expected.definitionId);
+      const inventory = await withTableauOperation('reconciliation', () => dependencies.listMetrics(session, expected.definitionId));
       const records = Array.isArray(inventory) ? inventory : inventory.metrics;
       inventoryFailure = !Array.isArray(inventory) && inventory.truncated
         ? inventory.diagnostic ?? { message: 'Pulse metric inventory is incomplete.' }
