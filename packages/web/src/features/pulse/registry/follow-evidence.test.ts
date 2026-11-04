@@ -102,6 +102,59 @@ test("a superseded resumable response cannot restore continuation after a comple
   assert.equal(store.getState().followState?.availabilityByMetricId?.metric.canLoadMore, false);
 });
 
+for (const replacement of ["completed", "terminal", "new-owner"] as const) {
+  test(`a failed old continuation cannot restore retry after ${replacement} evidence`, async (t) => {
+    const obsolete = deferred<Response>();
+    let details = 0;
+    t.mock.method(globalThis, "fetch", async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const { metricIds: ids, detail } = JSON.parse(init!.body as string);
+      if (!detail) return Response.json(state(ids, false, 7));
+      if (++details === 2) return obsolete.promise;
+      const result = covered(ids, details === 1 || replacement === "terminal" ? 0 : ids.length);
+      if (details > 1) for (const availability of Object.values(result.availabilityByMetricId)) availability.canLoadMore = false;
+      result.followerCountsByMetricId = {};
+      for (const availability of Object.values(result.availabilityByMetricId)) availability.followerCountStatus = "not_requested";
+      return Response.json(result);
+    });
+    const store = fixture({ followState: registryApi.followState });
+    await store.getState().activateContext(draft().context, "A", session);
+    await store.getState().ensureFollowState(["metric"]);
+    const continuation = store.getState().loadMoreFollowState(["metric"]);
+    if (replacement === "new-owner") {
+      await store.getState().activateContext(draft().context, "A", { ...session, sessionGeneration: 2 });
+      await store.getState().ensureFollowState(["metric"]);
+    } else await store.getState().refreshFollowState(["metric"]);
+    obsolete.reject(new TypeError("Old IPC read failed")); await continuation;
+    assert.equal(store.getState().followState?.availabilityByMetricId?.metric.canLoadMore, false);
+    assert.equal(store.getState().followState?.coverage?.canLoadMore, false);
+    assert.equal(store.getState().followState?.followerCountsByMetricId.metric, 7);
+  });
+}
+
+test("a failed continuation preserves retry only for metrics already known to be resumable", async (t) => {
+  let details = 0;
+  t.mock.method(globalThis, "fetch", async (_url: RequestInfo | URL, init?: RequestInit) => {
+    const { metricIds: ids, detail } = JSON.parse(init!.body as string);
+    if (!detail) return Response.json(state(ids, false, 7));
+    if (++details === 2) throw new TypeError("IPC read failed for the mixed selection");
+    const result = covered(ids, 1);
+    result.followerCountsByMetricId = {};
+    for (const availability of Object.values(result.availabilityByMetricId)) availability.followerCountStatus = "not_requested";
+    return Response.json(result);
+  });
+  const store = fixture({ followState: registryApi.followState }, ["complete", "resumable", "uninspected"]);
+  await store.getState().activateContext(draft().context, "A", session);
+  await store.getState().ensureFollowState(["complete", "resumable"]);
+  await store.getState().loadMoreFollowState(["complete", "resumable", "uninspected"]);
+  const result = store.getState().followState!;
+  assert.equal(result.availabilityByMetricId?.resumable.canLoadMore, true);
+  assert.notEqual(result.availabilityByMetricId?.complete.canLoadMore, true);
+  assert.notEqual(result.availabilityByMetricId?.uninspected.canLoadMore, true);
+  assert.equal(result.availabilityByMetricId?.resumable.relationshipStatus, "unavailable");
+  assert.deepEqual(result.userFollowsByMetricId, {});
+  assert.equal(result.followerCountsByMetricId.resumable, 7);
+});
+
 test("partial follow during pending inventory fences pre-write counts until a post-write count read", async (t) => {
   const oldCounts = deferred<PulseFollowState>();
   const countStarted = deferred<void>();

@@ -274,7 +274,13 @@ export function createRegistryController(
             const [details, counts] = await Promise.all([
               get().trackProviderOperation(() => transport.followState(valid, true, scope.owner, { snapshotId: (current(scope) ? get().inventory : cache.get(scope.key)?.inventory)?.snapshotId, continueCoverage }), scope.owner).catch(error => {
                 const unavailable = unavailableFollowState(valid, errorMessage(error));
-                for (const availability of Object.values(unavailable.availabilityByMetricId ?? {})) availability.followerCountStatus = "not_requested";
+                for (const [id, availability] of Object.entries(unavailable.availabilityByMetricId ?? {})) {
+                  availability.followerCountStatus = "not_requested";
+                  // A failed continuation supplies no replacement cursor evidence.
+                  // Keep its explicit retry hint, while identities remain unavailable.
+                  if (continueCoverage && previous?.availabilityByMetricId?.[id]?.canLoadMore === true)
+                    availability.canLoadMore = true;
+                }
                 return unavailable;
               }),
               missingCounts.length ? get().trackProviderOperation(() => transport.followState(missingCounts, false, scope.owner), scope.owner).catch(error => unavailableFollowState(missingCounts, errorMessage(error))) : Promise.resolve(null),

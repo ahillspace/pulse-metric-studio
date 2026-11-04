@@ -353,6 +353,7 @@ Incomplete or unqualified site coverage falls back to requested metrics without 
 Each follow-state API request uses at most 20 subscription calls, including discovery and targeted pages.
 Larger interface demands use bounded batches and aggregate continuation from the currently demanded metrics rather than the last batch.
 Per-metric continuation ends when its scan completes, reaches a terminal limit, leaves the demand, or is superseded.
+A failed continuation request retains explicit retry for previously resumable metrics without treating their relationship details as confirmed.
 Explicit continuation retains progress and limits site scanning to 20 pages and 2,000 records per view.
 Targeted scans use the same page and record bounds; each owner retains eight coverage views.
 Exhausted page or record budgets disable continuation and explain the terminal local limit.

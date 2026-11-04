@@ -81,6 +81,48 @@ test("same-view removal clears active follow continuation without inspecting add
   assert.equal(loadMore().length, 0, "removed metrics cannot keep Load more visible through retained evidence");
 });
 
+test("Manager retains explicit continuation retry after an IPC failure until a completed response", async (t) => {
+  const fixture = await setup(t, "follow-continuation-retry");
+  let details = 0;
+  let counts = 0;
+  t.mock.method(registryApi, "inventory", async () => inventory());
+  t.mock.method(globalThis, "fetch", async (url: RequestInfo | URL, init?: RequestInit) => {
+    if (String(url).includes("/api/tableau/throttle")) return Response.json({ throttled: false, retryAt: null, serverTime: Date.now(), reason: null });
+    const { metricIds: ids, detail } = JSON.parse(init!.body as string);
+    if (detail && ++details === 2) throw new TypeError("Simulated recoverable IPC failure");
+    if (!detail) counts++;
+    const state = unavailableFollowState(ids, "Fixture page budget exhausted");
+    const completed = detail && details === 3;
+    state.followerCountsByMetricId = detail ? {} : { metric: 7 };
+    for (const availability of Object.values(state.availabilityByMetricId!)) {
+      availability.status = completed ? "available" : "partial";
+      availability.relationshipStatus = !detail ? "not_requested" : completed ? "available" : "partial";
+      availability.followerIdsStatus = !detail ? "not_requested" : completed ? "available" : "partial";
+      availability.followerCountStatus = detail ? "not_requested" : "available";
+      if (detail) availability.canLoadMore = !completed;
+    }
+    state.userFollowsByMetricId = detail ? { metric: true } : {};
+    return Response.json({ ...state, selectedGroupId: null, groupContextUnavailable: false });
+  });
+  await useRegistry.getState().load();
+  const renderer = await fixture.mount(true);
+  await act(async () => { renderer.root.findAll(node => node.type === "button" && node.children.includes("Expand all"))[0].props.onClick(); });
+  const loadMore = () => renderer.root.findAll(node => node.type === "button" && node.children.includes("Load more follow details"));
+  assert.equal(loadMore().length, 1);
+  await act(async () => { await loadMore()[0].props.onClick(); });
+  assert.equal(details, 2, "a failed continuation does not automatically retry");
+  assert.equal(useRegistry.getState().followState?.availabilityByMetricId?.metric.relationshipStatus, "unavailable");
+  assert.equal(useRegistry.getState().followState?.userFollowsByMetricId.metric, undefined, "failed reads cannot retain confirmed relationships");
+  assert.equal(useRegistry.getState().followState?.followerCountsByMetricId.metric, 7);
+  assert.equal(loadMore().length, 1, "the current nonterminal cursor remains explicitly retryable");
+  assert.equal(loadMore()[0].props.disabled, false);
+  await act(async () => { await loadMore()[0].props.onClick(); });
+  assert.equal(loadMore().length, 0, "completion clears the retry hint");
+  assert.equal(details, 3);
+  assert.equal(counts, 1, "valid counts do not need another request");
+  assert.equal(useRegistry.getState().followState?.followerCountsByMetricId.metric, 7);
+});
+
 test("enabled Manager Refresh shows new metrics before old follower enrichment finishes", async (t) => {
   const fixture = await setup(t, "manual-refresh");
   const oldFollowers = deferred<Awaited<ReturnType<RegistryApi["followState"]>>>();
