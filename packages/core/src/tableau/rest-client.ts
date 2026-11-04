@@ -323,6 +323,11 @@ export class TableauRequestGate {
     return new TableauThrottleError({ retryAt: this.resumeAt, serverTime: Date.now(), reason: 'throttle', sent }, diagnostic);
   }
 
+  /** A replay can retain its permit only while no newer cooldown supersedes it. */
+  canContinue(permit: GatePermit): boolean {
+    return !this.throttled || (this.probe === permit && permit.generation === this.generation);
+  }
+
   private drain(): void {
     clearTimeout(this.timer);
     this.timer = undefined;
@@ -471,6 +476,7 @@ async function rawFetch(
           if (resp.body) await cancelBody(() => resp!.body!.cancel(), deadline, signal, terminate);
           currentToken = session.token;
           trace.retryReason = 'authentication';
+          if (!gate.canContinue(permit)) return { retry: 'authentication' as const };
           // Keep the recovery lease through the authenticated replay and its body.
           // A new 429 still installs a new generation before this permit is released.
         }

@@ -141,7 +141,8 @@ Confirmed inventory receipts contain complete normalized snapshots with an owner
 Reordered receipts and superseded refreshes cannot discard confirmed local changes or replace newer inventory authority.
 Attempt `durationMs` includes response consumption or cancellation; `headersMs` measures the time until response headers arrive.
 Authentication rejections finish their timing before the separate authentication refresh starts.
-Queued calls adopt refreshed credentials only while their captured session ownership remains current, and authenticated replay retains its recovery permit.
+Queued calls adopt refreshed credentials only while their captured session ownership remains current.
+Authenticated replay retains its recovery permit unless a newer cooldown requires admission again.
 Failed automatic authentication remains an authentication error for subscription details; it must not appear as resumable partial coverage.
 Follow-detail continuation is tracked per demanded metric across batches, and count responses dispatched before invalidation cannot restore affected totals.
 Use `startedAt` and `headersMs` to order provider responses when concurrent attempts finish in a different order.

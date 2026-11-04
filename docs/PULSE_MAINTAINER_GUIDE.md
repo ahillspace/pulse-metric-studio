@@ -206,7 +206,8 @@ Four throttle retries use client floors of 1, 2, 4, and 8 seconds, plus nonnegat
 The effective wait meets both the server minimum and the client floor.
 The retry budget and deadline survive authentication and REST version adaptation.
 Queued dispatch checks its captured session ownership before using the session's current token.
-Successful automatic reauthentication retries inside the admitted recovery permit, so queued requests do not cycle through obsolete credentials.
+Authenticated replay retains its recovery permit while that permit's cooldown generation remains current.
+A newer cooldown sends the replay back through admission without restarting its deadline or retry budgets.
 The transport installs shared cooldown before releasing capacity to queued requests.
 After cooldown, one eligible queued request becomes the probe; the app sends no additional health request.
 A successful probe restores bounded concurrency only for its current cooldown generation.

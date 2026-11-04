@@ -12,7 +12,7 @@ process.env.PULSE_METRIC_STUDIO_DATA_DIR = dataDir;
 const sessions = await import('./session.js');
 const { closeDb } = await import('../db/index.js');
 const { registerTableauRoutes } = await import('./routes.js');
-const { tableauFetch, getJson, DEFAULT_MAX_RESPONSE_BYTES, MAX_CONCURRENT_TABLEAU_REQUESTS } = await import('./rest-client.js');
+const { tableauFetch, getJson, getTableauThrottleStatus, DEFAULT_MAX_RESPONSE_BYTES, MAX_CONCURRENT_TABLEAU_REQUESTS } = await import('./rest-client.js');
 const { patSignin } = await import('./signin.js');
 
 test.after(() => { sessions.clearSession(); closeDb(); rmSync(dataDir, { recursive: true, force: true }); });
@@ -541,6 +541,49 @@ for (const change of ['disconnect', 'replacement', 'reactivation'] as const) {
     } finally {
       f.releaseSignin();
       for (const response of firstWave) if (!response.writableEnded) response.end('{}');
+      await results;
+      await f.close();
+    }
+  });
+}
+
+for (const newerRetryAfter of ['36', '0'] as const) {
+  test(`authenticated recovery replay honors newer Retry-After ${newerRetryAfter} from an older in-flight response`, async (t) => {
+    const f = await fixture();
+    const initial: ServerResponse[] = [];
+    let freshTokenCalls = 0;
+    const freshTokenTimes: number[] = [];
+    const timeoutMs = newerRetryAfter === '36' ? 3500 : 6000;
+    f.hold();
+    f.serveWork((req, res) => {
+      if (initial.length < 2) { initial.push(res); return; }
+      if (req.headers['x-tableau-auth'] === 'old') reject(res);
+      else { freshTokenCalls++; freshTokenTimes.push(Date.now()); res.end('{}'); }
+    });
+    const results = Promise.allSettled([
+      tableauFetch(f.session, '/api/-/pulse/metrics/first', { timeoutMs }),
+      tableauFetch(f.session, '/api/-/pulse/metrics/older-inflight', { timeoutMs }),
+    ]);
+    try {
+      await until(() => initial.length === 2);
+      initial[0].writeHead(429, { 'Retry-After': '0' }); initial[0].end('{}');
+      await until(() => f.signinPending);
+      initial[1].writeHead(429, { 'Retry-After': newerRetryAfter }); initial[1].end('{}');
+      await until(() => (getTableauThrottleStatus(f.session).retryAt ?? 0) > Date.now() + (newerRetryAfter === '36' ? 35_000 : 850));
+      const retryAt = getTableauThrottleStatus(f.session).retryAt!;
+      f.releaseSignin();
+      const outcomes = await results;
+      const summary = { successes: outcomes.filter(result => result.status === 'fulfilled' && result.value.ok).length, freshTokenCalls, signins: f.signins };
+      t.diagnostic(JSON.stringify(summary));
+      const expectedSuccesses = newerRetryAfter === '36' ? 0 : 2;
+      assert.equal(freshTokenCalls, expectedSuccesses, JSON.stringify(summary));
+      assert.equal(summary.successes, expectedSuccesses, JSON.stringify(summary));
+      assert.ok(freshTokenTimes.every(dispatchedAt => dispatchedAt >= retryAt), 'authenticated replays cannot bypass the newer provider minimum');
+      assert.equal(f.signins, 1);
+      assert.equal(getTableauThrottleStatus(f.session).throttled, newerRetryAfter === '36');
+    } finally {
+      f.releaseSignin();
+      for (const response of initial) if (!response.writableEnded) response.end('{}');
       await results;
       await f.close();
     }
