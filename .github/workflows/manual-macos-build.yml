@@ -1,0 +1,117 @@
+name: Build macOS installers
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full 40-character lowercase commit SHA already merged into main
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+            machine: arm64
+          - runner: macos-15-intel
+            arch: x64
+            machine: x86_64
+    defaults:
+      run:
+        shell: bash
+    env:
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      EXPECTED_ARCH: ${{ matrix.arch }}
+      EXPECTED_MACHINE: ${{ matrix.machine }}
+
+    steps:
+      - name: Validate source input and runner
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo 'source_sha must be a full lowercase commit SHA.' >&2; exit 1; }
+          [[ "$(uname -s)" == Darwin && "$(uname -m)" == "$EXPECTED_MACHINE" ]]
+          sw_vers
+          xcodebuild -version
+
+      - name: Check out requested source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify committed source belongs to main
+        run: |
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+          git merge-base --is-ancestor "$SOURCE_SHA" refs/remotes/origin/main
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
+          [[ "$(cat .nvmrc)" =~ ^22\.[0-9]+\.[0-9]+$ ]] || { echo 'macOS packaging requires an exact Node 22 version in .nvmrc.' >&2; exit 1; }
+
+      - name: Set up pinned Node runtime
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          architecture: ${{ matrix.arch }}
+          package-manager-cache: false
+
+      - name: Set up stable Rust and verify toolchains
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup show active-toolchain
+          rustc --version
+          cargo --version
+          node --version
+          npm --version
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          assert.equal(process.platform, 'darwin');
+          assert.equal(process.arch, process.env.EXPECTED_ARCH);
+          assert.equal(process.versions.node, fs.readFileSync('.nvmrc', 'utf8').trim());
+          NODE
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Build installers from clean source
+        run: |
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+          [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
+          npm run tauri:build
+
+      - name: Verify release output identity
+        run: |
+          test -s native-artifacts/release-evidence.json
+          images=(native-artifacts/dmg/*.dmg)
+          test -f "${images[0]}"
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          const evidence = JSON.parse(fs.readFileSync('native-artifacts/release-evidence.json', 'utf8'));
+          assert.equal(evidence.source.commit, process.env.SOURCE_SHA);
+          assert.equal(evidence.source.dirty, false);
+          assert.equal(evidence.platform, 'darwin');
+          assert.equal(evidence.arch, process.env.EXPECTED_ARCH);
+          assert.equal(evidence.node, process.version);
+          assert.equal(evidence.validation, false);
+          NODE
+
+      - name: Upload installers and public evidence
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-${{ matrix.arch }}-${{ inputs.source_sha }}
+          path: |
+            native-artifacts/dmg/*.dmg
+            native-artifacts/release-evidence.json
+          if-no-files-found: error
+          retention-days: 14
