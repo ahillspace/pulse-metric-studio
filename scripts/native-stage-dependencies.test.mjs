@@ -10,14 +10,13 @@ import { linkNativeStageDependencies } from "./native-stage-dependencies.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 function temporary(testContext) {
+  // Real paths: module resolution reports them, and macOS links the temporary folder through /private.
+  const temporaryRoot = fs.realpathSync(os.tmpdir());
   const directory = fs.mkdtempSync(
-    path.join(os.tmpdir(), "pulse-native-dependencies-"),
+    path.join(temporaryRoot, "pulse-native-dependencies-"),
   );
   testContext.after(() => {
-    assert.equal(
-      path.dirname(path.resolve(directory)),
-      path.resolve(os.tmpdir()),
-    );
+    assert.equal(path.dirname(path.resolve(directory)), temporaryRoot);
     assert.ok(
       path.basename(directory).startsWith("pulse-native-dependencies-"),
     );

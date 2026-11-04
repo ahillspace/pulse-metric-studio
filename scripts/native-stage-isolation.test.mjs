@@ -27,7 +27,8 @@ function git(directory, ...args) {
 }
 
 test('production native bundles retain staged workspace source through direct and third-party nested imports', async (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pulse-native-isolation-'));
+  // Real path: module resolution reports it, and macOS links the temporary folder through /private.
+  const directory = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'pulse-native-isolation-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const source = path.join(directory, 'source');
   const stage = path.join(directory, 'stage');

@@ -32,7 +32,7 @@ test('release staging rejects conflicting same-name installers before publishing
   const second = path.join(build.directory, 'second', name);
   write(first, 'first build');
   write(second, 'different build');
-  const result = build.run(build.output, first, second);
+  const result = build.run('--repo', 'example/release', build.output, first, second);
   assert.notEqual(result.status, 0, result.stdout);
   assert.match(result.stderr, /conflicting installer/i);
   assert.ok(!fs.existsSync(build.output) || fs.readdirSync(build.output).length === 0);
@@ -62,11 +62,22 @@ test('release staging accepts matching cross-platform sources, sanitizes evidenc
   assert.ok(fs.existsSync(path.join(build.output, 'Pulse-Metric-Studio_0.1.4_x64-setup.exe')));
 });
 
+test('release staging requires an explicit release repository before reading installers', (t) => {
+  const build = fixture(t);
+  const input = installer(build, 'windows', 'Pulse-Metric-Studio_0.1.4_x64-setup.exe');
+  for (const args of [[build.output, input], ['--repo'], ['--repo', 'not-a-repository', build.output, input]]) {
+    const result = build.run(...args);
+    assert.notEqual(result.status, 0, result.stdout);
+    assert.match(result.stderr, /--repo/);
+    assert.equal(fs.existsSync(build.output), false);
+  }
+});
+
 test('release staging rejects different dirty content despite matching HEAD and dirty flags', (t) => {
   const build = fixture(t);
   const windows = installer(build, 'windows', 'Pulse-Metric-Studio_0.1.4_x64-setup.exe', { dirty: true });
   const mac = installer(build, 'mac', 'Pulse-Metric-Studio_0.1.4_aarch64.dmg', { dirty: true, contentSha256: 'c'.repeat(64) });
-  const result = build.run(build.output, windows, mac);
+  const result = build.run('--repo', 'example/release', build.output, windows, mac);
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /mixed source identities/);
   assert.equal(fs.existsSync(build.output), false);
@@ -78,7 +89,7 @@ for (const failure of ['missing', 'hash', 'version', 'validation', 'architecture
     const input = installer(build, 'windows', 'Pulse-Metric-Studio_0.1.4_x64-setup.exe', {}, failure === 'version' ? { version: '0.1.3' } : failure === 'validation' ? { validation: true } : failure === 'architecture' ? { arch: 'arm64' } : {});
     if (failure === 'missing') fs.unlinkSync(path.join(path.dirname(input), 'release-evidence.json'));
     if (failure === 'hash') fs.appendFileSync(input, 'changed');
-    const result = build.run(build.output, input);
+    const result = build.run('--repo', 'example/release', build.output, input);
     assert.notEqual(result.status, 0);
     assert.equal(fs.existsSync(build.output), false);
   });
@@ -88,7 +99,7 @@ test('release staging preserves an existing release output on failure', (t) => {
   const build = fixture(t);
   write(path.join(build.output, 'keep.txt'), 'previous release');
   const input = installer(build, 'windows', 'Pulse-Metric-Studio_0.1.4_x64-setup.exe');
-  const result = build.run(build.output, input);
+  const result = build.run('--repo', 'example/release', build.output, input);
   assert.notEqual(result.status, 0);
   assert.equal(fs.readFileSync(path.join(build.output, 'keep.txt'), 'utf8'), 'previous release');
 });
@@ -102,7 +113,7 @@ test('failed release promotion restores an existing empty output and removes tem
     if (path.basename(from).startsWith('.pulse-release-stage-') && !from.endsWith('-previous')) throw new Error('Simulated release promotion failure');
     return rename(from, to);
   };
-  try { assert.throws(() => stageRelease(build.source, [build.output, input]), /Simulated release promotion failure/); }
+  try { assert.throws(() => stageRelease(build.source, ['--repo', 'example/release', build.output, input]), /Simulated release promotion failure/); }
   finally { fs.renameSync = rename; }
   assert.deepEqual(fs.readdirSync(build.output), []);
   assert.equal(fs.readdirSync(build.directory).some((name) => name.startsWith('.pulse-release-stage-')), false);
@@ -113,7 +124,7 @@ test('installer changes during copy fail verification before release promotion',
   const input = installer(build, 'windows', 'Pulse-Metric-Studio_0.1.4_x64-setup.exe');
   const copy = fs.copyFileSync;
   fs.copyFileSync = (from, to) => { copy(from, to); fs.appendFileSync(to, 'concurrent change'); };
-  try { assert.throws(() => stageRelease(build.source, [build.output, input]), /changed while release files were copied/); }
+  try { assert.throws(() => stageRelease(build.source, ['--repo', 'example/release', build.output, input]), /changed while release files were copied/); }
   finally { fs.copyFileSync = copy; }
   assert.equal(fs.existsSync(build.output), false);
   assert.equal(fs.readdirSync(build.directory).some((name) => name.startsWith('.pulse-release-stage-')), false);
