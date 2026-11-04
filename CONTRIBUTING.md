@@ -119,6 +119,17 @@ node scripts/build-native.mjs --validation
 On Windows, validation produces an executable and resources instead of an installer.
 This command creates artifacts; it does not validate desktop workflows.
 
+### Build macOS installers with GitHub Actions
+
+Manually run [Build macOS installers](.github/workflows/manual-macos-build.yml) from `main`, with `source_sha` set to the full lowercase commit SHA.
+The source commit must already belong to `main`; use the same examined revision for Windows packaging.
+The workflow builds Apple Silicon and Intel installers on matching macOS 15 runners with the source revision's exact `.nvmrc` runtime.
+It uses the canonical packager, including macOS deployment checks and the configured ad-hoc signing identity.
+Each architecture produces a separate artifact containing only disk images and sanitized `release-evidence.json`, retained for 14 days.
+Download both artifacts and preserve each evidence sidecar with its disk images when staging the release.
+The workflow has read-only repository access and does not publish releases.
+Desktop qualification remains user-led, and production signing and notarization require separate credentials.
+
 ## Maintain icon assets
 
 The web artwork in `packages/web/src/assets/pulse-icon.png` is the source for platform and tray icons.
