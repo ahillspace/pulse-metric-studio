@@ -188,8 +188,11 @@ export const ExistingMetrics = memo(function ExistingMetrics({ visible = true }:
   const inventoryViewId = existing?.viewId ?? existing?.snapshotId;
   // Capture demand at an explicit expansion/filter change, including when counts
   // are still pending. A later local patch must not silently inspect new rows.
-  const detailIdsKey = useMemo(() => JSON.stringify((onlyFollowed ? allMetrics : allMetrics.filter((metric) => expanded.has(metric.definitionId)))
+  const capturedDetailIdsKey = useMemo(() => JSON.stringify((onlyFollowed ? allMetrics : allMetrics.filter((metric) => expanded.has(metric.definitionId)))
     .map((metric) => metric.metricId).sort()), [onlyFollowed, inventoryViewId, expandedKey]);
+  // Local removals retire demand immediately; additions wait for explicit demand.
+  const detailIdsKey = useMemo(() => JSON.stringify((JSON.parse(capturedDetailIdsKey) as string[])
+    .filter(id => metricById.has(id))), [capturedDetailIdsKey, metricById]);
   const canLoadMoreFollowDetails = (JSON.parse(detailIdsKey) as string[])
     .some(id => registry.followState?.availabilityByMetricId?.[id]?.canLoadMore === true);
   useEffect(() => {

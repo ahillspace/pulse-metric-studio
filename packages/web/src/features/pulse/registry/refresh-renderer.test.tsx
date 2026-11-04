@@ -11,6 +11,7 @@ import { useRegistry } from "./controller";
 import { pulseApi } from "../api/client";
 import { decodeVariantResponse, registryApi, type RegistryApi } from "../api/registry";
 import { unavailableFollowState } from "../follow-state";
+import { applyInventoryPatch } from "./inventory-patch";
 import { MetricPreview } from "./MetricPreview";
 import { catalog, deferred, draft, inventory, session } from "../testing/fixtures";
 
@@ -48,6 +49,36 @@ test("Manager shows continuation only while the unresolved metric is expanded", 
   assert.equal(loadMore().length, 1);
   act(() => renderer.root.findAll(node => node.type === "button" && node.children.includes("Collapse all"))[0].props.onClick());
   assert.equal(loadMore().length, 0);
+});
+
+test("same-view removal clears active follow continuation without inspecting added rows", async (t) => {
+  const fixture = await setup(t, "follow-demand-removal");
+  const source = { ...inventory(), viewId: "stable-view", revision: 1 };
+  const calls: string[] = [];
+  t.mock.method(registryApi, "inventory", async () => source);
+  t.mock.method(registryApi, "throttle", async () => ({ throttled: false, retryAt: null, serverTime: Date.now(), reason: null }));
+  t.mock.method(registryApi, "followState", async (ids: string[], detail = true) => {
+    calls.push(`${detail ? "details" : "counts"}:${ids.join(",")}`);
+    const state = unavailableFollowState(ids, "Fixture page budget exhausted");
+    for (const availability of Object.values(state.availabilityByMetricId!)) {
+      availability.relationshipStatus = detail ? "unavailable" : "not_requested";
+      if (detail) availability.canLoadMore = true;
+    }
+    return { ...state, groupContextUnavailable: false, selectedGroupId: null, userFollowerIdsByMetricId: {}, groupFollowerIdsByMetricId: {}, availabilityByMetricId: state.availabilityByMetricId! };
+  });
+  await useRegistry.getState().load();
+  const renderer = await fixture.mount(true);
+  await act(async () => { renderer.root.findAll(node => node.type === "button" && node.children.includes("Expand all"))[0].props.onClick(); });
+  const loadMore = () => renderer.root.findAll(node => node.type === "button" && node.children.includes("Load more follow details"));
+  assert.equal(loadMore().length, 1);
+  const replacement = { ...source.definitions[0].metrics[0], metricId: "new", name: "New variant" };
+  const changed = applyInventoryPatch(source, {
+    version: 1, baseSnapshotId: source.snapshotId, snapshotId: "removed-and-added", viewId: "stable-view", revision: 2,
+    removedMetricIds: ["metric"], removedDefinitionIds: [], upserts: [{ definitionId: source.definitions[0].definitionId, metric: replacement }],
+  });
+  await act(async () => { useRegistry.setState({ inventory: changed }); });
+  assert.deepEqual(calls, ["counts:metric", "details:metric"], "removal never enrolls a locally added row for automatic inspection");
+  assert.equal(loadMore().length, 0, "removed metrics cannot keep Load more visible through retained evidence");
 });
 
 test("enabled Manager Refresh shows new metrics before old follower enrichment finishes", async (t) => {
