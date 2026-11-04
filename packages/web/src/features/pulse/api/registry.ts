@@ -24,7 +24,7 @@ export const registryApi = {
         ownedPulseUrl(`/api/pulse/existing-metrics?datasourceLuid=${encodeURIComponent(context.datasourceLuid)}${options?.refresh ? "&refresh=true" : ""}`, owner),
       ),
     ),
-  followState: async (metricIds: string[], detail = true, owner = captureSessionOwner(), options: { snapshotId?: string; continueCoverage?: boolean } = {}) =>
+  followState: async (metricIds: string[], detail = true, owner = captureSessionOwner(), options: { snapshotId?: string; continueCoverage?: boolean; refresh?: boolean } = {}) =>
     PulseFollowStateSchema.parse(
       await pulseRequest(ownedPulseUrl("/api/pulse/follow-state", owner), "POST", { metricIds, detail, ...options }),
     ),

@@ -420,6 +420,7 @@ Concurrent manual refresh rebases confirmed patches through local cached evidenc
 Dispatch order fences inventory authority; an older refresh completion cannot replace a newer accepted inventory.
 The owner journal retains changes only for pending refresh windows; deletion sequence fences reject older pending upserts for deleted identities.
 Follow / Unfollow's Add existing reads a fresh identity snapshot for the exact selected metrics through the existing batched follow-state endpoint.
+It sends `refresh: true`, which discards and fences retained subscription coverage for those metrics only, so subscriptions changed outside the app are read again while other metrics keep their coverage.
 It merges direct user and group subscribers into the selected targets without expanding group membership, and reports incomplete identity reads.
 The directory supplies display names, not subscription evidence.
 Initial summaries request follower counts without subscriber identities or user-membership discovery.

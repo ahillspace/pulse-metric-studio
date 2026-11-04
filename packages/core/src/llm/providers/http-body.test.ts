@@ -49,8 +49,17 @@ test('fixture readiness rejects when a request times out before response headers
   assert.equal(ready.reason.name, 'TimeoutError');
 });
 
+// An in-memory body leaves only the provider's unreferenced deadline timer pending.
+// Node 22 ends the test file when nothing referenced remains, so the test owns a
+// referenced handle until its assertions finish.
+function holdEventLoop(t: TestContext): void {
+  const handle = setInterval(() => {}, 1000);
+  t.after(() => clearInterval(handle));
+}
+
 for (const [status, code] of [[200, 'provider_timeout'], [401, 'provider_authentication'], [429, 'provider_quota']] as const) {
-  test(`HTTP ${status} body obeys the operation deadline when the fetch adapter does not propagate abort`, { timeout: 3000 }, async () => {
+  test(`HTTP ${status} body obeys the operation deadline when the fetch adapter does not propagate abort`, { timeout: 3000 }, async (t) => {
+    holdEventLoop(t);
     let cancelled = false;
     const response = new Response(new ReadableStream({
       start(controller) { controller.enqueue(new TextEncoder().encode('{')); },

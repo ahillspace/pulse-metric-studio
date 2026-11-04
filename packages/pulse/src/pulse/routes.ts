@@ -153,13 +153,14 @@ export function registerPulseRoutes(
 
   app.post("/api/pulse/follow-state", async (req) => {
     const session = requireSession(req);
-    const body = req.body as { metricIds?: string[]; selectedGroupId?: string; detail?: boolean; snapshotId?: string; continueCoverage?: boolean; personalOnly?: boolean };
+    const body = req.body as { metricIds?: string[]; selectedGroupId?: string; detail?: boolean; snapshotId?: string; continueCoverage?: boolean; personalOnly?: boolean; refresh?: boolean };
     if (!Array.isArray(body.metricIds))
       throw app.httpErrors.badRequest("metricIds array required");
     const selectedGroupId = String(body.selectedGroupId ?? "").trim();
     let groups: Array<{ id: string; name: string }> = [];
     let groupContextUnavailable = false;
     if (body.detail !== undefined && typeof body.detail !== 'boolean') throw app.httpErrors.badRequest('detail must be a boolean');
+    if (body.refresh !== undefined && typeof body.refresh !== 'boolean') throw app.httpErrors.badRequest('refresh must be a boolean');
     if (body.detail !== false && !body.personalOnly && !selectedGroupId) {
       try {
         groups = await listUserGroupIds(session, session.userId);
@@ -180,6 +181,7 @@ export function registerPulseRoutes(
         snapshotId: body.snapshotId,
         continueCoverage: body.continueCoverage,
         personalOnly: body.personalOnly,
+        refresh: body.refresh,
       },
     );
   });

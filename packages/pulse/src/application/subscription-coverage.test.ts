@@ -212,3 +212,52 @@ test('each batch reports per-metric continuation without erasing earlier unresol
   assert.equal(Object.values(continued.availabilityByMetricId).filter(value => value.canLoadMore).length, 161);
   assert.ok(Object.values(continued.availabilityByMetricId).slice(0, 20).every(value => value.canLoadMore === false));
 });
+
+test('explicit refresh reacquires only the requested metrics after subscriptions change elsewhere', async () => {
+  const session = fixture(), calls: string[] = [];
+  let followers: Record<string, string[]> = { a: ['alice'], b: ['carol'] };
+  const dependencies: SubscriptionDependencies = { ...defaultDependencies, siteNegativeCoverageQualified: true,
+    listSubscriptionPage: async (_session, input) => {
+      calls.push(input.metricId ?? 'site');
+      const ids = input.metricId ? [input.metricId] : Object.keys(followers);
+      return { subscriptions: ids.flatMap(metricId => (followers[metricId] ?? []).map(id => ({ metricId, follower: { id, type: 'USER' as const } }))), nextPageToken: null };
+    },
+  };
+  const identities = (result: Awaited<ReturnType<typeof getFollowState>>, id: string) => result.userFollowerIdsByMetricId?.[id];
+  const first = await getFollowState(session, 'user', [], ['a', 'b'], { detail: true }, dependencies);
+  assert.deepEqual([identities(first, 'a'), identities(first, 'b')], [['alice'], ['carol']]);
+  followers = { a: ['bob'], b: ['dave'] };
+  const reused = await getFollowState(session, 'user', [], ['a'], { detail: true }, dependencies);
+  assert.deepEqual(identities(reused, 'a'), ['alice'], 'ordinary demand reuses complete coverage');
+  assert.deepEqual(calls, ['site']);
+  const refreshed = await getFollowState(session, 'user', [], ['a'], { detail: true, refresh: true }, dependencies);
+  assert.deepEqual(identities(refreshed, 'a'), ['bob'], 'explicit refresh returns the changed identities');
+  assert.equal(refreshed.availabilityByMetricId.a?.followerIdsStatus, 'available');
+  assert.deepEqual(calls, ['site', 'a']);
+  const unrelated = await getFollowState(session, 'user', [], ['b'], { detail: true }, dependencies);
+  assert.deepEqual(identities(unrelated, 'b'), ['carol'], 'unrequested metrics keep their coverage');
+  assert.deepEqual(calls, ['site', 'a']);
+});
+
+test('an explicit refresh fences an older pending read for the same metric', async () => {
+  const session = fixture();
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  let reads = 0;
+  const dependencies: SubscriptionDependencies = { ...defaultDependencies,
+    listSubscriptionPage: async (_session, input) => {
+      if (!input.metricId) return { subscriptions: [], nextPageToken: null };
+      const read = ++reads;
+      if (read === 1) await held;
+      return { subscriptions: [{ metricId: 'a', follower: { id: read === 1 ? 'stale' : 'fresh', type: 'USER' as const } }], nextPageToken: null };
+    },
+  };
+  const older = getFollowState(session, 'user', [], ['a'], { detail: true }, dependencies);
+  while (reads === 0) await new Promise(resolve => setImmediate(resolve));
+  const refreshed = await getFollowState(session, 'user', [], ['a'], { detail: true, refresh: true }, dependencies);
+  release(); await older;
+  assert.deepEqual(refreshed.userFollowerIdsByMetricId?.a, ['fresh']);
+  const after = await getFollowState(session, 'user', [], ['a'], { detail: true }, dependencies);
+  assert.deepEqual(after.userFollowerIdsByMetricId?.a, ['fresh'], 'the late older page cannot replace refreshed coverage');
+  assert.equal(reads, 2);
+});
