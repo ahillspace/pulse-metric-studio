@@ -6,12 +6,17 @@ import { ExistingMetrics } from "../components/ExistingMetrics";
 import { createAuthorController, useAuthor } from "../author/controller";
 import { useConnection } from "../connections/controller";
 import { useRegistry } from "./controller";
-import { registryApi, type RegistryApi } from "../api/registry";
+import { pulseApi } from "../api/client";
+import { decodeVariantResponse, registryApi, type RegistryApi } from "../api/registry";
 import { unavailableFollowState } from "../follow-state";
 import { MetricPreview } from "./MetricPreview";
 import { catalog, deferred, draft, inventory, session } from "../testing/fixtures";
 
 async function setup(t: import("node:test").TestContext, id = "a") {
+  const globals = new Map(["document", "window", "HTMLElement"].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  Object.defineProperty(globalThis, "document", { configurable: true, value: { activeElement: null, addEventListener() {}, removeEventListener() {} } });
+  Object.defineProperty(globalThis, "window", { configurable: true, value: { setTimeout, clearTimeout } });
+  Object.defineProperty(globalThis, "HTMLElement", { configurable: true, value: class {} });
   const originalAuthor = useAuthor.getState(), originalConnection = useConnection.getState(), originalRegistry = useRegistry.getState();
   const record = draft(id);
   const local = createAuthorController({ readDraft: async () => record } as any, async () => ({ catalog: catalog(id) }), () => session);
@@ -23,8 +28,9 @@ async function setup(t: import("node:test").TestContext, id = "a") {
   t.after(() => {
     act(() => renderer?.unmount()); local.getState().dispose();
     useAuthor.setState(originalAuthor, true); useConnection.setState(originalConnection, true); useRegistry.setState(originalRegistry, true);
+    for (const [key, descriptor] of globals) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key); }
   });
-  return { mount: async () => { await act(async () => { renderer = create(<ExistingMetrics visible={false} />); }); return renderer!; } };
+  return { mount: async (visible = false) => { await act(async () => { renderer = create(<ExistingMetrics visible={visible} />); }); return renderer!; } };
 }
 
 test("enabled Manager Refresh shows new metrics before old follower enrichment finishes", async (t) => {
@@ -79,4 +85,131 @@ test("permission metadata refresh retains the mounted Manager preview scope", as
   act(() => useConnection.setState({ session: { ...session, sessionGeneration: 2 } }));
   assert.equal(renderer.root.findAllByType(MetricPreview).length, 0, "a replacement owner invalidates the preview");
   await act(async () => { held.resolve(Response.json({ error: "Fixture preview completed after the owner changed." }, { status: 503 })); await new Promise<void>((resolve) => setImmediate(resolve)); });
+});
+
+
+test("mounted Manager preserves expansion and selection without demanding new relationships after a create patch", async (t) => {
+  const fixture = await setup(t, "local-create-patch");
+  const source = { ...inventory(), revision: 1, viewId: "create-view" };
+  const calls: string[] = [];
+  t.mock.method(registryApi, "inventory", async () => { calls.push("inventory"); return source; });
+  t.mock.method(registryApi, "throttle", async () => ({ throttled: false, retryAt: null, serverTime: Date.now(), reason: null }));
+  t.mock.method(registryApi, "followState", async (ids: string[], detail = true) => {
+    calls.push(`${detail ? "details" : "counts"}:${ids.join(",")}`);
+    return { ...unavailableFollowState(ids, "fixture"), selectedGroupId: null,
+      followerCountsByMetricId: detail ? {} : { metric: 7 }, userFollowsByMetricId: detail ? { metric: true } : {},
+      availabilityByMetricId: Object.fromEntries(ids.map(id => [id, { status: "available", relationshipStatus: detail ? "available" : "not_requested", followerIdsStatus: detail ? "available" : "not_requested", followerCountStatus: detail ? "not_requested" : "available", diagnostics: [] }])) };
+  });
+  t.mock.method(registryApi, "fork", async () => {
+    calls.push("create");
+    return { attempted: 1, created: 1, existing: 0, failed: 0, pendingVisibility: 0,
+      results: [{ sourceMetricId: "metric", metricId: "new", status: "created", creationStatus: "created", requestedSpecification: {} }],
+      inventoryPatch: { version: 1, baseSnapshotId: source.snapshotId, snapshotId: "created", viewId: "create-view", revision: 2,
+        upserts: [{ definitionId: "definition-metric", metric: { ...source.definitions[0].metrics[0], metricId: "new", name: "New variant", isDefault: null } }], removedMetricIds: [], removedDefinitionIds: [] } };
+  });
+  await useRegistry.getState().load();
+  const renderer = await fixture.mount(true);
+  await act(async () => { renderer.root.findAll(node => node.type === "button" && node.children.includes("Expand all"))[0].props.onClick(); });
+  act(() => renderer.root.findByProps({ "aria-label": "Select displayed metrics" }).props.onChange({ target: { checked: true } }));
+  assert.deepEqual(calls, ["inventory", "counts:metric", "details:metric"]);
+  await act(async () => { await useRegistry.getState().fork({ version: 1, sourceMetricIds: ["metric"], timeframe: { key: "MTD" }, clauses: [] }, new Map()); });
+  assert.deepEqual(calls, ["inventory", "counts:metric", "details:metric", "create"]);
+  assert.ok(renderer.root.findAll(node => node.type === "button" && node.props["aria-expanded"] === true).length);
+  assert.ok(renderer.root.findAll(node => node.type === "span" && node.children.includes("1 selected")).length);
+  assert.equal(useRegistry.getState().followState?.followerCountsByMetricId.new, undefined);
+  assert.equal(useRegistry.getState().followState?.followerCountsByMetricId.metric, 7);
+});
+
+test("buffered pending deletion displays local cooldown inside its dialog and retains selection", async (t) => {
+  const now = Date.now() + 2_000;
+  t.mock.method(Date, "now", () => now);
+  const fixture = await setup(t, "pending-cooldown");
+  const source = inventory();
+  useRegistry.setState({ inventory: source, followState: unavailableFollowState(["metric"], "fixture"), loading: false,
+    deletePlan: { context: draft("pending-cooldown").context, snapshotId: source.snapshotId, metricIds: ["metric"], definitionIds: [], allowIncompleteInventory: false, previewFingerprint: "reviewed", warnings: [], targets: [] },
+    busy: "delete", cooldown: null });
+  let polls = 0;
+  t.mock.method(registryApi, "throttle", async () => { polls++; return { throttled: true, retryAt: 36_000, serverTime: 0, reason: "throttle" }; });
+  const renderer = await fixture.mount();
+  assert.equal(polls, 1, "banner appearance does not immediately repoll the local endpoint");
+  const dialogs = renderer.root.findAll(node => node.props.role === "dialog");
+  assert.equal(dialogs.length, 1);
+  assert.ok(dialogs[0].findAll(node => node.type === "p" && node.children.includes("Tableau is limiting requests. Waiting about 36 seconds.")).length);
+  assert.equal(renderer.root.findByProps({ "aria-label": "Delete definition metric" }).props.disabled, true);
+});
+
+
+test("selecting ordinary variants for deletion never broadens to a definition or loads followers", async (t) => {
+  const fixture = await setup(t, "variant-delete-selection");
+  const source = inventory(); source.definitions[0].metrics[0].isDefault = false;
+  useRegistry.setState({ inventory: source, followState: null, loading: false });
+  let previews = 0;
+  t.mock.method(registryApi, "followState", async () => { throw new Error("Selection and deletion review must not fetch relationships"); });
+  t.mock.method(pulseApi, "previewDelete", async (input: Parameters<typeof pulseApi.previewDelete>[0]) => {
+    previews++; assert.deepEqual(input.metricIds, ["metric"]); assert.deepEqual(input.definitionIds, []);
+    return { ...input, previewFingerprint: "exact", warnings: [], targets: [] };
+  });
+  const renderer = await fixture.mount();
+  act(() => renderer.root.findByProps({ "aria-label": "Select displayed metrics" }).props.onChange({ target: { checked: true } }));
+  await act(async () => { renderer.root.findAll(node => node.type === "button" && node.children.includes("Delete selected"))[0].props.onClick(); });
+  assert.equal(previews, 1);
+  assert.equal(useRegistry.getState().followState, null);
+});
+
+
+test("deferred expansion cannot inspect a new row when pre-create counts finish later", async (t) => {
+  const fixture = await setup(t, "deferred-expansion-create");
+  const source = { ...inventory(), revision: 1, viewId: "pending-count-view" };
+  const counts = deferred<Awaited<ReturnType<RegistryApi["followState"]>>>();
+  const detailIds: string[][] = [];
+  t.mock.method(registryApi, "inventory", async () => source);
+  t.mock.method(registryApi, "throttle", async () => ({ throttled: false, retryAt: null, serverTime: Date.now(), reason: null }));
+  t.mock.method(registryApi, "followState", async (ids: string[], detail = true) => {
+    if (!detail) return counts.promise;
+    detailIds.push(ids);
+    return { ...unavailableFollowState(ids, "fixture"), selectedGroupId: null };
+  });
+  t.mock.method(registryApi, "fork", async () => ({ attempted: 1, created: 1, existing: 0, failed: 0, pendingVisibility: 0,
+    results: [{ sourceMetricId: "metric", metricId: "new", status: "created", creationStatus: "created", requestedSpecification: {} }],
+    inventoryPatch: { version: 1, baseSnapshotId: source.snapshotId, snapshotId: "new-snapshot", viewId: source.viewId, revision: 2,
+      upserts: [{ definitionId: "definition-metric", metric: { ...source.definitions[0].metrics[0], metricId: "new" } }], removedMetricIds: [], removedDefinitionIds: [] } }));
+  const loading = useRegistry.getState().load();
+  await new Promise<void>(resolve => setImmediate(resolve));
+  const renderer = await fixture.mount(true);
+  act(() => renderer.root.findAll(node => node.type === "button" && node.children.includes("Expand all"))[0].props.onClick());
+  await act(async () => { await useRegistry.getState().fork({ version: 1, sourceMetricIds: ["metric"], clauses: [] }, new Map()); });
+  assert.deepEqual(detailIds, []);
+  const summary: Awaited<ReturnType<RegistryApi["followState"]>> = {
+    userFollowsByMetricId: {}, groupFollowsByMetricId: {},
+    userFollowerIdsByMetricId: {}, groupFollowerIdsByMetricId: {},
+    selectedGroupId: null, groupContextUnavailable: false, errors: [],
+    availabilityByMetricId: { metric: { status: "partial", relationshipStatus: "not_requested", followerIdsStatus: "not_requested", followerCountStatus: "available", diagnostics: [] } },
+    followerCountsByMetricId: { metric: 7 },
+  };
+  await act(async () => { counts.resolve(summary); await loading; });
+  assert.deepEqual(detailIds, [["metric"]]);
+  assert.equal(useRegistry.getState().followState?.availabilityByMetricId?.new?.relationshipStatus, "not_requested");
+});
+
+
+test("a fast sent throttle failure keeps its banner in results and disables another create", async (t) => {
+  const now = Date.now() + 6_000;
+  t.mock.method(Date, "now", () => now);
+  const fixture = await setup(t, "receipt-cooldown");
+  useRegistry.setState({ inventory: inventory(), loading: false, followState: null });
+  t.mock.method(registryApi, "throttle", async () => ({ throttled: false, retryAt: null, serverTime: now, reason: null }));
+  t.mock.method(registryApi, "fork", async () => decodeVariantResponse({ ok: false, status: 502 }, {
+    attempted: 1, created: 0, existing: 0, failed: 1, pendingVisibility: 0, sent: true,
+    throttle: { retryAt: now + 40_000, serverTime: now, reason: "throttle", sent: true },
+    results: [{ sourceMetricId: "metric", status: "failed", creationStatus: "failed", sent: true, requestedSpecification: {}, error: "HTTP 429" }],
+  }));
+  const renderer = await fixture.mount();
+  act(() => renderer.root.findByProps({ "aria-label": "Select displayed metrics" }).props.onChange({ target: { checked: true } }));
+  await act(async () => { await useRegistry.getState().fork({ version: 1, sourceMetricIds: ["metric"], clauses: [] }, new Map()); });
+  const dialog = renderer.root.findAll(node => node.props.role === "dialog")[0];
+  assert.ok(dialog.findAll(node => node.type === "p" && node.children.includes("Tableau is limiting requests. Waiting about 40 seconds.")).length);
+  assert.ok(renderer.root.findAll(node => node.type === "button" && node.children.includes("Create variants"))[0].props.disabled);
+  assert.ok(renderer.root.findAll(node => node.type === "span" && node.children.includes("1 selected")).length);
+  assert.equal(useRegistry.getState().busy, null);
+  assert.match(useRegistry.getState().results?.summary ?? "", /Tableau is limiting requests/);
 });

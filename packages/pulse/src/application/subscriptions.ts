@@ -44,6 +44,7 @@ import {
   type SubscriptionDependencies,
 } from "./registry-dependencies.js";
 import { pulseOperationErrorMessage } from '../pulse/operation-errors.js';
+import { subscriptionCoverage, invalidateSubscriptionCoverage } from './subscription-coverage.js';
 import { sessionCacheKey } from './session-cache-key.js';
 import { cachedUserGroupMemberships, clearUserGroupMemberships } from '../pulse/user-group-memberships.js';
 const PROVIDER_CONCURRENCY = 5;
@@ -66,7 +67,7 @@ export async function getFollowState(
   userId: string,
   userGroupIds: string[],
   metricIds: string[],
-  options: { selectedGroupId?: string; groupContextUnavailable?: boolean; detail?: boolean } = {},
+  options: { selectedGroupId?: string; groupContextUnavailable?: boolean; detail?: boolean; snapshotId?: string; continueCoverage?: boolean; personalOnly?: boolean } = {},
   dependencies: SubscriptionDependencies = defaultDependencies,
 ): Promise<FollowStateResult> {
   const uniqueMetricIds = canonicalIds(metricIds);
@@ -84,8 +85,8 @@ export async function getFollowState(
   };
   if (uniqueMetricIds.length === 0) return result;
 
-  let countResult: FollowerCountBatchResult;
-  try {
+  let countResult: FollowerCountBatchResult = { countsByMetricId: {}, errorsByMetricId: {} };
+  if (options.detail !== true) try {
     countResult = await withTableauOperation('follow_state', () => dependencies.followerCounts(session, uniqueMetricIds));
   } catch (error) {
     if (error instanceof TableauError && error.kind === "auth") throw error;
@@ -114,28 +115,9 @@ export async function getFollowState(
     return result;
   }
 
-  const subscriptionResults = await mapWithConcurrency(
-    uniqueMetricIds,
-    PROVIDER_CONCURRENCY,
-    async (metricId) => {
-      try {
-        return {
-          metricId,
-          subscriptions: await dependencies.listSubscriptions(
-            session,
-            metricId,
-          ),
-        };
-      } catch (error) {
-        if (error instanceof TableauError && error.kind === "auth") throw error;
-        return {
-          metricId,
-          subscriptions: null,
-          diagnostic: boundedProviderDiagnostic(error),
-        };
-      }
-    },
-  );
+  const loaded = await subscriptionCoverage(session, uniqueMetricIds, options, dependencies);
+  const subscriptionResults = loaded.entries;
+  result.coverage = loaded.coverage;
 
   const groupIds = new Set(
     selectedGroupId ? [selectedGroupId] : canonicalIds(userGroupIds),
@@ -169,19 +151,19 @@ export async function getFollowState(
           subscription.follower.type === "GROUP" &&
           groupIds.has(subscription.follower.id),
       );
-      if (userFollows || !hasUnknownFollowerType) {
+      if (userFollows || (entry.complete && !hasUnknownFollowerType)) {
         result.userFollowsByMetricId[entry.metricId] = userFollows;
       }
       if (
-        !result.groupContextUnavailable &&
-        (groupFollows || !hasUnknownFollowerType)
+        !options.personalOnly && !result.groupContextUnavailable &&
+        (groupFollows || (entry.complete && !hasUnknownFollowerType))
       ) {
         result.groupFollowsByMetricId[entry.metricId] = groupFollows;
       }
       // Distinct group followers for the row summary. This is independent of the
       // current user's group membership, so a group the user is not in still
       // counts, and the count updates as followers are added or removed.
-      result.groupFollowerIdsByMetricId[entry.metricId] = [
+      if (!options.personalOnly) result.groupFollowerIdsByMetricId[entry.metricId] = [
         ...new Set(
           entry.subscriptions
             .filter((subscription) => subscription.follower.type === "GROUP")
@@ -205,11 +187,11 @@ export async function getFollowState(
     const relationshipStatus: MetricAvailability["relationshipStatus"] =
       !subscriptionAvailable
         ? "unavailable"
-        : result.groupContextUnavailable || hasUnknownFollowerType
+        : result.groupContextUnavailable || hasUnknownFollowerType || !entry.complete || options.personalOnly
           ? "partial"
           : "available";
     const followerCountStatus: MetricAvailability["followerCountStatus"] =
-      countAvailable ? "available" : "unavailable";
+      countAvailable ? "available" : options.detail === true ? "not_requested" : "unavailable";
     const status: MetricAvailability["status"] =
       relationshipStatus === "available" && countAvailable
         ? "available"
@@ -219,7 +201,7 @@ export async function getFollowState(
     result.availabilityByMetricId[entry.metricId] = {
       status,
       relationshipStatus,
-      followerIdsStatus: !subscriptionAvailable ? "unavailable" : hasUnknownFollowerType ? "partial" : "available",
+      followerIdsStatus: !subscriptionAvailable ? "unavailable" : hasUnknownFollowerType || !entry.complete || options.personalOnly ? "partial" : "available",
       followerCountStatus,
       diagnostics,
     };
@@ -311,6 +293,7 @@ export async function followTargets(
   dependencies: SubscriptionDependencies = defaultDependencies,
 ): Promise<FollowTargetOperationResult[]> {
   const operations = canonicalFollowOperations(input.operations);
+  invalidateSubscriptionCoverage(session, operations.map(operation => operation.metricId));
   const results = new Map<string, FollowTargetOperationResult>();
   const subscriptionsByMetricId = new Map<
     string,
@@ -529,6 +512,7 @@ export async function unfollowTargets(
   dependencies: SubscriptionDependencies = defaultDependencies,
 ): Promise<FollowTargetOperationResult[]> {
   const operations = canonicalFollowOperations(input.operations);
+  invalidateSubscriptionCoverage(session, operations.map(operation => operation.metricId));
   const results: FollowTargetOperationResult[] = [];
   const subscriptionsByMetricId = new Map<string, SubscriptionRecord[]>();
   let terminated = false;

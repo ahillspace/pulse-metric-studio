@@ -4,7 +4,6 @@ import { runWithTableauTelemetry, type TableauSession } from '@pulse-metric-stud
 import { getExistingMetrics, clearInventoryCache } from '../application/inventory.js';
 import { PulseDimensionalForkService } from './dimensional-fork-service.js';
 import { getOrCreatePulseMetric, listSubscriptionsForMetric } from './pulse-client.js';
-import { reconcileMetricOwnership } from './reconciliation.js';
 
 const metricId = '10000000-0000-4000-8000-000000000001';
 const secondMetricId = '10000000-0000-4000-8000-000000000002';
@@ -62,24 +61,6 @@ test('inventory diagnostics report list completeness and attribute only hydratio
   assert.equal(listing?.usableSpecificationCount, 2);
   assert.equal(listing?.isDefaultCount, 1);
   assert.equal(records.filter((record) => record.event === 'tableau.attempt' && record.operation === 'inventory_get_metric').length, 1);
-});
-
-test('reconciliation diagnostics count real polls separately from reused ownership reads', async () => {
-  let listingCalls = 0;
-  globalThis.fetch = async (input) => {
-    const path = new URL(String(input)).pathname;
-    if (path.endsWith(`/metrics/${metricId}`)) return Response.json({ metric: { id: metricId, definition_id: definitionId, specification: {} } });
-    if (path.endsWith(`/definitions/${definitionId}`)) return Response.json({ definition: { metadata: { id: definitionId }, specification: { datasource: { id: 'datasource' } } } });
-    return Response.json({ metrics: ++listingCalls === 3 ? [{ id: metricId }] : [] });
-  };
-  const { records, result } = capture(() => reconcileMetricOwnership(session, { metricId, definitionId, datasourceLuid: 'datasource' }));
-  assert.equal((await result).attempts, 3);
-  const polls = records.filter((record) => record.event === 'tableau.reconciliation_poll');
-  assert.deepEqual(polls.map((record) => record.poll), [1, 2, 3]);
-  assert.ok(polls.every((record) => record.metricId === metricId));
-  const requests = records.filter((record) => record.event === 'tableau.attempt');
-  assert.equal(requests.length, 5);
-  assert.ok(requests.every((record) => record.operation === 'reconciliation'));
 });
 
 test('subscription diagnostics retain paging counts and metric identity without follower identities or query tokens', async () => {

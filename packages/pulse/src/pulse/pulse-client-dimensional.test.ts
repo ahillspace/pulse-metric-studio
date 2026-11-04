@@ -374,16 +374,36 @@ test('VDS distinct query rejects rows outside the captured one-column string-or-
 });
 
 
-test('follower inventory reads every subscription page and rejects repeated continuation', async () => {
-  let calls=0;
-  globalThis.fetch=async input=>{
-    const url=new URL(String(input));calls++;
+test('follower inventory reads every subscription page and stops repeated continuation after two sends', async () => {
+  let calls = 0;
+  globalThis.fetch = async input => {
+    const url = new URL(String(input)); calls++;
     return Response.json(url.searchParams.has('page_token')
-      ? {subscriptions:[{id:'second',follower:{group_id:'group'}}]}
-      : {subscriptions:[{id:'first',follower:{user_id:'user'}}],next_page_token:'more'});
+      ? { subscriptions: [{ id: 'second', follower: { group_id: 'group' } }] }
+      : { subscriptions: [{ id: 'first', follower: { user_id: 'user' } }], next_page_token: 'more' });
   };
-  const subscriptions=await listSubscriptionsForMetric(session,'metric');
-  assert.equal(subscriptions.length,2);assert.equal(calls,2);
-  globalThis.fetch=async()=>Response.json({subscriptions:[{id:'first',follower:{user_id:'user'}}],next_page_token:'repeat'});
-  await assert.rejects(()=>listSubscriptionsForMetric(session,'metric'),/continuation/i);
+  const subscriptions = await listSubscriptionsForMetric(session, 'metric');
+  assert.equal(subscriptions.length, 2); assert.equal(calls, 2);
+  calls = 0;
+  globalThis.fetch = async () => { calls++; return Response.json({ subscriptions: [{ id: 'first', follower: { user_id: 'user' } }], next_page_token: 'repeat' }); };
+  await assert.rejects(() => listSubscriptionsForMetric(session, 'metric'), /invalid continuation/i);
+  assert.equal(calls, 2, 'A repeated token stops before a third provider send.');
+});
+
+test('follower inventory rejects an empty continuation page without another send', async () => {
+  let calls = 0;
+  globalThis.fetch = async () => { calls++; return Response.json({ subscriptions: [], next_page_token: 'more' }); };
+  await assert.rejects(() => listSubscriptionsForMetric(session, 'metric'), /invalid continuation/i);
+  assert.equal(calls, 1);
+});
+
+test('follower inventory distinguishes local page and record limits from invalid continuation', async () => {
+  let calls = 0;
+  globalThis.fetch = async () => { calls++; return Response.json({ subscriptions: [{ id: `subscription-${calls}`, follower: { user_id: 'user' } }], next_page_token: `page-${calls}` }); };
+  await assert.rejects(() => listSubscriptionsForMetric(session, 'metric'), /local page limit/i);
+  assert.equal(calls, 20, 'The local page bound prevents a twenty-first provider send.');
+  calls = 0;
+  globalThis.fetch = async () => { calls++; return Response.json({ subscriptions: Array.from({ length: 2000 }, (_, index) => ({ id: `subscription-${index}`, follower: { user_id: `user-${index}` } })), next_page_token: 'more' }); };
+  await assert.rejects(() => listSubscriptionsForMetric(session, 'metric'), /local record limit/i);
+  assert.equal(calls, 1, 'A provider page that reaches the record bound prevents another send.');
 });

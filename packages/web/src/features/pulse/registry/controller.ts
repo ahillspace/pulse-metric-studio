@@ -5,6 +5,8 @@ import type {
   PulseFollowersDetail,
   PulseFollowOperation,
   PulseInventoryResponse,
+  PulseInventoryPatch,
+  TableauThrottleMetadata,
   PulseVariantRequestV1,
 } from "@pulse-metric-studio/shared";
 import { registryApi, type RegistryApi } from "../api/registry";
@@ -13,7 +15,8 @@ import {
   forkRegistryActionItem,
   type RegistryActionResults,
 } from "../registry-actions";
-import { mergeFollowStates, replaceFollowMetrics, selectFollowMetrics, unavailableFollowState } from "../follow-state";
+import { mergeFollowStates, replaceFollowDetails, selectFollowMetrics, unavailableFollowState } from "../follow-state";
+import { applyInventoryPatch } from "./inventory-patch";
 import type { FollowState } from "./view-types";
 import {
   reconcileFollowTargetResults,
@@ -38,6 +41,8 @@ interface RegistryState {
   results: RegistryActionResults | null;
   outcomes: Record<string, RegistryActionResults>;
   createdMetricIds: string[];
+  cooldown: { retryAt: number; remainingSeconds: number } | null;
+  pollCooldown(): Promise<void>;
   deletePlan: PulseDeletePlan | null;
   deleteLoading: boolean;
   deleteError: string | null;
@@ -76,6 +81,7 @@ interface RegistryState {
   loadTargets: (refresh?: boolean) => ReturnType<RegistryApi["followTargets"]>;
   invalidateTargets: (owner?: SessionOwner | null) => void;
   ensureFollowState: (metricIds: string[]) => Promise<void>;
+  loadMoreFollowState: (metricIds: string[]) => Promise<void>;
   /** Reads a fresh, selection-scoped identity snapshot without replacing inventory state. */
   refreshFollowState: (metricIds: string[]) => Promise<FollowState | null>;
   loadFollowers: (
@@ -91,6 +97,7 @@ export function createRegistryController(
   transport: RegistryApi = registryApi,
   deletion: Pick<PulseApi, "previewDelete" | "delete"> = pulseApi,
 ) {
+  const idsFor = (inventory: PulseInventoryResponse) => inventory.definitions.flatMap(definition => definition.metrics.map(metric => metric.metricId));
   type MetricEvidence = { version: number; state: FollowState };
   type DetailScope = { versions: Map<string, number>; evidence: Map<string, MetricEvidence>; pending: Map<string, Promise<MetricEvidence | null>> };
   type InventoryIdentity = { detailScope: DetailScope };
@@ -98,6 +105,7 @@ export function createRegistryController(
   type CachedInventory = { inventory: PulseInventoryResponse; followState: FollowState | null; loadedAt: number; operation: InventoryIdentity };
   const cache = new Map<string, CachedInventory>();
   const pending = new Map<string, InventoryRead>();
+  const patches = new Map<string, PulseInventoryPatch[]>();
   const detailScopes = new Map<string, DetailScope>();
   let activeDetailRequests = 0;
   const waitingDetailRequests: Array<() => void> = [];
@@ -119,6 +127,9 @@ export function createRegistryController(
     cache.set(cacheKey, value);
     while (cache.size > 8) cache.delete(cache.keys().next().value!);
   };
+  const cooldownReads = new Map<string, number>();
+  const cooldownVersions = new Map<string, number>();
+  const cooldownPollRequests = new Map<string, number>();
   let generation = 0;
   let inventoryRequest = 0;
   let deleteRequest = 0;
@@ -137,6 +148,16 @@ export function createRegistryController(
     const current = (scope: ReturnType<typeof capture>) =>
       scope.generation === generation &&
       scope.key === activeKey();
+    const captureThrottle = (scope: ReturnType<typeof capture>, throttle: TableauThrottleMetadata | undefined) => {
+      if (!throttle || !current(scope)) return;
+      const ownerKey = sessionOwnerKey(scope.owner);
+      cooldownVersions.set(ownerKey, (cooldownVersions.get(ownerKey) ?? 0) + 1);
+      const retryAt = Math.max(get().cooldown?.retryAt ?? 0, throttle.retryAt);
+      set({ cooldown: { retryAt, remainingSeconds: Math.max(0, Math.ceil((retryAt - throttle.serverTime) / 1000)) } });
+    };
+    const captureCooldown = (scope: ReturnType<typeof capture>, error: unknown) => {
+      if (error instanceof PulseApiError) captureThrottle(scope, error.throttle);
+    };
     const record = (
       scope: ReturnType<typeof capture>,
       results: RegistryActionResults,
@@ -145,6 +166,29 @@ export function createRegistryController(
         outcomes: { ...state.outcomes, [scope.key]: results },
         ...(current(scope) ? { results } : {}),
       }));
+    const applyPatch = (scope: ReturnType<typeof capture>, patch: PulseInventoryPatch | undefined) => {
+      if (!patch) return;
+      const journal = patches.get(scope.key) ?? [];
+      if (!journal.some(entry => entry.snapshotId === patch.snapshotId)) journal.push(patch);
+      journal.sort((a, b) => a.revision - b.revision);
+      patches.set(scope.key, journal);
+      const addMissingEvidence = (state: FollowState | null) => {
+        if (!state) state = { userFollowsByMetricId: {}, groupFollowsByMetricId: {}, followerCountsByMetricId: {}, errors: [], availabilityByMetricId: {} };
+        const availabilityByMetricId = { ...state.availabilityByMetricId };
+        for (const { metric } of patch.upserts) if (!availabilityByMetricId[metric.metricId]) availabilityByMetricId[metric.metricId] = {
+          status: "partial", relationshipStatus: "not_requested", followerIdsStatus: "not_requested", followerCountStatus: "not_requested", diagnostics: [],
+        };
+        return { ...state, availabilityByMetricId };
+      };
+      const saved = cache.get(scope.key);
+      if (saved) retain(scope.key, { ...saved, inventory: applyInventoryPatch(saved.inventory, patch), followState: addMissingEvidence(saved.followState) });
+      const read = pending.get(scope.key);
+      if (read?.inventory) read.inventory = applyInventoryPatch(read.inventory, patch);
+      if (current(scope) && get().inventory) set({ inventory: applyInventoryPatch(get().inventory!, patch), followState: addMissingEvidence(get().followState) });
+    };
+    const rebaseInventory = (scopeKey: string, inventory: PulseInventoryResponse) =>
+      (patches.get(scopeKey) ?? []).filter(patch => patch.revision > (inventory.revision ?? 0))
+        .reduce(applyInventoryPatch, inventory);
     const pruneDetailScopes = () => {
       for (const [scopeKey, reads] of detailScopes) {
         if (detailScopes.size <= 8) break;
@@ -180,9 +224,9 @@ export function createRegistryController(
           ids.push(id);
         }
       }
-      return ids.length ? replaceFollowMetrics(base, mergeFollowStates(states), ids) : base;
+      return ids.length ? replaceFollowDetails(base, mergeFollowStates(states), ids) : base;
     };
-    const readFollowState = async (scope: ReturnType<typeof capture>, metricIds: string[]) => {
+    const readFollowState = async (scope: ReturnType<typeof capture>, metricIds: string[], refreshCounts = false, continueCoverage = false) => {
       if (!scope.context || sessionOwnerKey(scope.owner) !== sessionOwnerKey(get().owner)) return null;
       const ids = [...new Set(metricIds)];
       const reads = detailScopeFor(scope.key);
@@ -193,7 +237,19 @@ export function createRegistryController(
         const request = detailRequest(async () => {
           const valid = batch.filter(id => evidenceCurrent(scope, reads, id, versions.get(id)!));
           if (!valid.length) return null;
-          try { return await transport.followState(valid, true, scope.owner); }
+          try {
+            const previous = current(scope) ? get().followState : cache.get(scope.key)?.followState;
+            const missingCounts = valid.filter(id => refreshCounts || previous?.availabilityByMetricId?.[id]?.followerCountStatus === "not_requested");
+            const [details, counts] = await Promise.all([
+              transport.followState(valid, true, scope.owner, { snapshotId: (current(scope) ? get().inventory : cache.get(scope.key)?.inventory)?.snapshotId, continueCoverage }).catch(error => {
+                const unavailable = unavailableFollowState(valid, errorMessage(error));
+                for (const availability of Object.values(unavailable.availabilityByMetricId ?? {})) availability.followerCountStatus = "not_requested";
+                return unavailable;
+              }),
+              missingCounts.length ? transport.followState(missingCounts, false, scope.owner).catch(error => unavailableFollowState(missingCounts, errorMessage(error))) : Promise.resolve(null),
+            ]);
+            return counts ? replaceFollowDetails(counts, details, valid) : details;
+          }
           catch (error) { return unavailableFollowState(valid, errorMessage(error)); }
         });
         for (const id of batch) {
@@ -226,9 +282,9 @@ export function createRegistryController(
         for (const { id, evidence } of accepted) operation.details.set(id, evidence);
       const saved = cache.get(scope.key);
       if (saved?.operation.detailScope === reads)
-        retain(scope.key, { ...saved, followState: replaceFollowMetrics(saved.followState, result, validIds) });
+        retain(scope.key, { ...saved, followState: replaceFollowDetails(saved.followState, result, validIds) });
       // Every caller consumes its shared result with its own current navigation scope.
-      if (current(scope)) set({ followState: replaceFollowMetrics(get().followState, result, validIds) });
+      if (current(scope)) set({ followState: replaceFollowDetails(get().followState, result, validIds) });
       return accepted.length === ids.length ? result : null;
     };
     return {
@@ -247,6 +303,24 @@ export function createRegistryController(
       busy: null,
       results: null,
       outcomes: {},
+      cooldown: null,
+      async pollCooldown() {
+        const scope = capture();
+        try {
+          const ownerKey = sessionOwnerKey(scope.owner);
+          const lastRead = cooldownReads.get(ownerKey);
+          if (lastRead !== undefined && Date.now() - lastRead < 1000) return;
+          cooldownReads.set(ownerKey, Date.now());
+          if (!transport.throttle) return;
+          const version = cooldownVersions.get(ownerKey) ?? 0;
+          const request = (cooldownPollRequests.get(ownerKey) ?? 0) + 1;
+          cooldownPollRequests.set(ownerKey, request);
+          const status = await transport.throttle(scope.owner);
+          if (!current(scope) || version !== (cooldownVersions.get(ownerKey) ?? 0) || request !== cooldownPollRequests.get(ownerKey)) return;
+          const remainingSeconds = status.retryAt === null ? 0 : Math.max(0, Math.ceil((status.retryAt - status.serverTime) / 1000));
+          set({ cooldown: status.throttled && status.retryAt !== null ? { retryAt: status.retryAt, remainingSeconds } : null });
+        } catch { /* Status failure must not replace mutation receipts. */ }
+      },
       createdMetricIds: [],
       deletePlan: null,
       deleteLoading: false,
@@ -274,6 +348,7 @@ export function createRegistryController(
           error: null,
           busy: null,
           results: get().outcomes[key(context, owner)] ?? null,
+          cooldown: sessionOwnerKey(owner) === sessionOwnerKey(get().owner) ? get().cooldown : null,
           createdMetricIds: [],
           deletePlan: null,
           deleteLoading: false,
@@ -323,8 +398,14 @@ export function createRegistryController(
           operation = { identity: { detailScope }, promise: undefined!, details: new Map(), detailScope };
           const read = operation;
           read.promise = (async (): Promise<CachedInventory> => {
-            const inventory = await transport.inventory(scope.context!, scope.owner, options);
-            const result = (followState: FollowState | null): CachedInventory => ({ inventory, followState, loadedAt: Date.now(), operation: read.identity });
+            const inventory = rebaseInventory(scope.key, await transport.inventory(scope.context!, scope.owner, options));
+            const result = (followState: FollowState | null): CachedInventory => {
+              const rebased = rebaseInventory(scope.key, inventory);
+              const knownIds = new Set(idsFor(inventory));
+              const addedIds = idsFor(rebased).filter(id => !knownIds.has(id));
+              const retained = current(scope) ? get().followState : cache.get(scope.key)?.followState;
+              return { inventory: rebased, followState: retained && addedIds.length ? mergeFollowStates([...(followState ? [followState] : []), selectFollowMetrics(retained, addedIds)]) : followState, loadedAt: Date.now(), operation: read.identity };
+            };
             if (sessionOwnerKey(scope.owner) !== sessionOwnerKey(get().owner)) return result(null);
             read.inventory = inventory;
             if (current(scope) && pending.get(scope.key) === read)
@@ -374,10 +455,12 @@ export function createRegistryController(
       },
       async fork(request, labels) {
         const scope = capture();
-        if (!scope.context || get().busy || !get().mutationAvailable) return;
+        if (!scope.context || get().busy || !get().mutationAvailable || get().cooldown) return;
         set({ busy: "fork", error: null });
         try {
-          const summary = await transport.fork(scope.context, request, scope.owner);
+          const summary = await transport.fork(scope.context, request, scope.owner, { snapshotId: get().inventory?.snapshotId, sourceContextId: request.sourceContextId });
+          captureThrottle(scope, summary.throttle);
+          applyPatch(scope, summary.inventoryPatch);
           if (current(scope))
             set((state) => ({
               createdMetricIds: [
@@ -414,6 +497,7 @@ export function createRegistryController(
 
           }
         } catch (error) {
+          captureCooldown(scope, error);
           record(scope, {
             kind: "fork",
             title: "Variant results",
@@ -422,13 +506,12 @@ export function createRegistryController(
               key: `fork:${metricId}`,
               metricId,
               metricLabel: labels.get(metricId) ?? metricId,
-              status: "failed",
-              creationStatus: "unknown",
-              detail: `The request did not return a receipt. Inspect Tableau before retrying. ${errorMessage(error)}`,
+              status: error instanceof PulseApiError && error.status === 429 && error.throttle?.sent !== true ? "not_attempted" : "unknown",
+              creationStatus: error instanceof PulseApiError && error.status === 429 && error.throttle?.sent !== true ? "not_attempted" : "unknown",
+              detail: error instanceof PulseApiError && error.status === 429 && error.throttle?.sent !== true ? `The request was not sent. ${errorMessage(error)}` : `The request did not return a receipt. Inspect Tableau before retrying. ${errorMessage(error)}`,
             })),
           });
         } finally {
-          await get().invalidate(scope.context, scope.owner);
           if (current(scope)) set({ busy: null });
         }
       },
@@ -438,7 +521,7 @@ export function createRegistryController(
         allowIncompleteInventory = false,
       ) {
         const scope = capture();
-        if (!scope.context || get().busy || !get().mutationAvailable) return;
+        if (!scope.context || get().busy || !get().mutationAvailable || get().cooldown) return;
         const request = ++deleteRequest;
         deleteBatches = [];
         deleteSelection = { metricIds, definitionIds };
@@ -539,7 +622,7 @@ export function createRegistryController(
       async executeDelete() {
         const scope = capture();
         const plan = get().deletePlan;
-        if (!scope.context || !plan || get().busy || !get().mutationAvailable) return;
+        if (!scope.context || !plan || get().busy || !get().mutationAvailable || get().cooldown) return;
         set({ busy: "delete", deleteError: null });
         const batches = [...deleteBatches];
         const outcomes: Awaited<ReturnType<PulseApi["delete"]>>["outcomes"] =
@@ -566,6 +649,8 @@ export function createRegistryController(
               previewFingerprint: batch.previewFingerprint,
               allowIncompleteInventory: batch.allowIncompleteInventory,
             });
+            captureThrottle(scope, response.throttle);
+            applyPatch(scope, response.inventoryPatch);
             outcomes.push(...response.outcomes);
             if (response.failures.length) {
               failure = response.failures.join(" ");
@@ -573,15 +658,16 @@ export function createRegistryController(
             }
           }
         } catch (error) {
+          captureCooldown(scope, error);
           failure = errorMessage(error);
           if (
             error instanceof PulseApiError &&
-            [400, 401, 409, 422].includes(error.status)
+            ([400, 401, 409, 422].includes(error.status) || (error.status === 429 && error.throttle?.sent !== true))
           ) {
             activeBatch?.targets.forEach((target) =>
               sent.delete(`${target.kind}:${target.id}`),
             );
-            if (!outcomes.length) {
+            if (!outcomes.length && error.status !== 429) {
               deleteBatches = [];
               if (current(scope))
                 set({
@@ -644,8 +730,7 @@ export function createRegistryController(
           if (current(scope)) {
             deleteBatches = [];
             set({ deletePlan: null, deleteError: null });
-            await get().invalidate(scope.context, scope.owner);
-          } else cache.delete(scope.key);
+          }
         } catch (error) {
           if (current(scope))
             set({ deletePlan: null, ...(resultsRecorded
@@ -662,7 +747,7 @@ export function createRegistryController(
       },
       async follow(kind, operations, metrics, targets) {
         const scope = capture();
-        if (!scope.context || get().busy || !get().mutationAvailable) return operations;
+        if (!scope.context || get().busy || !get().mutationAvailable || get().cooldown) return operations;
         set({ busy: kind });
         const labels = {
           metricLabels: new Map(
@@ -678,6 +763,7 @@ export function createRegistryController(
         const results: Awaited<ReturnType<RegistryApi["follow"]>>["results"] =
           [];
         let sentCount = 0;
+        let activeBatchStart = 0;
         let failure: string | undefined;
         try {
           for (let index = 0; index < operations.length; index += 200) {
@@ -686,12 +772,14 @@ export function createRegistryController(
                 "The connection or datasource changed. Remaining subscriptions were not sent.";
               break;
             }
+            activeBatchStart = index;
             sentCount = index + Math.min(200, operations.length - index);
             const response = await transport[kind](
               scope.context,
               operations.slice(index, index + 200),
               scope.owner,
             );
+            captureThrottle(scope, response.throttle);
             results.push(...response.results);
             if (response.terminated || response.stopped) {
               failure = response.terminated
@@ -701,6 +789,8 @@ export function createRegistryController(
             }
           }
         } catch (error) {
+          captureCooldown(scope, error);
+          if (error instanceof PulseApiError && error.status === 429 && error.throttle?.sent !== true) sentCount = activeBatchStart;
           failure = errorMessage(error);
         }
         const returnedPairs = new Set(
@@ -745,7 +835,7 @@ export function createRegistryController(
         if (sentCount > 0) {
           const ids = operations.slice(0, sentCount).map(operation => operation.metricId);
           supersedeDetails(scope, ids);
-          await readFollowState(scope, ids);
+          await readFollowState(scope, ids, true);
         }
         if (current(scope)) set({ busy: null });
         return reconciled.retryOperations;
@@ -780,10 +870,18 @@ export function createRegistryController(
         });
         if (ids.length) await readFollowState(capture(), ids);
       },
+      async loadMoreFollowState(metricIds) {
+        const scope = capture();
+        if (!metricIds.length || get().followLoading) return;
+        supersedeDetails(scope, metricIds);
+        set({ followLoading: true });
+        try { await readFollowState(scope, metricIds, false, true); }
+        finally { if (current(scope)) set({ followLoading: false }); }
+      },
       async refreshFollowState(metricIds) {
         const scope = capture();
         supersedeDetails(scope, metricIds);
-        const result = await readFollowState(scope, metricIds);
+        const result = await readFollowState(scope, metricIds, true);
         return current(scope) ? result : null;
       },
       loadFollowers: (metricIds) => transport.followers(metricIds, get().owner),

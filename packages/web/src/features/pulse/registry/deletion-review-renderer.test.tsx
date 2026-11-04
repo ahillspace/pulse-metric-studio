@@ -116,7 +116,7 @@ test("denied cached deletion leaves one usable results dialog without reopening 
   act(() => view.root.findAll((node) => node.type === "button" && node.children.includes("Done"))[0].props.onClick());
   act(() => view.unmount());
   assert.doesNotMatch(render(), /role="dialog"|Review deletion|Delete results/);
-  assert.deepEqual(calls, ["inventory", "counts", "cached-preview", "DELETE cached-month", "inventory", "counts"], "selected deletion and one final refresh only");
+  assert.deepEqual(calls, ["inventory", "counts", "cached-preview", "DELETE cached-month"], "selected deletion does not reload inventory or counts");
 });
 
 test("Manager deletion review uses fresh names for renamed resources and a sibling absent from cached inventory", (t) => {

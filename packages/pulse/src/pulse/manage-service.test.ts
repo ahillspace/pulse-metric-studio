@@ -10,7 +10,7 @@ function clearPulseManageCaches(): void { clearInventoryCache(); clearSubscripti
 
 
 import { PulseForkPlanService, type PulseForkPlanDependencies } from './fork-plan-service.js';
-type PulseManageDependencies = PulseRegistryDependencies & Pick<PulseForkPlanDependencies, 'getDefinition' | 'getOrCreate' | 'reconcile'>;
+type PulseManageDependencies = PulseRegistryDependencies & Pick<PulseForkPlanDependencies, 'getDefinition' | 'getOrCreate'>;
 
 async function forkMetrics(session: TableauSession, items: Array<{ sourceMetricId: string; timeframeKey: string }>, deps: PulseManageDependencies) {
   const result = await new PulseForkPlanService({ ...deps, getCatalog: async () => { throw new Error('Unexpected catalog lookup'); }, queryValues: async () => [] }).forkMetrics(session, { version: 1, sourceMetricIds: items.map((item) => item.sourceMetricId), timeframe: { key: items[0]!.timeframeKey }, clauses: [] });
@@ -37,14 +37,6 @@ function dependencies(overrides: Partial<PulseManageDependencies> = {}): PulseMa
     }),
     getDefinition: async () => ({ specification: { datasource: { id: 'datasource-1' } } }),
     getOrCreate: async () => ({ metricId: 'fork-1', created: true }),
-    reconcile: async (_session, input) => ({
-      metricId: input.metricId,
-      status: 'visible',
-      exactMetricResolved: true,
-      inventoryVisible: true,
-      ownershipVerified: true,
-      attempts: 1,
-    }),
     listSubscriptions: async () => [],
     createGroupSubscriptions: async (_session, items) => items.map((item) => ({
       metricId: item.metricId,
@@ -99,9 +91,9 @@ test('date forking clones the exact source and replaces only measurement_period'
 
   assert.equal(createCalls, 1);
   assert.equal(outcomes.length, 1);
-  assert.equal(outcomes[0]?.status, 'visible');
+  assert.equal(outcomes[0]?.status, 'existing');
   assert.equal(outcomes[0]?.creationStatus, 'existing');
-  assert.equal(outcomes[0]?.reconciliationStatus, 'visible');
+  assert.equal(outcomes[0]?.metric?.isDefault, null);
   assert.deepEqual(requests[0], {
     definitionId: 'definition-1',
     specification: {
@@ -140,25 +132,16 @@ test('date forking preserves bounded structured provider diagnostics', async () 
   assert.ok((outcomes[0]?.error?.length ?? 0) <= 300);
 });
 
-test('date forking never reports a reconciliation failure as success', async () => {
+test('date forking rejects conflicting response ownership', async () => {
   const outcomes = await forkMetrics(session, [
     { sourceMetricId: 'metric-1', timeframeKey: 'LAST_30_DAYS' },
   ], dependencies({
-    getOrCreate: async () => ({ metricId: 'fork-wrong-owner', created: true }),
-    reconcile: async (_session, input) => ({
-      metricId: input.metricId,
-      status: 'ownership_mismatch',
-      exactMetricResolved: true,
-      inventoryVisible: false,
-      ownershipVerified: false,
-      attempts: 1,
-      diagnostic: { message: 'Metric belongs to another definition.' },
-    }),
+    getOrCreate: async () => ({ metricId: 'fork-wrong-owner', created: true, raw: { metric: { id: 'fork-wrong-owner', definition_id: 'another-definition' } } }),
   }));
   assert.equal(outcomes[0]?.status, 'ownership_mismatch');
   assert.equal(outcomes[0]?.creationStatus, 'created');
-  assert.equal(outcomes[0]?.reconciliationStatus, 'ownership_mismatch');
-  assert.match(outcomes[0]?.error ?? '', /another definition/);
+  assert.equal(outcomes[0]?.metric, undefined);
+  assert.match(outcomes[0]?.error ?? '', /conflicting metric ownership/);
 });
 
 test('timeframe payloads use singular last_x_period and reject invalid custom periods', () => {
@@ -296,7 +279,7 @@ test('site-wide definition inventory uses a bounded short-lived cache', async ()
   clearPulseManageCaches();
 });
 
-test('deleting an exact metric invalidates the cached inventory so it is not shown as still present', async () => {
+test('deleting an exact metric preserves cached definition facts', async () => {
   clearPulseManageCaches();
   let listCalls = 0;
   const deps = dependencies({
@@ -323,7 +306,7 @@ test('deleting an exact metric invalidates the cached inventory so it is not sho
   assert.deepEqual(result.failures, []);
   // The metric-only delete must have busted the cache, so the next read refetches.
   await cachedDefinitionInventory(session, deps);
-  assert.equal(listCalls, 2);
+  assert.equal(listCalls, 1);
   clearPulseManageCaches();
 });
 

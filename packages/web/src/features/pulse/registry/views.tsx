@@ -1,3 +1,4 @@
+import { CooldownBanner } from "./CooldownBanner";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   PulseDefinitionNode as DefinitionNode,
@@ -314,9 +315,11 @@ export function registryResultHeadlines(
 }
 
 export function RegistryResultsModal({
+  cooldown,
   results,
   onDismiss,
 }: {
+  cooldown?: import("./CooldownBanner").RegistryCooldown | null;
   results: RegistryActionResults;
   onDismiss: () => void;
 }) {
@@ -337,6 +340,7 @@ export function RegistryResultsModal({
         </button>
       }
     >
+      <CooldownBanner cooldown={cooldown} />
       {results.summary && (
         <p className="warning-banner" role="alert">
           {results.summary}

@@ -688,7 +688,7 @@ test('fork registry results preserve creation, reconciliation, and requested spe
     reconciliationStatus: 'pending_visibility',
     requestedSpecification,
   }, 'Sales', 0);
-  assert.equal(item.status, 'pending');
+  assert.equal(item.status, 'existing');
   assert.equal(item.creationStatus, 'existing');
   assert.equal(item.reconciliationStatus, 'pending_visibility');
   assert.equal(item.requestedSpecification, requestedSpecification);

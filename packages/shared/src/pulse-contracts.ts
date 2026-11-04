@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { TableauThrottleMetadataSchema } from './tableau-throttle.js';
 
 // App resource guards, not undocumented Tableau field limits.
 export const PULSE_TEXT_LIMITS = { name: 32768, description: 262144, audience: 32768, conversation: 1048576 } as const;
@@ -298,6 +299,8 @@ export type PulseDeletePlan = z.infer<typeof PulseDeletePlanSchema>;
 export const PulseVariantRequestV1Schema = z.object({
   version: z.literal(1),
   sourceMetricIds: z.array(id),
+  snapshotId: id.optional(),
+  sourceContextId: id.optional(),
   timeframe: z
     .object({ key: id, customDays: z.number().int().positive().optional() })
     .optional(),
@@ -359,6 +362,8 @@ export const PulseInventoryFailureSchema = z.object({
 });
 export const PulseInventoryResponseSchema = z.object({
   snapshotId: id,
+  viewId: id.optional(),
+  revision: z.number().int().nonnegative().optional(),
   definitions: z.array(PulseDefinitionNodeSchema),
   totalScanned: z.number().int(),
   truncated: z.boolean(),
@@ -369,8 +374,20 @@ export type PulseDefinitionNode = z.infer<typeof PulseDefinitionNodeSchema>;
 export type PulseInventoryResponse = z.infer<
   typeof PulseInventoryResponseSchema
 >;
+export const PulseInventoryPatchSchema = z.object({
+  version: z.literal(1),
+  baseSnapshotId: id,
+  snapshotId: id,
+  viewId: id,
+  revision: z.number().int().nonnegative(),
+  upserts: z.array(z.object({ definitionId: id, metric: PulseMetricVariantSchema })),
+  removedMetricIds: z.array(id),
+  removedDefinitionIds: z.array(id),
+});
+export type PulseInventoryPatch = z.infer<typeof PulseInventoryPatchSchema>;
 const availability = z.enum(['available', 'partial', 'unavailable']);
 export const PulseFollowStateSchema = z.object({
+  coverage: z.object({ status: z.enum(['available', 'partial', 'unavailable']), canLoadMore: z.boolean() }).optional(),
   userFollowsByMetricId: z.record(z.boolean()),
   groupFollowsByMetricId: z.record(z.boolean()),
   groupFollowerIdsByMetricId: z.record(z.array(z.string())),
@@ -381,7 +398,7 @@ export const PulseFollowStateSchema = z.object({
       status: availability,
       relationshipStatus: z.enum(['available', 'partial', 'unavailable', 'not_requested']),
       followerIdsStatus: z.enum(['available', 'partial', 'unavailable', 'not_requested']).optional(),
-      followerCountStatus: z.enum(['available', 'unavailable']),
+      followerCountStatus: z.enum(['available', 'unavailable', 'not_requested']),
       diagnostics: z.array(PulseProviderDiagnosticSchema),
     }),
   ),
@@ -453,7 +470,11 @@ export type PulseFollowOperationResult = z.infer<
 >;
 export type PulseFollowersDetail = z.infer<typeof PulseFollowersDetailSchema>;
 export const PulseVariantResultSchema = z.object({
+  sent: z.boolean().optional(),
+  throttle: TableauThrottleMetadataSchema.optional(),
   sourceMetricId: id,
+  definitionId: id.optional(),
+  metric: PulseMetricVariantSchema.optional(),
   sharedWithSourceMetricId: id.optional(),
   status: z.enum([
     'created',
@@ -474,6 +495,9 @@ export const PulseVariantResultSchema = z.object({
   error: z.string().optional(),
 });
 export const PulseVariantSummarySchema = z.object({
+  sent: z.boolean().optional(),
+  throttle: TableauThrottleMetadataSchema.optional(),
+  inventoryPatch: PulseInventoryPatchSchema.optional(),
   terminated: z.boolean().optional(),
   notAttempted: z.number().int().optional(),
   attempted: z.number().int(),
@@ -486,6 +510,9 @@ export const PulseVariantSummarySchema = z.object({
 export type PulseVariantResult = z.infer<typeof PulseVariantResultSchema>;
 export type PulseVariantSummary = z.infer<typeof PulseVariantSummarySchema>;
 export const PulseDeleteResultSchema = z.object({
+  sent: z.boolean().optional(),
+  throttle: TableauThrottleMetadataSchema.optional(),
+  inventoryPatch: PulseInventoryPatchSchema.optional(),
   definitionsDeleted: z.number().int(),
   metricsDeleted: z.number().int(),
   failures: z.array(z.string()),
@@ -493,6 +520,8 @@ export const PulseDeleteResultSchema = z.object({
     z.object({
       definitionId: z.string().optional(),
       metricId: z.string().optional(),
+      sent: z.boolean().optional(),
+      throttle: TableauThrottleMetadataSchema.optional(),
       status: z.enum(['deleted', 'already_absent', 'failed', 'unknown', 'not_attempted']),
       error: z.string().optional(),
     }),

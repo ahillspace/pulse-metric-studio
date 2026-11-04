@@ -285,6 +285,7 @@ mod tests {
         for path in [
             "/api/pulse/drafts",
             "/api/tableau/status",
+            "/api/tableau/throttle",
             "/api/datasources/id/fields",
             "/api/llm/profiles",
             "/api/pulse/dimensions/a%20b/values?q=x%2Fy",

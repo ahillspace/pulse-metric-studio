@@ -4,6 +4,7 @@ import type { PulseDeleteResult } from "@pulse-metric-studio/shared";
 import { pulseOperationErrorMessage } from '../pulse/operation-errors.js';
 import { deleteDefinition, deleteMetric } from "../pulse/pulse-client.js";
 
+import { mutationMetadata, latestThrottle } from './mutation-metadata.js';
 import { invalidatePulseDefinitionInventory } from "./inventory.js";
 const METRIC_DELETE_GROUP_SIZE = 5;
 export interface DeletePlanEntry {
@@ -29,15 +30,16 @@ export async function executeDeletes(
   const outcomes: DeleteOutcome[] = [];
   let definitionsDeleted = 0;
   let stopped = false;
-  let uncertain = false;
-  const classifyFailure = (error: unknown): "failed" | "unknown" => {
+
+  const classifyFailure = (error: unknown): "failed" | "unknown" | "not_attempted" => {
+    if (error && typeof error === "object" && "sent" in error && error.sent === false) { stopped = true; return "not_attempted"; }
     const unknown =
       !(error instanceof TableauError) ||
       error.kind === "network" ||
       error.status >= 500;
     if (unknown || (error instanceof TableauError && error.kind === "auth"))
       stopped = true;
-    uncertain ||= unknown;
+
     return unknown ? "unknown" : "failed";
   };
   const deletingDefinitionIds = new Set(
@@ -51,6 +53,7 @@ export async function executeDeletes(
       outcomes.push({
         definitionId: entry.definitionId!,
         status: "not_attempted",
+        sent: false,
         error: "The deletion batch stopped before this resource was sent.",
       });
       continue;
@@ -58,19 +61,21 @@ export async function executeDeletes(
     try {
       await deps.deleteDefinition(session, entry.definitionId!);
       definitionsDeleted++;
-      outcomes.push({ definitionId: entry.definitionId!, status: "deleted" });
+      outcomes.push({ definitionId: entry.definitionId!, status: "deleted", sent: true });
     } catch (error) {
       if (error instanceof TableauError && error.status === 404) {
         definitionsDeleted++;
         outcomes.push({
           definitionId: entry.definitionId!,
           status: "already_absent",
+          sent: true,
         });
         continue;
       }
       outcomes.push({
         definitionId: entry.definitionId!,
         status: classifyFailure(error),
+        ...mutationMetadata(error),
         error: pulseOperationErrorMessage(error, 'delete', [session.token]),
       });
       failures.push(
@@ -94,22 +99,24 @@ export async function executeDeletes(
           outcomes.push({
             metricId: entry.metricId,
             status: "not_attempted",
+            sent: false,
             error: "The deletion batch stopped before this resource was sent.",
           });
           return false;
         }
         try {
           await deps.deleteMetric(session, entry.metricId);
-          outcomes.push({ metricId: entry.metricId, status: "deleted" });
+          outcomes.push({ metricId: entry.metricId, status: "deleted", sent: true });
           return true;
         } catch (error) {
           if (error instanceof TableauError && error.status === 404) {
-            outcomes.push({ metricId: entry.metricId, status: "already_absent" });
+            outcomes.push({ metricId: entry.metricId, status: "already_absent", sent: true });
             return true;
           }
           outcomes.push({
             metricId: entry.metricId,
             status: classifyFailure(error),
+        ...mutationMetadata(error),
             error: pulseOperationErrorMessage(error, 'delete', [session.token]),
           });
           failures.push(
@@ -122,14 +129,12 @@ export async function executeDeletes(
     metricsDeleted += metricResults.filter(Boolean).length;
   }
 
-  // An exact metric is part of its definition's cached inventory, so a
-  // metric-only delete must invalidate the inventory too - otherwise the next
-  // getExistingMetrics call (within the cache TTL) returns the stale list still
-  // containing the deleted metric, and the UI looks like the delete did nothing.
-  if (definitionsDeleted > 0 || metricsDeleted > 0 || uncertain)
-    invalidatePulseDefinitionInventory(session);
+  if (definitionsDeleted > 0) invalidatePulseDefinitionInventory(session);
 
+  const throttle = latestThrottle(outcomes);
+  if (throttle) for (const outcome of outcomes) if (outcome.sent === false && !outcome.throttle) outcome.throttle = { ...throttle, sent: false };
   return {
+    ...(throttle ? { throttle, sent: outcomes.some(outcome => outcome.sent === true) } : {}),
     definitionsDeleted,
     metricsDeleted,
     failures,

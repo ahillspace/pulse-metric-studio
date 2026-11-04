@@ -142,11 +142,27 @@ test('central projection rejects arbitrary fields, unrecognized paths, unsafe ID
   assert.doesNotMatch(JSON.stringify(records), /SECRET|RESPONSE-BODY/);
 });
 
-test('concurrent requests keep their own request and stage context', async () => {
+test('concurrent requests keep their own request and stage context across admission and dispatch events', async (t) => {
   const records: Record[] = [];
-  globalThis.fetch = async () => { await new Promise(resolve => setTimeout(resolve, 5)); return Response.json({}); };
+  const now = Date.now;
+  let elapsed = 0;
+  // Force measurable admission time so this protects context on gate events too.
+  t.mock.method(Date, 'now', () => now() + elapsed++);
+  let sends = 0;
+  globalThis.fetch = async () => { sends++; await new Promise(resolve => setTimeout(resolve, 5)); return Response.json({}); };
   await Promise.all(['one', 'two'].map(reqId => collect(reqId, records, () => withTableauOperation(reqId === 'one' ? 'fork_source' : 'dimensions_source', () => getJson(session(), '/api/-/pulse/definitions')))));
-  assert.deepEqual(records.map(record => [record.reqId, record.operation]).sort(), [['one', 'fork_source'], ['two', 'dimensions_source']]);
+  const expected = new Map([['one', 'fork_source'], ['two', 'dimensions_source']]);
+  assert.equal(sends, 2);
+  const attempts = records.filter(record => record.event === 'tableau.attempt');
+  assert.deepEqual(attempts.map(record => [record.reqId, record.operation]).sort(), [...expected.entries()]);
+  assert.ok(attempts.every(record => record.sent === true));
+  const admissions = records.filter(record => record.event === 'tableau.gate_wait');
+  assert.ok(admissions.length > 0);
+  assert.ok(admissions.every(record => record.sent === false));
+  for (const record of records) {
+    assert.ok(expected.has(String(record.reqId)));
+    assert.equal(record.operation, expected.get(String(record.reqId)));
+  }
 });
 
 test('attempt completion includes body wait and logs once when the body fails', async () => {
@@ -168,18 +184,18 @@ test('attempt completion includes body wait and logs once when the body fails', 
   assert.equal(records.filter(record => record.reqId === 'complete').length, 1);
 });
 
-test('a capacity-queued timeout during a shared hold records a local rejection', async () => {
+test('a queued deadline during a shared hold records the known throttle cause', async () => {
   const records: Record[] = [];
   const owner = session();
   let calls = 0;
   globalThis.fetch = async () => ++calls === 1 ? new Response('{}', { status: 429, headers: { 'Retry-After': '1' } }) : Response.json({});
-  // Seed the shared hold without retrying, then occupy all eight gate permits with waiters.
+  // Seed the shared hold without retrying, then queue eight eligible requests.
   await collect('seed', records, () => tableauFetch(owner, '/api/-/pulse/definitions', { timeoutMs: 10 }));
   const waiters = Array.from({ length: 8 }, (_, index) => collect(`waiter-${index}`, records, () => getJson(owner, '/api/-/pulse/definitions')));
   await assert.rejects(collect('capacity', records, () => getJson(owner, '/api/-/pulse/definitions', undefined, 20)));
   const rejected = records.find(record => record.reqId === 'capacity');
   assert.equal(rejected?.event, 'tableau.gate_rejected');
-  assert.equal(rejected?.reason, 'capacity_timeout');
+  assert.equal(rejected?.reason, 'throttle_deadline');
   assert.equal(rejected?.sent, false);
   assert.ok(Number(rejected?.holdMs) > 0);
   await Promise.all(waiters);

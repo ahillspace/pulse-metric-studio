@@ -68,3 +68,16 @@ test('older variant results without alias or explicit creation status retain the
   assert.equal(counts.shared, 0);
   assert.equal(registryActionLabel('fork', rejected), 'creation failed');
 });
+
+
+test('authoritative create and existing results need no listing visibility status', () => {
+  const { html, items } = renderResults([
+    { sourceMetricId: 'source-a', status: 'created', creationStatus: 'created', metricId: 'new', requestedSpecification: {} },
+    { sourceMetricId: 'source-b', status: 'existing', creationStatus: 'existing', metricId: 'existing', requestedSpecification: {} },
+  ]);
+  assert.deepEqual(items.map(item => item.status), ['created', 'existing']);
+  assert.match(html, /Creation: 1 created, 1 already existed/);
+  assert.doesNotMatch(html, /Visibility:|reconciliation status unavailable|visibility pending/);
+  assert.equal(registryActionLabel('fork', items[0]!), 'created');
+  assert.equal(registryActionLabel('fork', items[1]!), 'already exists');
+});

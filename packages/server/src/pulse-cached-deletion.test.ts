@@ -73,7 +73,9 @@ function provider(options: { partial?: boolean; deleteResponse?: (pathname: stri
       return Response.json({ counts: ids.map(id => ({ metric_id: id, count: 3 })) });
     }
     if (url.pathname === '/api/-/pulse/subscriptions') {
-      assert.ok(/^[ab]-/.test(url.searchParams.get('metric_id')!), 'subscriptions only enrich the selected datasource');
+      const metricId = url.searchParams.get('metric_id');
+      if (metricId) assert.ok(/^[ab]-/.test(metricId), 'targeted subscriptions only enrich the selected datasource');
+      assert.equal(url.searchParams.get('page_size'), '100');
       return Response.json({ subscriptions: [] });
     }
     assert.fail(`Unexpected provider request ${url}`);
@@ -87,7 +89,7 @@ async function inventory(server: ReturnType<typeof buildApp>) {
   return response.json();
 }
 
-test('real deletion uses displayed inventory, issues only selected DELETEs, and refreshes datasource details once', async () => {
+test('real deletion uses displayed inventory, patches confirmed targets, and refreshes only on explicit demand', async () => {
   const fake = provider();
   const server = buildApp({ registerPulseRoutes });
   try {
@@ -95,9 +97,21 @@ test('real deletion uses displayed inventory, issues only selected DELETEs, and 
     assert.deepEqual(displayed.definitions.map((definition: { definitionId: string }) => definition.definitionId), ['a', 'b']);
     const initialReadCount = fake.requests.length;
     assert.equal(initialReadCount, 8, 'two definition pages, two metric lists, four exact metrics');
-    const followState = await server.inject({ method: 'POST', url: '/api/pulse/follow-state', payload: { metricIds: ['a-default', 'a-variant', 'b-default', 'b-variant'], selectedGroupId: 'group' } });
+    const metricIds = ['a-default', 'a-variant', 'b-default', 'b-variant'];
+    const counts = await server.inject({ method: 'POST', url: '/api/pulse/follow-state', payload: { metricIds, snapshotId: displayed.snapshotId, detail: false } });
+    assert.equal(counts.statusCode, 200, counts.body);
+    assert.equal(fake.requests.length - initialReadCount, 1, 'the initial summary reads one follower-count batch');
+    const beforeDetails = fake.requests.length;
+    const detailPayload = { metricIds, snapshotId: displayed.snapshotId, selectedGroupId: 'group', detail: true };
+    const followState = await server.inject({ method: 'POST', url: '/api/pulse/follow-state', payload: detailPayload });
     assert.equal(followState.statusCode, 200, followState.body);
-    assert.equal(fake.requests.length - initialReadCount, 5, 'one follower-count batch and four scoped subscription reads');
+    assert.equal(fake.requests.length - beforeDetails, 5, 'one site discovery page plus four targeted reads while negative site coverage is unqualified');
+    assert.deepEqual(followState.json().followerCountsByMetricId, {}, 'details do not repeat the initial counts');
+    assert.ok(Object.values(followState.json().availabilityByMetricId).every(value => (value as { followerCountStatus: string }).followerCountStatus === 'not_requested'));
+    const beforeRepeatedDetails = fake.requests.length;
+    const repeated = await server.inject({ method: 'POST', url: '/api/pulse/follow-state', payload: detailPayload });
+    assert.equal(repeated.statusCode, 200, repeated.body);
+    assert.equal(fake.requests.length, beforeRepeatedDetails, 'the owned view retains subscription coverage');
     const selection = { context, snapshotId: displayed.snapshotId, definitionIds: ['a'], metricIds: ['a-default', 'a-variant', 'b-variant'] };
     const beforePreview = fake.requests.length;
     const preview = await server.inject({ method: 'POST', url: '/api/pulse/registry/delete-preview', payload: selection });
@@ -113,6 +127,16 @@ test('real deletion uses displayed inventory, issues only selected DELETEs, and 
       { method: 'DELETE', pathname: '/api/-/pulse/definitions/a' },
       { method: 'DELETE', pathname: '/api/-/pulse/metrics/b-variant' },
     ]);
+    const patch = result.json().inventoryPatch;
+    assert.deepEqual(patch.removedDefinitionIds, ['a']);
+    assert.deepEqual(patch.removedMetricIds, ['b-variant']);
+    assert.notEqual(patch.snapshotId, displayed.snapshotId);
+    const originalReview = await server.inject({ method: 'POST', url: '/api/pulse/registry/delete-preview', payload: selection });
+    assert.equal(originalReview.statusCode, 200, originalReview.body);
+    assert.equal(originalReview.json().previewFingerprint, preview.json().previewFingerprint, 'the original reviewed snapshot stays immutable');
+    const removedReview = await server.inject({ method: 'POST', url: '/api/pulse/registry/delete-preview', payload: { ...selection, snapshotId: patch.snapshotId } });
+    assert.equal(removedReview.statusCode, 409, removedReview.body);
+    assert.equal(fake.requests.length, beforeDelete + 2, 'patch and snapshot review add no provider reads');
     const beforeRefresh = fake.requests.length;
     const refreshed = await inventory(server);
     assert.deepEqual(refreshed.definitions.map((definition: { definitionId: string }) => definition.definitionId), ['b']);

@@ -29,6 +29,19 @@ export function replaceFollowMetrics(previous: FollowState | null, replacement: 
   return mergeFollowStates([retained, replacement]);
 }
 
+/** Detail-only reads never erase independently acquired summary counts. */
+export function replaceFollowDetails(previous: FollowState | null, replacement: FollowState, metricIds: string[]): FollowState {
+  const result = replaceFollowMetrics(previous, replacement, metricIds);
+  if (!previous) return result;
+  for (const id of metricIds) {
+    if (replacement.availabilityByMetricId?.[id]?.followerCountStatus !== 'not_requested') continue;
+    if (Object.hasOwn(previous.followerCountsByMetricId, id)) result.followerCountsByMetricId[id] = previous.followerCountsByMetricId[id]!;
+    const availability = result.availabilityByMetricId?.[id];
+    if (availability) result.availabilityByMetricId![id] = { ...availability, followerCountStatus: previous.availabilityByMetricId?.[id]?.followerCountStatus ?? 'not_requested' };
+  }
+  return result;
+}
+
 export function mergeFollowStates(states: FollowState[]): FollowState {
   const assign = <T>(target: Record<string, T>, source: Record<string, T> | undefined) => {
     for (const [key, value] of Object.entries(source ?? {}))
@@ -47,6 +60,7 @@ export function mergeFollowStates(states: FollowState[]): FollowState {
     assign(merged.availabilityByMetricId!, state.availabilityByMetricId);
     merged.errors.push(...state.errors);
     merged.groupContextUnavailable ||= state.groupContextUnavailable;
+    if (state.coverage) merged.coverage = state.coverage;
   }
   return merged;
 }
@@ -74,7 +88,7 @@ export function followStateLabel(followState: FollowState | null, metricId: stri
       ? 'You follow'
       : groupFollows
         ? 'Group follows'
-        : relationshipStatus === 'not_requested'
+        : (relationshipStatus === 'not_requested' || !relationshipStatus)
           ? 'Follow details not loaded'
         : relationshipStatus === 'unavailable'
           ? 'Follow state unavailable'

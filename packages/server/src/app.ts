@@ -13,6 +13,7 @@ import {
   registerLlmRoutes,
   LlmProviderError,
   TableauError,
+  TableauThrottleError,
   isAllowedAppOrigin,
   sanitizeProviderMessage,
   configureTableauTelemetry,
@@ -77,7 +78,7 @@ export function buildApp(hooks: FeatureHooks = {}, options: {
     const requestPath = safeTableauAppPath(routePath ?? request.url);
     const successfulHealthCheck = request.method === 'GET' && reply.statusCode < 400
       && routePath !== undefined
-      && ['/api/tableau/status', '/api/llm/status', '/api/pulse/status', '/api/desktop/ready'].includes(routePath);
+      && ['/api/tableau/status', '/api/tableau/throttle', '/api/llm/status', '/api/pulse/status', '/api/desktop/ready'].includes(routePath);
     if (successfulHealthCheck || !requestPath.startsWith('/api/')) return;
     diagnostics.info({ event: 'app.request', reqId: request.id, method: request.method,
       path: requestPath, status: reply.statusCode, durationMs: Math.round(reply.elapsedTime) });
@@ -141,7 +142,9 @@ export function buildApp(hooks: FeatureHooks = {}, options: {
       const snippet = error.bodySnippet ? error.bodySnippet.slice(0, 500) : '';
       const message = sanitizeProviderMessage(snippet ? `${error.message} - ${snippet}` : error.message);
       app.log.warn({ status: error.status, kind: error.kind, code }, 'Tableau provider request failed');
-      reply.code(code).send({ error: message });
+      reply.code(code).send({ error: message,
+        ...(typeof error.sent === 'boolean' ? { sent: error.sent } : {}),
+        ...(error instanceof TableauThrottleError ? { throttle: error.throttle } : {}) });
       return;
     }
     // Any error carrying an explicit HTTP error status (4xx or 5xx) surfaces

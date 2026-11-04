@@ -11,6 +11,7 @@ import {
   type FollowTargetChoice,
 } from "../follow-target-actions";
 import { registryActionLabel } from "../registry-actions";
+import { CooldownBanner, type RegistryCooldown } from "../registry/CooldownBanner";
 import { BusyLabel, Modal } from "./ui";
 
 type FollowTarget = FollowTargetChoice;
@@ -34,6 +35,7 @@ export function consumeFollowTargetSearchEscape(
 }
 
 interface FollowTargetModalProps {
+  cooldown?: RegistryCooldown | null;
   metrics: Array<{ id: string; label: string }>;
   currentUserId: string;
   currentUserName?: string;
@@ -41,6 +43,7 @@ interface FollowTargetModalProps {
 }
 
 export function FollowTargetModal({
+  cooldown,
   metrics,
   currentUserId,
   currentUserName,
@@ -201,7 +204,7 @@ export function FollowTargetModal({
     kind: "follow" | "unfollow",
     retryOperations?: FollowTargetOperation[],
   ) => {
-    if (!metrics.length || (!retryOperations && !selected.length) || busy || addingExisting)
+    if (!metrics.length || (!retryOperations && !selected.length) || busy || addingExisting || cooldown)
       return;
     const scope = JSON.stringify(useRegistry.getState().context);
     setBusy(kind);
@@ -249,7 +252,7 @@ export function FollowTargetModal({
           <button
             className="btn"
             type="button"
-            disabled={Boolean(busy) || addingExisting || selected.length === 0}
+            disabled={Boolean(busy) || Boolean(cooldown) || addingExisting || selected.length === 0}
             onClick={() => void run("unfollow")}
           >
             <BusyLabel busy={busy === "unfollow"} idle="Unfollow" active="Unfollowing..." />
@@ -258,7 +261,7 @@ export function FollowTargetModal({
             <button
               className="btn"
               type="button"
-              disabled={Boolean(busy) || addingExisting}
+              disabled={Boolean(busy) || Boolean(cooldown) || addingExisting}
               onClick={() => void run(retry.kind, retry.operations)}
             >
               <BusyLabel busy={busy === retry.kind} idle={`Retry ${retry.operations.length} failed`} active="Retrying..." />
@@ -267,7 +270,7 @@ export function FollowTargetModal({
           <button
             className="btn primary"
             type="button"
-            disabled={Boolean(busy) || addingExisting || selected.length === 0}
+            disabled={Boolean(busy) || Boolean(cooldown) || addingExisting || selected.length === 0}
             onClick={() => void run("follow")}
           >
             <BusyLabel busy={busy === "follow"} idle="Follow" active="Following..." />
@@ -275,6 +278,7 @@ export function FollowTargetModal({
         </>
       }
     >
+      <CooldownBanner cooldown={cooldown} />
       {retry &&
         results &&
         (results.kind === "follow" || results.kind === "unfollow") && (
@@ -343,7 +347,7 @@ export function FollowTargetModal({
           <button
             className="btn small"
             type="button"
-            disabled={Boolean(busy) || addingExisting}
+            disabled={Boolean(busy) || Boolean(cooldown) || addingExisting}
             onClick={() => void loadTargets(true)}
           >
             Refresh targets
@@ -351,7 +355,7 @@ export function FollowTargetModal({
           <button
             className="btn small"
             type="button"
-            disabled={Boolean(busy) || addingExisting || loading || metrics.length === 0}
+            disabled={Boolean(busy) || Boolean(cooldown) || addingExisting || loading || metrics.length === 0}
             onClick={() => void addExisting()}
           >
             <BusyLabel busy={addingExisting} idle="Add existing" active="Loading existing..." />

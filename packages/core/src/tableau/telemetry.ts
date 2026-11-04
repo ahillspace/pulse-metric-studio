@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 
-export type TableauOperation = 'inventory' | 'inventory_get_metric' | 'follow_state' | 'dimensions' | 'fork_plan' | 'reconciliation' | 'get_or_create' | 'subscriptions' | 'fork_source' | 'fork_catalog' | 'fork_filter_validation' | 'dimensions_source' | 'dimensions_catalog' | 'dimensions_values';
+export type TableauOperation = 'inventory' | 'inventory_get_metric' | 'follow_state' | 'dimensions' | 'fork_plan' | 'get_or_create' | 'subscriptions' | 'fork_source' | 'fork_catalog' | 'fork_filter_validation' | 'dimensions_source' | 'dimensions_catalog' | 'dimensions_values';
 type RetryReason = 'throttle' | 'authentication' | 'version' | 'redirect';
 type LogSink = (record: Record<string, unknown>) => void;
 interface TelemetryContext {
@@ -21,7 +21,7 @@ export function runWithTableauTelemetry<T>(value: TelemetryContext, callback: ()
 export function withTableauOperation<T>(operation: TableauOperation, callback: () => T): T { return context.run({ ...context.getStore(), operation }, callback); }
 export function withTableauRetryReason<T>(retryReason: RetryReason, callback: () => T): T { return context.run({ ...context.getStore(), retryReason }, callback); }
 
-const operations = new Set<TableauOperation>(['inventory', 'inventory_get_metric', 'follow_state', 'dimensions', 'fork_plan', 'reconciliation', 'get_or_create', 'subscriptions', 'fork_source', 'fork_catalog', 'fork_filter_validation', 'dimensions_source', 'dimensions_catalog', 'dimensions_values']);
+const operations = new Set<TableauOperation>(['inventory', 'inventory_get_metric', 'follow_state', 'dimensions', 'fork_plan', 'get_or_create', 'subscriptions', 'fork_source', 'fork_catalog', 'fork_filter_validation', 'dimensions_source', 'dimensions_catalog', 'dimensions_values']);
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const methods = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);
 function safeId(value: unknown): string | null { return typeof value === 'string' && uuid.test(value) ? value : value == null ? null : '[redacted]'; }
@@ -47,6 +47,7 @@ export function safeTableauAppPath(value: string): string {
   const parts = value.split(/[?#]/, 1)[0]!.split('/');
   const words = new Set(['api', 'pulse', 'tableau', 'status', 'connect', 'disconnect', 'connections', 'activate', 'credential', 'credential-retirements', 'reconcile', 'datasources', 'fields', 'registry', 'definitions', 'metrics', 'existing-metrics', 'dimensions', 'values', 'count', 'fork', 'forks', 'dimensional-fork', 'dimensional-forks', 'subscriptions', 'follow-state', 'followers', 'followers-detail', 'follows', 'follow', 'unfollow', 'groups', 'users', 'inventory', 'preview', 'drafts', 'publish', 'publish-preview', 'proposals', 'receipts', 'undo', 'delete-group', 'archives', 'delete-preview', 'publication', 'runs', 'workspace', 'catalog', 'validate', 'plan', 'apply', 'delete', 'delete-plan', 'follow-targets', 'desktop', 'bootstrap', 'ready']);
   words.add('llm');
+  words.add('throttle');
   return parts.map(part => !part || words.has(part) ? part : /^:[a-zA-Z][a-zA-Z0-9_]*$/.test(part) ? ':id' : uuid.test(part) ? part : '[redacted]').join('/').slice(0, 512);
 }
 
@@ -55,13 +56,12 @@ export type TableauTelemetryEvent =
   | { event: 'tableau.gate_wait' | 'tableau.gate_rejected'; callId: string; attempt: number; method: string; path: string; holdMs: number; waitedMs: number; remainingMs: number; reason?: 'capacity_timeout' | 'throttle_deadline'; sent: false; }
   | { event: 'tableau.get_or_create'; metricId: string | null; isMetricCreated: boolean; }
   | { event: 'tableau.inventory' | 'tableau.inventory_listing'; metricCount: number; specificationCount: number; metricSpecificationCount?: number; usableSpecificationCount?: number; isDefaultCount: number; getMetricCount?: number; definitionId?: string; }
-  | { event: 'tableau.reconciliation_poll'; metricId?: string; poll: number; }
   | { event: 'tableau.subscriptions_page'; metricId: string; page: number; recordCount: number; hasNextPage: boolean; }
   | { event: 'tableau.dimension_context'; cacheHit: boolean; };
 
 /** The single serialization boundary never spreads arbitrary caller data into logs. */
 export function logTableauEvent(event: TableauTelemetryEvent): void {
-  if (!new Set(['tableau.attempt', 'tableau.gate_wait', 'tableau.gate_rejected', 'tableau.get_or_create', 'tableau.inventory', 'tableau.inventory_listing', 'tableau.reconciliation_poll', 'tableau.subscriptions_page', 'tableau.dimension_context']).has(event.event)) return;
+  if (!new Set(['tableau.attempt', 'tableau.gate_wait', 'tableau.gate_rejected', 'tableau.get_or_create', 'tableau.inventory', 'tableau.inventory_listing', 'tableau.subscriptions_page', 'tableau.dimension_context']).has(event.event)) return;
   const current = context.getStore();
   const record: Record<string, unknown> = { event: event.event };
   if (current?.reqId && /^[a-zA-Z0-9_-]{1,128}$/.test(current.reqId)) record.reqId = current.reqId;
@@ -69,7 +69,7 @@ export function logTableauEvent(event: TableauTelemetryEvent): void {
   if (current?.appMethod) record.appMethod = safeMethod(current.appMethod);
   if (current?.appPath) record.appPath = safeTableauAppPath(current.appPath);
   if (current?.operation && operations.has(current.operation)) record.operation = current.operation;
-  const numbers = ['attempt', 'startedAt', 'headersMs', 'durationMs', 'retryAfterMs', 'throttleHoldMs', 'holdMs', 'waitedMs', 'remainingMs', 'metricCount', 'specificationCount', 'metricSpecificationCount', 'usableSpecificationCount', 'isDefaultCount', 'getMetricCount', 'poll', 'page', 'recordCount'] as const;
+  const numbers = ['attempt', 'startedAt', 'headersMs', 'durationMs', 'retryAfterMs', 'throttleHoldMs', 'holdMs', 'waitedMs', 'remainingMs', 'metricCount', 'specificationCount', 'metricSpecificationCount', 'usableSpecificationCount', 'isDefaultCount', 'getMetricCount', 'page', 'recordCount'] as const;
   const input = event as unknown as Record<string, unknown>;
   for (const key of numbers) if (typeof input[key] === 'number' && Number.isFinite(input[key]) && input[key] >= 0) record[key] = Math.round(input[key]);
   for (const key of ['isMetricCreated', 'hasNextPage', 'cacheHit', 'sent']) if (typeof input[key] === 'boolean') record[key] = input[key];

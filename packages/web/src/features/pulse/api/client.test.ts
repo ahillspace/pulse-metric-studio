@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { pulseRequest, PulseApiError } from "./client";
+import { pulseRequest, pulseApi, PulseApiError } from "./client";
 import { pulseDimensionalForkApi } from "../dimensional-fork-api";
 import { registryApi } from "./registry";
 import { useConnection } from "../connections/controller";
@@ -127,4 +127,29 @@ test("registry requests carry their immutable backend owner through query transp
   const { connectionId, sessionGeneration, serverUrl, siteId, userId } = session;
   assert.equal(owners.length, 7);
   for (const owner of owners) assert.deepEqual(owner, { connectionId, sessionGeneration, serverUrl, siteId, userId });
+});
+
+
+test("local throttle refusals retain timing and sent evidence for buffered mutation UI", async (t) => {
+  const throttle = { retryAt: 36_000, serverTime: 0, reason: "throttle", sent: false };
+  t.mock.method(globalThis, "fetch", async () => Response.json({ error: "Tableau is limiting requests", throttle }, { status: 429 }));
+  for (const request of [
+    () => pulseRequest("/api/pulse/delete", "POST", {}),
+    () => registryApi.fork(draft().context, { version: 1, sourceMetricIds: ["metric"], clauses: [] }),
+    () => registryApi.follow(draft().context, [{ metricId: "metric", target: { id: "user", kind: "USER" } }]),
+  ]) await assert.rejects(request(), error => {
+    assert.ok(error instanceof PulseApiError); assert.equal(error.status, 429); assert.deepEqual(error.throttle, throttle); return true;
+  });
+});
+
+
+test("valid delete and subscription receipts preserve sent throttle metadata", async (t) => {
+  const throttle = { retryAt: 40_000, serverTime: 0, reason: "throttle", sent: true };
+  t.mock.method(globalThis, "fetch", async (input: RequestInfo | URL) => Response.json(String(input).endsWith("/registry/delete") ? {
+    definitionsDeleted: 0, metricsDeleted: 0, failures: ["HTTP 429"], outcomes: [{ metricId: "metric", status: "failed", sent: true }], throttle,
+  } : { results: [{ metricId: "metric", targetId: "user", targetKind: "USER", status: "failed", ok: false }], throttle }));
+  const subscription = await registryApi.follow(draft().context, [{ metricId: "metric", target: { kind: "USER", id: "user" } }]);
+  assert.deepEqual(subscription.throttle, throttle);
+  const deleted = await pulseApi.delete({ context: draft().context, snapshotId: "snapshot", metricIds: ["metric"], definitionIds: [], previewFingerprint: "reviewed", allowIncompleteInventory: false });
+  assert.deepEqual(deleted.throttle, throttle);
 });

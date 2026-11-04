@@ -404,6 +404,7 @@ function hasVdsError(error: unknown): boolean {
 export type PulseFollowerType = 'USER' | 'GROUP' | 'UNKNOWN';
 
 export interface SubscriptionRecord {
+  metricId?: string;
   id?: string;
   follower: {
     id: string;
@@ -417,27 +418,32 @@ export function normalizeSubscriptionEnvelope(data: unknown): SubscriptionRecord
   return records.map((record, index) => normalizeSubscriptionRecord(record, index));
 }
 
+export interface SubscriptionPage { subscriptions: SubscriptionRecord[]; nextPageToken: string | null }
+export async function listSubscriptionPage(session: TableauSession, input: { metricId?: string; userId?: string; pageToken?: string }): Promise<SubscriptionPage> {
+  const query = new URLSearchParams({ page_size: '100' });
+  if (input.metricId) query.set('metric_id', input.metricId);
+  if (input.userId) query.set('user_id', input.userId);
+  if (input.pageToken) query.set('page_token', input.pageToken);
+  const data = await withTableauOperation('subscriptions', () => getJson<unknown>(session, `${PULSE}/subscriptions?${query}`));
+  const subscriptions = normalizeSubscriptionEnvelope(data);
+  const next = isRecord(data) ? data.next_page_token : undefined;
+  if (next !== undefined && next !== '' && (typeof next !== 'string' || !next.trim())) throw new TableauError('Pulse follower inventory has an invalid continuation.', 502);
+  if (!input.metricId && subscriptions.some(record => !record.metricId)) throw new TableauError('Site subscriptions require metric identifiers.', 502);
+  return { subscriptions: subscriptions.map(record => input.metricId ? { ...record, metricId: record.metricId ?? input.metricId } : record), nextPageToken: typeof next === 'string' && next ? next : null };
+}
 export async function listSubscriptionsForMetric(session: TableauSession, metricId: string): Promise<SubscriptionRecord[]> {
-  const subscriptions: SubscriptionRecord[] = [];
-  const seenTokens = new Set<string>();
-  let token = '';
-  for (let page = 0; page < 1000; page++) {
-    const query = new URLSearchParams({ metric_id: metricId });
-    if (token) query.set('page_token', token);
-    const data = await withTableauOperation('subscriptions', () => getJson<unknown>(session, `${PULSE}/subscriptions?${query}`));
-    const records = normalizeSubscriptionEnvelope(data);
-    subscriptions.push(...records);
-    const next = isRecord(data) ? data.next_page_token : undefined;
-    logTableauEvent({ event: 'tableau.subscriptions_page', metricId, page: page + 1, recordCount: records.length, hasNextPage: next !== undefined && next !== '' });
-    if (next === undefined || next === '') return subscriptions;
-    if (typeof next !== 'string' || !next.trim() || seenTokens.has(next) || !records.length)
-      throw new TableauError('Pulse follower inventory has an invalid continuation.', 502);
-    if (subscriptions.length > 100000)
-      throw new TableauError('Pulse follower inventory exceeds the local read limit.', 502);
-    seenTokens.add(next);
-    token = next;
+  const subscriptions: SubscriptionRecord[] = [], tokens = new Set<string>();
+  let pageToken: string | undefined;
+  for (let page = 0; page < 20; page++) {
+    const result = await listSubscriptionPage(session, { metricId, pageToken });
+    subscriptions.push(...result.subscriptions);
+    logTableauEvent({ event: 'tableau.subscriptions_page', metricId, page: page + 1, recordCount: result.subscriptions.length, hasNextPage: Boolean(result.nextPageToken) });
+    if (!result.nextPageToken) return subscriptions;
+    if (tokens.has(result.nextPageToken) || !result.subscriptions.length) throw new TableauError('Pulse follower inventory has an invalid continuation.', 502);
+    if (subscriptions.length >= 2000) throw new TableauError('Pulse follower inventory is partial at the local record limit.', 502);
+    tokens.add(result.nextPageToken); pageToken = result.nextPageToken;
   }
-  throw new TableauError('Pulse follower inventory continuation exceeds the local read limit.', 502);
+  throw new TableauError('Pulse follower inventory is partial at the local page limit.', 502);
 }
 
 export interface SubscriptionWriteTarget {
@@ -779,6 +785,7 @@ function normalizeSubscriptionRecord(record: Record<string, unknown>, index: num
   );
   return {
     ...(subscriptionId ? { id: subscriptionId } : {}),
+    ...(stringValue(record.metric_id ?? nestedSubscription?.metric_id ?? (isRecord(record.metric) ? record.metric.id ?? (isRecord(record.metric.metadata) ? record.metric.metadata.id : undefined) : undefined)) ? { metricId: stringValue(record.metric_id ?? nestedSubscription?.metric_id ?? (isRecord(record.metric) ? record.metric.id ?? (isRecord(record.metric.metadata) ? record.metric.metadata.id : undefined) : undefined)) } : {}),
     follower: { id, type, ...(name ? { name } : {}) },
   };
 }

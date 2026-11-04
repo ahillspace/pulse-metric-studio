@@ -1,4 +1,5 @@
 import '@fastify/sensible';
+import { z } from 'zod';
 import { credentialOperationFingerprint } from '../db/crypto.js';
 import type { FastifyInstance } from 'fastify';
 import {
@@ -6,7 +7,7 @@ import {
   CredentialBrokerError,
   type CredentialBrokerClient,
 } from './credential-broker.js';
-import { apiPath, classifyStatus, DEFAULT_MAX_RESPONSE_BYTES, readBoundedBody, parseTableauProviderError, TableauError, type TableauSession } from './rest-client.js';
+import { apiPath, classifyStatus, DEFAULT_MAX_RESPONSE_BYTES, getTableauThrottleStatus, readBoundedBody, parseTableauProviderError, TableauError, type TableauSession } from './rest-client.js';
 import { invalidateFieldsCache, listDatasources } from './vds-fields.js';
 import { discoverRestApiVersion, patSignin } from './signin.js';
 import { createTableauCallTrace, observedTableauFetch, finishObservedTableauResponse, type TableauCallTrace } from './telemetry.js';
@@ -48,6 +49,14 @@ export interface TableauRouteDependencies {
   patSignin?: typeof patSignin;
   fetchImpl?: typeof fetch;
 }
+
+const ThrottleOwnerSchema = z.object({
+  connectionId: z.string().min(1).max(512),
+  serverUrl: z.string().url().max(2048),
+  siteId: z.string().min(1).max(512),
+  userId: z.string().min(1).max(512),
+  sessionGeneration: z.number().int().nonnegative(),
+}).strict();
 
 function currentStatusAfterSwitch() {
   const current = getSession();
@@ -110,6 +119,25 @@ export function registerTableauRoutes(
   app: FastifyInstance,
   dependencies: TableauRouteDependencies = {},
 ): void {
+  app.get<{ Querystring: { expectedOwner?: string } }>('/api/tableau/throttle', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const session = getSession();
+    const encodedOwner = request.query.expectedOwner;
+    if (encodedOwner !== undefined) {
+      let owner: z.infer<typeof ThrottleOwnerSchema>;
+      try {
+        if (typeof encodedOwner !== 'string' || encodedOwner.length > 8192) throw new Error();
+        owner = ThrottleOwnerSchema.parse(JSON.parse(encodedOwner));
+      } catch { return reply.badRequest('expectedOwner must be a valid session owner.'); }
+      const context = session && getSessionContext(session);
+      if (!session || !context || !isSessionCurrent(session) || owner.connectionId !== context.connectionId ||
+        owner.sessionGeneration !== context.generation || owner.serverUrl !== session.serverUrl ||
+        owner.siteId !== session.siteId || owner.userId !== session.userId)
+        return reply.code(409).send({ error: 'The Tableau session changed before checking request cooldown.', code: 'tableau_context_changed' });
+    }
+    if (!session) return reply.unauthorized('Connect to Tableau before checking request cooldown.');
+    return getTableauThrottleStatus(session);
+  });
   const broker = dependencies.credentialBroker ?? createCredentialBrokerClient();
   const discoverVersion = dependencies.discoverRestApiVersion ?? discoverRestApiVersion;
   const signIn = dependencies.patSignin ?? patSignin;

@@ -1,5 +1,7 @@
 import {
   PulseInventoryResponseSchema,
+  TableauThrottleStatusSchema,
+  TableauThrottleMetadataSchema,
   PulseFollowStateSchema,
   PulseFollowTargetsSchema,
   PulseFollowResultsSchema,
@@ -15,15 +17,16 @@ import { extractErrorMessage } from "../../../api/client";
 import { PulseApiError, pulseRequest } from "./client";
 
 export const registryApi = {
+  throttle: async (owner = captureSessionOwner()) => TableauThrottleStatusSchema.parse(await pulseRequest(ownedPulseUrl("/api/tableau/throttle", owner))),
   inventory: async (context: PulseDraftContext, owner = captureSessionOwner(), options?: { refresh?: boolean }) =>
     PulseInventoryResponseSchema.parse(
       await pulseRequest(
         ownedPulseUrl(`/api/pulse/existing-metrics?datasourceLuid=${encodeURIComponent(context.datasourceLuid)}${options?.refresh ? "&refresh=true" : ""}`, owner),
       ),
     ),
-  followState: async (metricIds: string[], detail = true, owner = captureSessionOwner()) =>
+  followState: async (metricIds: string[], detail = true, owner = captureSessionOwner(), options: { snapshotId?: string; continueCoverage?: boolean } = {}) =>
     PulseFollowStateSchema.parse(
-      await pulseRequest(ownedPulseUrl("/api/pulse/follow-state", owner), "POST", { metricIds, detail }),
+      await pulseRequest(ownedPulseUrl("/api/pulse/follow-state", owner), "POST", { metricIds, detail, ...options }),
     ),
   followTargets: async (owner = captureSessionOwner()) =>
     PulseFollowTargetsSchema.parse(
@@ -43,11 +46,11 @@ export const registryApi = {
     operations: PulseFollowOperation[],
     owner = captureSessionOwner(),
   ) => subscriptionRequest("/api/pulse/unfollow", context, operations, owner),
-  fork: async (context: PulseDraftContext, request: PulseVariantRequestV1, owner = captureSessionOwner()) => {
+  fork: async (context: PulseDraftContext, request: PulseVariantRequestV1, owner = captureSessionOwner(), options: { snapshotId?: string; sourceContextId?: string } = {}) => {
     const response = await desktopFetch(ownedPulseUrl("/api/pulse/metrics/fork", owner), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...request, context }),
+      body: JSON.stringify({ ...request, context, ...options }),
     });
     return decodeVariantResponse(
       response,
@@ -57,7 +60,7 @@ export const registryApi = {
   },
 };
 
-export type RegistryApi = typeof registryApi;
+export type RegistryApi = Omit<typeof registryApi, "throttle"> & { throttle?: typeof registryApi.throttle };
 
 async function subscriptionRequest(
   path: string,
@@ -74,11 +77,16 @@ async function subscriptionRequest(
   const parsed = PulseFollowResultsSchema.safeParse(data);
   if (response.status === 401 || (parsed.success && parsed.data.terminated))
     notifySessionExpired(owner);
-  if (parsed.success) return parsed.data;
+  if (parsed.success) {
+    const throttle = TableauThrottleMetadataSchema.safeParse((data as { throttle?: unknown } | null)?.throttle);
+    return { ...parsed.data, ...(throttle.success ? { throttle: throttle.data } : {}) };
+  }
   if (!response.ok)
     throw new PulseApiError(
       extractErrorMessage(data, response.status),
       response.status,
+      undefined, undefined,
+      TableauThrottleMetadataSchema.safeParse((data as { throttle?: unknown } | null)?.throttle).success ? TableauThrottleMetadataSchema.parse((data as { throttle?: unknown }).throttle) : undefined,
     );
   throw new Error(
     "The server returned an invalid subscription receipt. Inspect Tableau before retrying.",
@@ -97,13 +105,15 @@ export function decodeVariantResponse(
     return {
       ...parsed.data,
       ...(!response.ok
-        ? { error: extractErrorMessage(data, response.status) }
+        ? { error: parsed.data.throttle ? "Tableau is limiting requests. Wait for the request limit to clear before retrying." : extractErrorMessage(data, response.status) }
         : {}),
     };
   if (!response.ok)
     throw new PulseApiError(
       extractErrorMessage(data, response.status),
       response.status,
+      undefined, undefined,
+      TableauThrottleMetadataSchema.safeParse((data as { throttle?: unknown } | null)?.throttle).success ? TableauThrottleMetadataSchema.parse((data as { throttle?: unknown }).throttle) : undefined,
     );
   throw new Error(
     "The server returned an invalid variant receipt. Inspect Tableau before retrying.",

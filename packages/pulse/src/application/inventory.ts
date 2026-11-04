@@ -15,7 +15,7 @@ import {
 import {
   metricDefinitionId,
   metricSpecification,
-} from '../pulse/reconciliation.js';
+} from '../pulse/metric-facts.js';
 
 import {
   isRecord,
@@ -42,15 +42,17 @@ export type ExistingMetricsResult = Omit<PulseInventoryResponse, 'snapshotId'>;
 interface DefinitionCacheEntry {
   inventory: PulseDefinitionInventory;
   expiresAt: number;
+  acquiredAt: number;
 }
 
+const definitionAcquiredAt = new WeakMap<PulseDefinitionInventory, number>();
 const definitionCache = new Map<string, DefinitionCacheEntry>();
 const definitionRequests = new Map<string, { promise: Promise<PulseDefinitionInventory>; fresh: boolean }>();
 export async function getExistingMetrics(
   session: TableauSession,
   datasourceLuid: string,
   dependencies: InventoryDependencies = defaultDependencies,
-  options: { refresh?: boolean } = {},
+  options: { refresh?: boolean; capture?: (definition: PulseDefinition, metric: PulseExactMetric, acquiredAt: number) => void } = {},
 ): Promise<ExistingMetricsResult> {
   const inventory =
     dependencies === defaultDependencies
@@ -207,6 +209,7 @@ export async function getExistingMetrics(
                 `Exact metric ${metricId} belongs to definition ${returnedDefinitionId || 'unknown'}.`,
               );
             }
+            options.capture?.(definition, metric, definitionAcquiredAt.get(inventory) ?? Date.now());
             return exactMetricVariant(
               metricId,
               summaryRecord as Parameters<typeof exactMetricVariant>[1],
@@ -243,7 +246,7 @@ export async function getExistingMetrics(
   };
 }
 
-function definitionNode(
+export function definitionNode(
   definition: PulseDefinition,
   definitionId: string,
   metrics: MetricVariant[],
@@ -268,7 +271,7 @@ function definitionNode(
   };
 }
 
-function exactMetricVariant(
+export function exactMetricVariant(
   metricId: string,
   summary: { metadata?: { name?: string }; is_default?: boolean },
   metric: PulseExactMetric,
@@ -303,7 +306,7 @@ function exactMetricVariant(
           : 'unknown';
   return {
     metricId,
-    name: metric.metadata?.name ?? summary.metadata?.name ?? metricId,
+    name: stringValue(metric.metadata?.name) || stringValue(summary.metadata?.name) || metricId,
     measurementPeriod,
     timeframeLabel: timeframeLabelForMeasurementPeriod(measurementPeriod),
     filters,
@@ -325,20 +328,28 @@ export async function cachedDefinitionInventory(
   const cached = definitionCache.get(key);
   if (!options.refresh && cached && cached.expiresAt > now) {
     touch(definitionCache, key, cached);
-    return structuredClone(cached.inventory);
+    const clone = structuredClone(cached.inventory);
+    definitionAcquiredAt.set(clone, cached.acquiredAt);
+    return clone;
   }
   const existing = definitionRequests.get(key);
-  if (existing && (!options.refresh || existing.fresh)) return structuredClone(await existing.promise);
+  if (existing && (!options.refresh || existing.fresh)) {
+    const result = await existing.promise; const clone = structuredClone(result);
+    definitionAcquiredAt.set(clone, definitionAcquiredAt.get(result) ?? Date.now()); return clone;
+  }
   if (options.refresh) definitionCache.delete(key);
   const request = { promise: dependencies.listDefinitions(session), fresh: !!options.refresh };
   definitionRequests.set(key, request);
   try {
     const inventory = await request.promise;
+    const acquiredAt = Date.now();
+    definitionAcquiredAt.set(inventory, acquiredAt);
     // A mutation may invalidate an older read while its provider request is pending.
     if (definitionRequests.get(key) === request) {
       definitionCache.set(key, {
         inventory: structuredClone(inventory),
-        expiresAt: Date.now() + DEFINITION_CACHE_TTL_MS,
+        expiresAt: acquiredAt + DEFINITION_CACHE_TTL_MS,
+        acquiredAt,
       });
       while (definitionCache.size > MAX_DEFINITION_CACHE_ENTRIES) {
         const oldest = definitionCache.keys().next().value as string | undefined;

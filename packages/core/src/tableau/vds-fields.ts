@@ -130,6 +130,11 @@ const SUSPICIOUS_ZERO_TIME_CACHE_TTL_MS = 15_000;
 const cache = new Map<string, FieldsCacheEntry>();
 const pending = new Map<string, Promise<DatasourceCatalog>>();
 
+/** The original acquisition time is retained when a cached catalog is reused. */
+export function getFieldCatalogAcquiredAt(session: TableauSession, luid: string): number | undefined {
+  return cache.get(fieldCatalogCacheKey(session, luid))?.fetchedAt;
+}
+
 /** Authoring can use an already loaded catalog; publishing still requests fresh validation. */
 export function getLoadedFieldCatalog(session: TableauSession, luid: string): DatasourceCatalog | undefined {
   const catalog = cache.get(fieldCatalogCacheKey(session, luid))?.catalog;

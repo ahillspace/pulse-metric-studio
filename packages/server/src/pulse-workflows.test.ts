@@ -21,6 +21,7 @@ import {
   type PulsePublishReceipt,
 } from "@pulse-metric-studio/shared";
 import { registerPulseRoutes } from "@pulse-metric-studio/pulse";
+import { getPulseInventorySnapshot } from "@pulse-metric-studio/pulse/dist/application/inventory-snapshots.js";
 import { buildApp } from "./app.js";
 
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pulse-workflows-"));
@@ -648,181 +649,126 @@ test("unreviewed legacy deletion cannot bypass a backend plan", async () => {
   }
 });
 
+function cachedDeletionProvider(definitions: Array<{ id: string; name: string; metricId: string }>, partialDefinitions: Set<string>) {
+  const requests: string[] = [];
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(String(input));
+    assert.equal(url.origin, session.serverUrl, "The fixture never reaches a live provider.");
+    assert.equal(init?.method ?? "GET", "GET");
+    requests.push(url.pathname);
+    if (url.pathname.endsWith("/definitions")) return Response.json({ definitions: definitions.map(({ id, name }) => ({ metadata: { id, name }, specification: { datasource: { id: context.datasourceLuid } } })) });
+    const definitionId = /^\/api\/-\/pulse\/definitions\/([^/]+)\/metrics$/.exec(url.pathname)?.[1];
+    if (definitionId) {
+      const definition = definitions.find(candidate => candidate.id === definitionId);
+      assert.ok(definition, url.pathname);
+      return Response.json({ metrics: [
+        { id: definition.metricId, metadata: { name: definition.metricId }, definition_id: definitionId, is_default: false, specification: { measurement_period: {}, filters: [], comparison: {} } },
+        ...(partialDefinitions.has(definitionId) ? [{ id: `${definitionId}-unavailable` }] : []),
+      ] });
+    }
+    assert.ok(url.pathname.endsWith("-unavailable"), url.pathname);
+    return Response.json({ error: "The fixture cannot read this additional metric." }, { status: 403 });
+  };
+  return requests;
+}
+
 test("backend cached deletion rejects incomplete cascades and tampered plans without deleting visible children as a definition", async () => {
   const deletions: unknown[] = [];
-  const variant = (metricId: string): any => ({
-    metricId,
-    name: metricId,
-    measurementPeriod: {},
-    timeframeLabel: "Custom",
-    filters: [],
-    comparison: {},
-    isDefault: false,
-    isScoped: true,
-    scopedState: "variant",
-    specification: {},
-  });
-  const server = app({
-    deletion: {
-      inventory: async (_session, _context, snapshotId) => ({
-        totalScanned: 1,
-        truncated: false,
-        failures: [],
-        definitions: [
-          {
-            definitionId: "definition",
-            name: "Sales",
-            description: "",
-            measure: "Sales",
-            aggregation: "SUM",
-            timeDimension: "Date",
-            inventoryStatus: snapshotId === "partial-snapshot" ? "partial" : "complete",
-            metrics: [variant("metric")],
-          },
-        ],
-      }),
-      execute: async (_session, entries) => {
-        deletions.push(...entries);
-        return {
-          definitionsDeleted: 0,
-          metricsDeleted: entries.length,
-          failures: [],
-          outcomes: [],
-        };
-      },
+  const partialDefinitions = new Set(["definition"]);
+  const requests = cachedDeletionProvider([{ id: "definition", name: "Sales", metricId: "metric" }], partialDefinitions);
+  const server = app({ deletion: {
+    inventory: async (owner, coordinates, snapshotId) => getPulseInventorySnapshot(owner, coordinates, snapshotId),
+    execute: async (_owner, entries) => {
+      deletions.push(...entries);
+      return { definitionsDeleted: 0, metricsDeleted: 1, failures: [], outcomes: [{ metricId: "metric", status: "deleted", sent: true }] };
     },
-  });
+  } });
   try {
-    const selection = { context, snapshotId: "partial-snapshot", definitionIds: ["definition"], metricIds: [] };
-    assert.equal(
-      (
-        await server.inject({
-          method: "POST",
-          url: "/api/pulse/registry/delete-preview",
-          payload: selection,
-        })
-      ).statusCode,
-      409,
-    );
-    selection.snapshotId = "complete-snapshot";
-    const plan = (
-      await server.inject({
-        method: "POST",
-        url: "/api/pulse/registry/delete-preview",
-        payload: selection,
-      })
-    ).json();
-    const changed = await server.inject({
-      method: "POST",
-      url: "/api/pulse/registry/delete",
-      payload: { ...selection, previewFingerprint: "tampered" },
-    });
-    assert.equal(changed.statusCode, 409);
+    const partialResponse = await server.inject("/api/pulse/existing-metrics?datasourceLuid=ds&refresh=true");
+    assert.equal(partialResponse.statusCode, 200, partialResponse.body);
+    const partial = partialResponse.json();
+    assert.equal(partial.definitions[0].inventoryStatus, "partial");
+    const selection = { context, snapshotId: partial.snapshotId, definitionIds: ["definition"], metricIds: [] };
+    const beforeReview = requests.length;
+    const incomplete = await server.inject({ method: "POST", url: "/api/pulse/registry/delete-preview", payload: selection });
+    assert.equal(incomplete.statusCode, 409, incomplete.body);
+    assert.equal(incomplete.json().code, "delete_inventory_incomplete");
+    assert.equal(requests.length, beforeReview, "A partial review cannot acquire deletion evidence remotely.");
+    partialDefinitions.clear();
+    const completeResponse = await server.inject("/api/pulse/existing-metrics?datasourceLuid=ds&refresh=true");
+    assert.equal(completeResponse.statusCode, 200, completeResponse.body);
+    const complete = completeResponse.json();
+    assert.equal(complete.definitions[0].inventoryStatus, "complete");
+    selection.snapshotId = complete.snapshotId;
+    const review = await server.inject({ method: "POST", url: "/api/pulse/registry/delete-preview", payload: selection });
+    assert.equal(review.statusCode, 200, review.body);
+    const changed = await server.inject({ method: "POST", url: "/api/pulse/registry/delete", payload: { ...selection, previewFingerprint: "tampered" } });
+    assert.equal(changed.statusCode, 409, changed.body);
     assert.equal(changed.json().code, "delete_plan_changed");
     assert.equal(deletions.length, 0);
-    const exact = { context, snapshotId: "complete-snapshot", definitionIds: [], metricIds: ["metric"] };
-    const exactPlan = (
-      await server.inject({
-        method: "POST",
-        url: "/api/pulse/registry/delete-preview",
-        payload: exact,
-      })
-    ).json();
-    assert.equal(
-      (
-        await server.inject({
-          method: "POST",
-          url: "/api/pulse/registry/delete",
-          payload: {
-            ...exact,
-            previewFingerprint: exactPlan.previewFingerprint,
-          },
-        })
-      ).statusCode,
-      200,
-    );
+    const exact = { context, snapshotId: complete.snapshotId, definitionIds: [], metricIds: ["metric"] };
+    const exactReview = await server.inject({ method: "POST", url: "/api/pulse/registry/delete-preview", payload: exact });
+    assert.equal(exactReview.statusCode, 200, exactReview.body);
+    const beforeExecution = requests.length;
+    const executed = await server.inject({ method: "POST", url: "/api/pulse/registry/delete", payload: { ...exact, previewFingerprint: exactReview.json().previewFingerprint } });
+    assert.equal(executed.statusCode, 200, executed.body);
     assert.deepEqual(deletions, [{ metricIds: ["metric"], name: "metric" }]);
-  } finally {
-    await server.close();
-  }
+    assert.equal(requests.length, beforeExecution, "Execution uses the reviewed snapshot without provider reads.");
+    const patch = executed.json().inventoryPatch;
+    assert.deepEqual(patch.removedMetricIds, ["metric"]);
+    assert.deepEqual(patch.removedDefinitionIds, [], "An individual variant never becomes a definition deletion.");
+    const patched = getPulseInventorySnapshot(session, context, patch.snapshotId);
+    assert.deepEqual(patched.definitions.map(definition => [definition.definitionId, definition.metrics]), [["definition", []]]);
+    assert.deepEqual(getPulseInventorySnapshot(session, context, complete.snapshotId), complete, "The completed review snapshot stays immutable.");
+    assert.deepEqual(getPulseInventorySnapshot(session, context, partial.snapshotId), partial, "Refreshing does not rewrite partial review evidence.");
+  } finally { await server.close(); }
 });
 
 test("backend cached deletion accepts an acknowledged partial definition and a known standalone metric", async () => {
   const deletions: unknown[] = [];
-  const variant = (metricId: string): any => ({
-    metricId,
-    name: metricId,
-    measurementPeriod: {},
-    timeframeLabel: "Custom",
-    filters: [],
-    comparison: {},
-    isDefault: false,
-    isScoped: true,
-    scopedState: "variant",
-    specification: {},
-  });
-  const server = app({
-    deletion: {
-      inventory: async () => ({
-        totalScanned: 1,
-        truncated: false,
-        failures: [],
-        definitions: [
-          {
-            definitionId: "definition",
-            name: "Sales",
-            description: "",
-            measure: "Sales",
-            aggregation: "SUM",
-            timeDimension: "Date",
-            inventoryStatus: "partial",
-            metrics: [variant("known")],
-          },
-          {
-            definitionId: "other",
-            name: "Cost",
-            description: "",
-            measure: "Cost",
-            aggregation: "SUM",
-            timeDimension: "Date",
-            inventoryStatus: "complete",
-            metrics: [variant("orphan")],
-          },
-        ],
-      }),
-      execute: async (_session, entries) => {
-        deletions.push(...entries);
-        return { definitionsDeleted: 1, metricsDeleted: 1, failures: [], outcomes: [] };
-      },
+  const requests = cachedDeletionProvider([{ id: "definition", name: "Sales", metricId: "known" }, { id: "other", name: "Cost", metricId: "orphan" }], new Set(["definition"]));
+  const server = app({ deletion: {
+    inventory: async (owner, coordinates, snapshotId) => getPulseInventorySnapshot(owner, coordinates, snapshotId),
+    execute: async (_owner, entries) => {
+      deletions.push(...entries);
+      return { definitionsDeleted: 1, metricsDeleted: 1, failures: [], outcomes: [{ definitionId: "definition", status: "deleted", sent: true }, { metricId: "orphan", status: "deleted", sent: true }] };
     },
-  });
+  } });
   try {
-    const selection = { context, snapshotId: "partial-snapshot", definitionIds: ["definition"], metricIds: ["orphan"] };
+    const inventoryResponse = await server.inject("/api/pulse/existing-metrics?datasourceLuid=ds&refresh=true");
+    assert.equal(inventoryResponse.statusCode, 200, inventoryResponse.body);
+    const displayed = inventoryResponse.json();
+    const selection = { context, snapshotId: displayed.snapshotId, definitionIds: ["definition"], metricIds: ["orphan"] };
+    const beforeReview = requests.length;
     const blocked = await server.inject({ method: "POST", url: "/api/pulse/registry/delete-preview", payload: selection });
-    assert.equal(blocked.statusCode, 409);
+    assert.equal(blocked.statusCode, 409, blocked.body);
     assert.equal(blocked.json().code, "delete_inventory_incomplete");
     const override = { ...selection, allowIncompleteInventory: true };
     const preview = await server.inject({ method: "POST", url: "/api/pulse/registry/delete-preview", payload: override });
     assert.equal(preview.statusCode, 200, preview.body);
     const plan = preview.json();
     assert.equal(plan.allowIncompleteInventory, true);
-    assert.deepEqual(
-      plan.targets.map((target: any) => [target.kind, target.id, target.inventoryComplete, target.affectedMetricIds]),
-      [["definition", "definition", false, ["known"]], ["metric", "orphan", true, ["orphan"]]],
-    );
+    assert.deepEqual(plan.targets.map((target: { kind: string; id: string; inventoryComplete: boolean; affectedMetricIds: string[] }) => [target.kind, target.id, target.inventoryComplete, target.affectedMetricIds]),
+      [["definition", "definition", false, ["known"]], ["metric", "orphan", true, ["orphan"]]]);
     assert.ok(plan.warnings.some((warning: string) => /could not list every metric/.test(warning)));
     const unconfirmed = await server.inject({ method: "POST", url: "/api/pulse/registry/delete", payload: { ...selection, previewFingerprint: plan.previewFingerprint } });
-    assert.equal(unconfirmed.statusCode, 409);
+    assert.equal(unconfirmed.statusCode, 409, unconfirmed.body);
+    assert.equal(unconfirmed.json().code, "delete_inventory_incomplete");
+    const tampered = await server.inject({ method: "POST", url: "/api/pulse/registry/delete", payload: { ...override, previewFingerprint: "tampered" } });
+    assert.equal(tampered.statusCode, 409, tampered.body);
+    assert.equal(tampered.json().code, "delete_plan_changed");
     assert.equal(deletions.length, 0);
     const deleted = await server.inject({ method: "POST", url: "/api/pulse/registry/delete", payload: { ...override, previewFingerprint: plan.previewFingerprint } });
     assert.equal(deleted.statusCode, 200, deleted.body);
-    assert.deepEqual(deletions, [
-      { definitionId: "definition", metricIds: [], name: "Sales" },
-      { metricIds: ["orphan"], name: "orphan" },
-    ]);
-  } finally {
-    await server.close();
-  }
+    assert.deepEqual(deletions, [{ definitionId: "definition", metricIds: [], name: "Sales" }, { metricIds: ["orphan"], name: "orphan" }]);
+    assert.equal(requests.length, beforeReview, "Review, rejection and confirmed patching make zero provider reads.");
+    const patch = deleted.json().inventoryPatch;
+    assert.deepEqual(patch.removedDefinitionIds, ["definition"]);
+    assert.deepEqual(patch.removedMetricIds, ["orphan"]);
+    const patched = getPulseInventorySnapshot(session, context, patch.snapshotId);
+    assert.deepEqual(patched.definitions.map(definition => [definition.definitionId, definition.metrics]), [["other", []]]);
+    assert.deepEqual(getPulseInventorySnapshot(session, context, displayed.snapshotId), displayed, "Acknowledged partial review evidence stays immutable.");
+  } finally { await server.close(); }
 });
 
 test("local history pages omit large documents, preserve detail, and search literal characters", async () => {
