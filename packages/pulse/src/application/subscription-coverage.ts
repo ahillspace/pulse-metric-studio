@@ -21,7 +21,10 @@ export function invalidateSubscriptionCoverage(session: TableauSession, metricId
     view.targeted.delete(id);
   }
 }
-export async function subscriptionCoverage(session: TableauSession, metricIds: string[], options: { snapshotId?: string; continueCoverage?: boolean; personalOnly?: boolean }, dependencies: SubscriptionDependencies): Promise<{ entries: Array<{ metricId: string; subscriptions: SubscriptionRecord[] | null; complete: boolean; canLoadMore: boolean; diagnostic?: { message: string } }>; coverage: { status: 'available' | 'partial' | 'unavailable'; canLoadMore: boolean } }> {
+export async function subscriptionCoverage(session: TableauSession, metricIds: string[], options: { snapshotId?: string; continueCoverage?: boolean; personalOnly?: boolean; refresh?: boolean }, dependencies: SubscriptionDependencies): Promise<{ entries: Array<{ metricId: string; subscriptions: SubscriptionRecord[] | null; complete: boolean; canLoadMore: boolean; diagnostic?: { message: string } }>; coverage: { status: 'available' | 'partial' | 'unavailable'; canLoadMore: boolean } }> {
+  // An explicit refresh treats these metrics as changed: retained evidence is dropped, older reads are fenced,
+  // and unrelated metrics keep their coverage.
+  if (options.refresh) invalidateSubscriptionCoverage(session, metricIds);
   const owner = getSessionContext(session), coordinates = JSON.stringify([session.serverUrl, session.siteId, session.userId]);
   const sessionStores = stores.get(session) ?? new Map<object, CoverageStore>(); stores.set(session, sessionStores);
   let store = sessionStores.get(dependencies);

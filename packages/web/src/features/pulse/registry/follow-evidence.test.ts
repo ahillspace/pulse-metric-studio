@@ -341,3 +341,18 @@ for (const order of ["counts-first", "detail-first", "same-turn-counts-first", "
     assert.equal(details, 2, "another row can still request its missing relationship");
   });
 }
+
+test("only an explicit follower refresh asks the backend to reacquire retained coverage", async (t) => {
+  const detailRequests: Array<{ metricIds: string[]; refresh?: boolean; continueCoverage?: boolean }> = [];
+  t.mock.method(globalThis, "fetch", async (_url: RequestInfo | URL, init?: RequestInit) => {
+    const body = JSON.parse(init!.body as string);
+    if (body.detail) detailRequests.push({ metricIds: body.metricIds, refresh: body.refresh, continueCoverage: body.continueCoverage });
+    return Response.json(state(body.metricIds, body.detail));
+  });
+  const store = fixture({ followState: registryApi.followState });
+  await store.getState().activateContext(draft().context, "A", session);
+  await store.getState().ensureFollowState(["metric"]);
+  await store.getState().loadMoreFollowState(["metric"]);
+  await store.getState().refreshFollowState(["metric"]);
+  assert.deepEqual(detailRequests.map(request => [request.refresh, request.continueCoverage]), [[false, false], [false, true], [true, false]]);
+});

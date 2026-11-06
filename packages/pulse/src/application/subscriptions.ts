@@ -70,7 +70,7 @@ export async function getFollowState(
   userId: string,
   userGroupIds: string[],
   metricIds: string[],
-  options: { selectedGroupId?: string; groupContextUnavailable?: boolean; detail?: boolean; snapshotId?: string; continueCoverage?: boolean; personalOnly?: boolean } = {},
+  options: { selectedGroupId?: string; groupContextUnavailable?: boolean; detail?: boolean; snapshotId?: string; continueCoverage?: boolean; personalOnly?: boolean; refresh?: boolean } = {},
   dependencies: SubscriptionDependencies = defaultDependencies,
 ): Promise<FollowStateResult> {
   const uniqueMetricIds = canonicalIds(metricIds);

@@ -257,7 +257,7 @@ export function createRegistryController(
       }
       return ids.length ? replaceFollowDetails(base, mergeFollowStates(states), ids) : base;
     };
-    const readFollowState = async (scope: ReturnType<typeof capture>, metricIds: string[], refreshCounts = false, continueCoverage = false) => {
+    const readFollowState = async (scope: ReturnType<typeof capture>, metricIds: string[], refresh = false, continueCoverage = false) => {
       if (!scope.context || sessionOwnerKey(scope.owner) !== sessionOwnerKey(get().owner)) return null;
       const ids = [...new Set(metricIds)];
       const reads = detailScopeFor(scope.key);
@@ -270,9 +270,9 @@ export function createRegistryController(
           if (!valid.length) return null;
           try {
             const previous = current(scope) ? get().followState : cache.get(scope.key)?.followState;
-            const missingCounts = valid.filter(id => refreshCounts || previous?.availabilityByMetricId?.[id]?.followerCountStatus === "not_requested");
+            const missingCounts = valid.filter(id => refresh || previous?.availabilityByMetricId?.[id]?.followerCountStatus === "not_requested");
             const [details, counts] = await Promise.all([
-              get().trackProviderOperation(() => transport.followState(valid, true, scope.owner, { snapshotId: (current(scope) ? get().inventory : cache.get(scope.key)?.inventory)?.snapshotId, continueCoverage }), scope.owner).catch(error => {
+              get().trackProviderOperation(() => transport.followState(valid, true, scope.owner, { snapshotId: (current(scope) ? get().inventory : cache.get(scope.key)?.inventory)?.snapshotId, continueCoverage, refresh }), scope.owner).catch(error => {
                 const unavailable = unavailableFollowState(valid, errorMessage(error));
                 for (const [id, availability] of Object.entries(unavailable.availabilityByMetricId ?? {})) {
                   availability.followerCountStatus = "not_requested";
