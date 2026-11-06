@@ -1,7 +1,7 @@
 # Measure Tableau requests
 
 Use this procedure to measure Metric Manager request counts and Tableau throttling.
-It covers retained inventory, local mutation patches, lazy filter discovery, shared subscription coverage, and bounded cooldown recovery.
+It covers retained inventory, local mutation patches, lazy filter discovery, shared subscription coverage, cooldown recovery, and bulk mutation jobs.
 Use a datasource where creating test variants and deleting the reviewed test targets is acceptable.
 Desktop and live Tableau qualification remain user-led; automated checks use isolated provider fixtures.
 
@@ -58,7 +58,10 @@ Names and filter values are unnecessary in your notes.
    Verify that overlapping mutation controls remain disabled during known cooldown and selections remain intact.
    Leave the app idle through the reported wait and record admitted work that resumes.
    Expiry must not resubmit the whole command or an unknown write.
-   Do not restart during this window, because restarting clears the in-memory shared cooldown.
+   Do not restart during this window, because restarting clears the in-memory shared cooldown and ends any running job.
+   For a bulk change of more than 15 items, record the progress count, the **Waiting for Tableau until** time, and that the batch completes with no time cap.
+   Repeat once and click **Cancel remaining** while waiting; completed items stay done and the rest are reported as not sent.
+   The banner must show **Stopping** only after the app confirms the cancel; if it reports that Cancel was not confirmed, Cancel must be available again.
 10. Review deletion of the intended test targets and record preview and submission separately.
     Preview requires zero Tableau calls; healthy execution sends only the reviewed DELETE requests.
     Confirmed deletions disappear locally while failed, unknown, and unsent targets remain inspectable.

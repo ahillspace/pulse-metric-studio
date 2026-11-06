@@ -1,12 +1,11 @@
 import type { TableauSession } from "@pulse-metric-studio/core";
-import { TableauError } from "@pulse-metric-studio/core";
+import { runPacedMutationBlocks, tableauMutationProgress, TableauError, TableauMutationPacer } from "@pulse-metric-studio/core";
 import type { PulseDeleteResult } from "@pulse-metric-studio/shared";
 import { pulseOperationErrorMessage } from '../pulse/operation-errors.js';
 import { deleteDefinition, deleteMetric } from "../pulse/pulse-client.js";
 
 import { mutationMetadata, latestThrottle } from './mutation-metadata.js';
 import { invalidatePulseDefinitionInventory } from "./inventory.js";
-const METRIC_DELETE_GROUP_SIZE = 5;
 export interface DeletePlanEntry {
   definitionId?: string;
   metricIds: string[];
@@ -30,6 +29,7 @@ export async function executeDeletes(
   const outcomes: DeleteOutcome[] = [];
   let definitionsDeleted = 0;
   let stopped = false;
+  const settle = (outcome: DeleteOutcome) => { outcomes.push(outcome); tableauMutationProgress.completed(); };
 
   const classifyFailure = (error: unknown): "failed" | "unknown" | "not_attempted" => {
     if (error && typeof error === "object" && "sent" in error && error.sent === false) { stopped = true; return "not_attempted"; }
@@ -48,9 +48,22 @@ export async function executeDeletes(
       .map((entry) => entry.definitionId!),
   );
 
+  const metricEntries = entries
+    .flatMap((entry) =>
+      entry.metricIds.map((metricId) => ({
+        definitionId: entry.definitionId,
+        metricId,
+      })),
+    )
+    .filter((entry) => !deletingDefinitionIds.has(entry.definitionId ?? ""));
+  tableauMutationProgress.total(deletingDefinitionIds.size + metricEntries.length);
+
+  // Definition deletes cascade to every metric under them, so they go one at a
+  // time and the batch can stop before the next one is sent.
+  const definitionPacer = new TableauMutationPacer();
   for (const entry of entries.filter((candidate) => candidate.definitionId)) {
     if (stopped) {
-      outcomes.push({
+      settle({
         definitionId: entry.definitionId!,
         status: "not_attempted",
         sent: false,
@@ -59,20 +72,20 @@ export async function executeDeletes(
       continue;
     }
     try {
-      await deps.deleteDefinition(session, entry.definitionId!);
+      await definitionPacer.send(() => deps.deleteDefinition(session, entry.definitionId!));
       definitionsDeleted++;
-      outcomes.push({ definitionId: entry.definitionId!, status: "deleted", sent: true });
+      settle({ definitionId: entry.definitionId!, status: "deleted", sent: true });
     } catch (error) {
       if (error instanceof TableauError && error.status === 404) {
         definitionsDeleted++;
-        outcomes.push({
+        settle({
           definitionId: entry.definitionId!,
           status: "already_absent",
           sent: true,
         });
         continue;
       }
-      outcomes.push({
+      settle({
         definitionId: entry.definitionId!,
         status: classifyFailure(error),
         ...mutationMetadata(error),
@@ -83,20 +96,10 @@ export async function executeDeletes(
       );
     }
   }
-  const metricEntries = entries
-    .flatMap((entry) =>
-      entry.metricIds.map((metricId) => ({
-        definitionId: entry.definitionId,
-        metricId,
-      })),
-    )
-    .filter((entry) => !deletingDefinitionIds.has(entry.definitionId ?? ""));
   let metricsDeleted = 0;
-  for (let offset = 0; offset < metricEntries.length; offset += METRIC_DELETE_GROUP_SIZE) {
-    const metricResults = await Promise.all(
-      metricEntries.slice(offset, offset + METRIC_DELETE_GROUP_SIZE).map(async (entry) => {
+  const metricResults = await runPacedMutationBlocks(metricEntries, async (entry) => {
         if (stopped) {
-          outcomes.push({
+          settle({
             metricId: entry.metricId,
             status: "not_attempted",
             sent: false,
@@ -106,14 +109,14 @@ export async function executeDeletes(
         }
         try {
           await deps.deleteMetric(session, entry.metricId);
-          outcomes.push({ metricId: entry.metricId, status: "deleted", sent: true });
+          settle({ metricId: entry.metricId, status: "deleted", sent: true });
           return true;
         } catch (error) {
           if (error instanceof TableauError && error.status === 404) {
-            outcomes.push({ metricId: entry.metricId, status: "already_absent", sent: true });
+            settle({ metricId: entry.metricId, status: "already_absent", sent: true });
             return true;
           }
-          outcomes.push({
+          settle({
             metricId: entry.metricId,
             status: classifyFailure(error),
         ...mutationMetadata(error),
@@ -124,10 +127,8 @@ export async function executeDeletes(
           );
           return false;
         }
-      }),
-    );
-    metricsDeleted += metricResults.filter(Boolean).length;
-  }
+  });
+  metricsDeleted += metricResults.filter(Boolean).length;
 
   if (definitionsDeleted > 0) invalidatePulseDefinitionInventory(session);
 

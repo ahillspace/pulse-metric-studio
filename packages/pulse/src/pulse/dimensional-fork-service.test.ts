@@ -299,7 +299,6 @@ test('fork summarizes created, existing, and failed results independently', asyn
   assert.equal(summary.results[0]?.sourceMetricId, 'm1');
   assert.equal(summary.results[0]?.createdApiName, 'fork_one');
   assert.equal(summary.results[0]?.creationStatus, 'created');
-  assert.equal(summary.results[0]?.ownershipVerified, undefined);
   assert.deepEqual(summary.results[0]?.requestedSpecification, specifications.d1);
   assert.deepEqual(specifications.d1?.comparison, sourceM1.specification?.comparison);
   assert.deepEqual((specifications.d1?.filters as unknown[])[1], {

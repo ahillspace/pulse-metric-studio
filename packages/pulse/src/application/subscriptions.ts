@@ -1,8 +1,10 @@
 import type { TableauSession } from "@pulse-metric-studio/core";
 import {
   TableauError,
+  TableauMutationPacer,
+  TableauMutationStoppedError,
   TableauThrottleError,
-  assertTableauMutationAdmission,
+  tableauMutationProgress,
   apiPath,
   getJson,
   isPastEndError,
@@ -297,8 +299,6 @@ export async function followTargets(
   dependencies: SubscriptionDependencies = defaultDependencies,
 ): Promise<FollowTargetOperationResult[]> {
   const operations = canonicalFollowOperations(input.operations);
-  const admission = followAdmission(session, operations);
-  if (admission) return admission;
   const affectedIds = operations.map(operation => operation.metricId);
   invalidateSubscriptionCoverage(session, affectedIds);
   try {
@@ -357,8 +357,11 @@ export async function followTargets(
       return false;
     });
 
+    tableauMutationProgress.total(operations.length);
+    tableauMutationProgress.completed(operations.length - pending.length);
     let terminated = false;
     let throttleError: TableauError | undefined;
+    let stopError: TableauError | undefined;
     const kinds = dependencies.createSubscriptions ? ['MIXED'] as const : ['GROUP', 'USER'] as const;
     for (const kind of kinds) {
       if (terminated) break;
@@ -419,6 +422,15 @@ export async function followTargets(
           }
         } catch (error) {
           const message = pulseOperationErrorMessage(error, 'follow', [session.token]);
+          if (error instanceof TableauMutationStoppedError || (error instanceof SubscriptionBatchInterrupted && error.stopped)) {
+            // The job stopped while this batch waited to be sent; completed writes stay recorded.
+            terminated = true; stopError = error instanceof SubscriptionBatchInterrupted ? error.stoppedBy! : error;
+            for (const item of error instanceof SubscriptionBatchInterrupted ? error.completed : []) {
+              const operation = batch.find(candidate => candidate.metricId === item.metricId && candidate.target.id === item.targetId && (!item.targetType || candidate.target.kind === item.targetType));
+              if (operation) results.set(followOperationKey(operation), followWriteResult(operation, item));
+            }
+            break;
+          }
           if (error instanceof TableauError && error.status === 429) {
             terminated = true; throttleError = error;
             const completed = error instanceof SubscriptionBatchInterrupted ? error.completed : [];
@@ -508,7 +520,7 @@ export async function followTargets(
     return operations.map(
       (operation) =>
         results.get(followOperationKey(operation)) ??
-        (throttleError ? throttleFollowResult(session, operation, throttleError, false) : operationResult(
+        (stopError ? stoppedFollowResult(session, operation, stopError, 'follow') : throttleError ? throttleFollowResult(session, operation, throttleError, false) : operationResult(
           operation,
           terminated ? "not_attempted" : "failed",
           false,
@@ -526,19 +538,21 @@ export async function unfollowTargets(
   dependencies: SubscriptionDependencies = defaultDependencies,
 ): Promise<FollowTargetOperationResult[]> {
   const operations = canonicalFollowOperations(input.operations);
-  const admission = followAdmission(session, operations);
-  if (admission) return admission;
   const affectedIds = operations.map(operation => operation.metricId);
   invalidateSubscriptionCoverage(session, affectedIds);
   try {
     const results: FollowTargetOperationResult[] = [];
+    const settle = (result: FollowTargetOperationResult) => { results.push(result); tableauMutationProgress.completed(); };
     const subscriptionsByMetricId = new Map<string, SubscriptionRecord[]>();
+    const pacer = new TableauMutationPacer();
     let terminated = false;
     let throttleError: TableauError | undefined;
+    let stopError: TableauError | undefined;
+    tableauMutationProgress.total(operations.length);
     for (const operation of operations) {
       if (terminated) {
-        results.push(
-          throttleError ? throttleFollowResult(session, operation, throttleError, false) : operationResult(
+        settle(
+          stopError ? stoppedFollowResult(session, operation, stopError, 'unfollow') : throttleError ? throttleFollowResult(session, operation, throttleError, false) : operationResult(
             operation,
             "not_attempted",
             false,
@@ -564,11 +578,11 @@ export async function unfollowTargets(
             subscription.follower.type === operation.target.kind,
         );
         if (!matches.length) {
-          results.push({ ...operationResult(operation, "not_followed", true), sent: false });
+          settle({ ...operationResult(operation, "not_followed", true), sent: false });
           continue;
         }
         if (matches.some((subscription) => !subscription.id)) {
-          results.push(
+          settle(
             { ...operationResult(
               operation,
               "failed",
@@ -579,15 +593,24 @@ export async function unfollowTargets(
           continue;
         }
         for (const subscription of matches) {
-          attempted = true;
-          await dependencies.deleteSubscription(session, subscription.id!);
+          await pacer.send(() => {
+            attempted = true;
+            return dependencies.deleteSubscription(session, subscription.id!);
+          });
           completedDeletes++;
         }
-        results.push(operationResult(operation, "unfollowed", true));
+        settle(operationResult(operation, "unfollowed", true));
       } catch (error) {
+        if (error instanceof TableauMutationStoppedError) {
+          terminated = true; stopError = error;
+          settle(completedDeletes > 0
+            ? { ...operationResult(operation, "failed", false, `Some of this target's subscriptions were removed. ${pulseOperationErrorMessage(error, 'unfollow', [session.token])}`), sent: true }
+            : stoppedFollowResult(session, operation, error, 'unfollow'));
+          continue;
+        }
         if (error instanceof TableauError && error.status === 429) {
           terminated = true; throttleError = error;
-          results.push(throttleFollowResult(session, operation, error, completedDeletes > 0 || (attempted && error.sent !== false), 'unfollow'));
+          settle(throttleFollowResult(session, operation, error, completedDeletes > 0 || (attempted && error.sent !== false), 'unfollow'));
           continue;
         }
         const auth = error instanceof TableauError && error.kind === "auth";
@@ -597,7 +620,7 @@ export async function unfollowTargets(
             error.kind === "network" ||
             error.status >= 500);
         terminated = auth || unknown;
-        results.push({
+        settle({
           ...operationResult(
             operation,
             unknown ? "unknown" : auth && !attempted ? "not_attempted" : "failed",
@@ -617,15 +640,12 @@ export async function unfollowTargets(
   } finally { invalidateSubscriptionCoverage(session, affectedIds); }
 }
 
+function stoppedFollowResult(session: TableauSession, operation: FollowTargetOperation, error: TableauError, action: 'follow' | 'unfollow'): FollowTargetOperationResult {
+  return { ...operationResult(operation, 'not_attempted', false, pulseOperationErrorMessage(error, action, [session.token])), sent: false, code: 'batch_stopped' };
+}
+
 function followWriteResult(operation: FollowTargetOperation, item: import('../pulse/pulse-client.js').SubscriptionWriteResult): FollowTargetOperationResult {
   return { ...operationResult(operation, item.ok ? item.alreadyExists ? 'already_followed' : 'followed' : item.sent === false ? 'not_attempted' : item.unknown ? 'unknown' : 'failed', item.ok, item.error), sent: item.sent ?? true, ...(item.throttle ? { throttle: item.throttle, code: 'tableau_throttled' } : {}) };
-}
-function followAdmission(session: TableauSession, operations: FollowTargetOperation[]): FollowTargetOperationResult[] | undefined {
-  try { assertTableauMutationAdmission(session); }
-  catch (error) {
-    if (!(error instanceof TableauThrottleError)) throw error;
-    return operations.map(operation => throttleFollowResult(session, operation, error, false));
-  }
 }
 function throttleFollowResult(session: TableauSession, operation: FollowTargetOperation, error: TableauError, sent: boolean, action: 'follow' | 'unfollow' = 'follow'): FollowTargetOperationResult {
   const metadata = mutationMetadata(error, !sent);

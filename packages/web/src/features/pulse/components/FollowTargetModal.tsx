@@ -12,6 +12,7 @@ import {
 } from "../follow-target-actions";
 import { registryActionLabel } from "../registry-actions";
 import { CooldownBanner, type RegistryCooldown } from "../registry/CooldownBanner";
+import { JobProgress } from "../registry/JobProgress";
 import { BusyLabel, Modal } from "./ui";
 
 type FollowTarget = FollowTargetChoice;
@@ -50,6 +51,8 @@ export function FollowTargetModal({
   onClose,
 }: FollowTargetModalProps) {
   const results = useRegistry((state) => state.results);
+  const job = useRegistry((state) => state.job);
+  const cancelJob = useRegistry((state) => state.cancelJob);
   const [targets, setTargets] = useState<FollowTarget[]>([]);
   const [selected, setSelected] = useState<FollowTarget[]>([]);
   const [query, setQuery] = useState("");
@@ -278,7 +281,7 @@ export function FollowTargetModal({
         </>
       }
     >
-      <CooldownBanner cooldown={cooldown} />
+      {busy && job?.throttled ? <JobProgress job={job} onCancel={() => void cancelJob()} /> : <CooldownBanner cooldown={cooldown} />}
       {retry &&
         results &&
         (results.kind === "follow" || results.kind === "unfollow") && (

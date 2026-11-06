@@ -138,8 +138,8 @@ test("Manager deletion review uses fresh names for renamed resources and a sibli
       affectedMetrics: [{ id: "individual", name: "Renamed Bookings", followerCount: null }],
     },
   ]);
-  assert.match(html, /<strong>Renamed Revenue Definition<\/strong>/);
-  assert.match(html, /<strong>Renamed Bookings<\/strong>/);
+  assert.match(html, /<strong class="pulse-deletion-name">Renamed Revenue Definition<\/strong>/);
+  assert.match(html, /<strong class="pulse-deletion-name">Renamed Bookings<\/strong>/);
   for (const name of ["Renamed Monthly Revenue", "Renamed Regional Revenue", "New Enterprise"]) {
     assert.ok(html.includes(name), name);
   }
@@ -172,11 +172,11 @@ test("Manager deletion review discloses exact IDs for missing plan names, includ
         inventoryComplete: false, affectedMetricIds: [],
       },
     ]);
-    assert.match(html, /<strong>Cached Revenue Definition<\/strong>/);
+    assert.match(html, /<strong class="pulse-deletion-name">Cached Revenue Definition<\/strong>/);
     assert.match(html, /Cached Monthly Revenue - Month to date/);
     assert.match(html, /Cached Regional Revenue - Region: West/);
-    assert.match(html, /<strong>Metric name unavailable<\/strong>/);
-    assert.match(html, /<strong>Definition name unavailable<\/strong>/);
+    assert.match(html, /<strong class="pulse-deletion-name">Metric name unavailable<\/strong>/);
+    assert.match(html, /<strong class="pulse-deletion-name">Definition name unavailable<\/strong>/);
     const disclosures = [...html.matchAll(/<details class="pulse-deletion-id"><summary>Exact (metric|definition) ID<\/summary><code>([^<]+)<\/code><\/details>/g)];
     assert.deepEqual(disclosures.map((match) => [match[1], match[2]]), [
       ["definition", "definition-cached-month"], ["metric", "cached-month"],

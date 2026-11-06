@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, test } from 'node:test';
 import { setImmediate } from 'node:timers/promises';
-import { clearSession, setSession, TableauError, type TableauSession } from '@pulse-metric-studio/core';
+import { clearSession, setSession, TABLEAU_MUTATION_BLOCK_PAUSE_MS, TableauError, type TableauSession } from '@pulse-metric-studio/core';
 import { executeDeletes, type ExecuteDeletesDependencies } from './delete-execution.js';
 import { PulseDeletionService } from './deletion.js';
 import { clearInventoryCache } from './inventory.js';
@@ -66,7 +66,9 @@ async function reviewedDeletion(deleteMetric?: ExecuteDeletesDependencies['delet
   });
 }
 
-test('reviewed metric deletion waits for each group of five before sending the next group', async () => {
+const blockPause = () => new Promise(resolve => setTimeout(resolve, TABLEAU_MUTATION_BLOCK_PAUSE_MS + 25));
+
+test('reviewed metric deletion waits for each group of five, then pauses before sending the next group', async () => {
   const gates = new Map(metricIds.map(id => [id, deferred()]));
   const calls: string[] = [];
   const start = await reviewedDeletion(async (_owner, id) => {
@@ -84,6 +86,8 @@ test('reviewed metric deletion waits for each group of five before sending the n
 
     gates.get(metricIds[0]!)!.resolve();
     await setImmediate();
+    assert.deepEqual([...calls], metricIds.slice(0, 5), 'The next group must wait out the block pause.');
+    await blockPause();
     assert.deepEqual(calls, metricIds.slice(0, 10));
     gates.get(metricIds[6]!)!.reject(new TableauError('Retry budget exhausted.', 429));
     for (const id of metricIds.slice(7, 10)) gates.get(id)!.resolve();
@@ -91,7 +95,7 @@ test('reviewed metric deletion waits for each group of five before sending the n
     assert.deepEqual(calls, metricIds.slice(0, 10), 'The final group must wait for every request in the second group.');
 
     gates.get(metricIds[5]!)!.resolve();
-    await setImmediate();
+    await blockPause();
     assert.deepEqual(calls, metricIds);
     gates.get(metricIds[10]!)!.reject(new TableauError('Already removed.', 404));
     gates.get(metricIds[11]!)!.resolve();

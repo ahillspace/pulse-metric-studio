@@ -26,6 +26,7 @@ import {
   ReviewedResourceId,
   ReviewedMetricFollowers,
 } from "../registry/views";
+import { JobProgress } from "../registry/JobProgress";
 import { CooldownBanner } from "../registry/CooldownBanner";
 import { VariantDialog } from "../registry/VariantDialog";
 import { InventoryFailures } from "../registry/InventoryFailures";
@@ -52,7 +53,7 @@ export const ExistingMetrics = memo(function ExistingMetrics({ visible = true }:
   const registry = useRegistry(useShallow((state) => ({
     inventory: state.inventory, followState: state.followState,
     pendingProviderOperations: state.pendingProviderOperations, loading: state.loading, followLoading: state.followLoading, error: state.error,
-    cooldown: state.cooldown, pollCooldown: state.pollCooldown,
+    cooldown: state.cooldown, pollCooldown: state.pollCooldown, job: state.job, cancelJob: state.cancelJob,
     busy: state.busy, results: state.results, createdMetricIds: state.createdMetricIds,
     deletePlan: state.deletePlan, deleteLoading: state.deleteLoading,
     deleteError: state.deleteError, deleteOverridable: state.deleteOverridable,
@@ -444,6 +445,8 @@ export const ExistingMetrics = memo(function ExistingMetrics({ visible = true }:
             metrics={allMetrics}
             selectedMetricIds={plan.selectedMetricIds}
             cooldown={registry.cooldown}
+            job={registry.busy === "fork" ? registry.job : null}
+            onCancelJob={() => void registry.cancelJob()}
             busy={Boolean(registry.busy) || !registry.mutationAvailable}
             onClose={() => setVariantsOpen(false)}
             onCreate={registry.fork}
@@ -636,7 +639,9 @@ export const ExistingMetrics = memo(function ExistingMetrics({ visible = true }:
             </>
           }
         >
-          <CooldownBanner cooldown={registry.cooldown} />
+          {registry.busy === "delete" && registry.job?.throttled
+            ? <JobProgress job={registry.job} onCancel={() => void registry.cancelJob()} />
+            : <CooldownBanner cooldown={registry.cooldown} />}
           {registry.deleteLoading && (
             <p role="status">Preparing deletion from loaded metrics...</p>
           )}
@@ -649,50 +654,68 @@ export const ExistingMetrics = memo(function ExistingMetrics({ visible = true }:
           )}
           {registry.deletePlan && (
             <>
-              <p>
-                Delete exactly these reviewed resources from{" "}
-                {datasourceName}:
+              <p className="pulse-deletion-intro">
+                Delete these resources from {datasourceName}:
               </p>
               <ul className="pulse-deletion-targets">
-                {registry.deletePlan.targets.map((target) => (
-                  <li key={`${target.kind}-${target.id}`}>
-                    <strong>{target.kind === "metric"
-                      ? reviewedMetricLabel(target.id, metricById, target.name)
-                      : reviewedDefinitionLabel(target.id, definitionById, target.name)}</strong> -{" "}
-                    {target.kind === "definition"
-                      ? target.inventoryComplete
-                        ? `definition and its ${target.affectedMetricIds.length} ${target.affectedMetricIds.length === 1 ? "metric" : "metrics"}; associated subscriptions are removed`
-                        : `definition and every metric under it (inventory incomplete, ${target.affectedMetricIds.length} listed); associated subscriptions are removed`
-                      : target.inventoryComplete
-                        ? "individual metric"
-                        : "individual metric, deleted by ID (inventory incomplete)"}
-                    <ReviewedResourceId id={target.id} name={target.name} kind={target.kind} />
-                    {!!target.affectedMetrics?.length && (
-                      <ul className="pulse-deletion-metrics">
-                        {target.affectedMetrics.map((metric) => (
-                          <li key={metric.id}>
-                            {reviewedMetricLabel(metric.id, metricById, metric.name)}
-                            <ReviewedResourceId id={metric.id} name={metric.name} kind="metric" />
-                            <ReviewedMetricFollowers
-                              key={`${contextKey}-${registry.deletePlan!.previewFingerprint}-${metric.id}`}
-                              followerCount={metric.followerCount}
-                            />
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </li>
-                ))}
+                {registry.deletePlan.targets.map((target) => {
+                  const ownFollowers = target.kind === "metric"
+                    ? target.affectedMetrics?.find((metric) => metric.id === target.id)
+                    : undefined;
+                  const children = target.kind === "definition" ? target.affectedMetrics ?? [] : [];
+                  return (
+                    <li key={`${target.kind}-${target.id}`}>
+                      <div className="pulse-deletion-row">
+                        <strong className="pulse-deletion-name">{target.kind === "metric"
+                          ? reviewedMetricLabel(target.id, metricById, target.name)
+                          : reviewedDefinitionLabel(target.id, definitionById, target.name)}</strong>
+                        {ownFollowers && (
+                          <ReviewedMetricFollowers
+                            key={`${contextKey}-${registry.deletePlan!.previewFingerprint}-${target.id}`}
+                            followerCount={ownFollowers.followerCount}
+                          />
+                        )}
+                      </div>
+                      <span className="pulse-deletion-kind">
+                        {target.kind === "definition"
+                          ? target.inventoryComplete
+                            ? `definition and its ${target.affectedMetricIds.length} ${target.affectedMetricIds.length === 1 ? "metric" : "metrics"}; associated subscriptions are removed`
+                            : `definition and every metric under it (inventory incomplete, ${target.affectedMetricIds.length} listed); associated subscriptions are removed`
+                          : target.inventoryComplete
+                            ? "individual metric"
+                            : "individual metric, deleted by ID (inventory incomplete)"}
+                      </span>
+                      <ReviewedResourceId id={target.id} name={target.name} kind={target.kind} />
+                      {children.length > 0 && (
+                        <details className="pulse-deletion-children">
+                          <summary>Show {children.length} {children.length === 1 ? "metric" : "metrics"}</summary>
+                          <ul className="pulse-deletion-metrics">
+                            {children.map((metric) => (
+                              <li key={metric.id}>
+                                <div className="pulse-deletion-row">
+                                  <span className="pulse-deletion-name">{reviewedMetricLabel(metric.id, metricById, metric.name)}</span>
+                                  <ReviewedMetricFollowers
+                                    key={`${contextKey}-${registry.deletePlan!.previewFingerprint}-${metric.id}`}
+                                    followerCount={metric.followerCount}
+                                  />
+                                </div>
+                                <ReviewedResourceId id={metric.id} name={metric.name} kind="metric" />
+                              </li>
+                            ))}
+                          </ul>
+                        </details>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
               {registry.deletePlan.warnings.map((warning) => (
                 <p className="warning-banner" key={warning}>
                   {warning}
                 </p>
               ))}
-              <p>
-                This review uses loaded metrics and follower counts. Deleting a
-                definition removes all its metrics and subscriptions in Tableau.
-                This action cannot be undone by the app.
+              <p className="pulse-deletion-footnote">
+                Uses loaded metrics and follower counts. The app cannot undo a deletion.
               </p>
             </>
           )}

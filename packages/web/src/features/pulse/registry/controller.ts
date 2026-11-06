@@ -7,6 +7,7 @@ import type {
   PulseInventoryResponse,
   PulseInventoryPatch,
   TableauThrottleMetadata,
+  PulseMutationJobStatus,
   PulseVariantRequestV1,
 } from "@pulse-metric-studio/shared";
 import { registryApi, type RegistryApi } from "../api/registry";
@@ -45,6 +46,10 @@ interface RegistryState {
   createdMetricIds: string[];
   cooldown: { retryAt: number; remainingSeconds: number } | null;
   pollCooldown(): Promise<void>;
+  /** The running bulk change, once the server reports it as a job. */
+  job: RegistryJob | null;
+  /** Stops sending the running bulk change; completed changes stay done. */
+  cancelJob: () => Promise<void>;
   deletePlan: PulseDeletePlan | null;
   deleteLoading: boolean;
   deleteError: string | null;
@@ -90,6 +95,25 @@ interface RegistryState {
     metricIds: string[],
   ) => Promise<{ details: PulseFollowersDetail[] }>;
 }
+/**
+ * Progress of the running bulk change across all of its requests. `total` is
+ * null when the server has not reported a count yet.
+ */
+export interface RegistryJob {
+  kind: PulseMutationJobStatus["kind"];
+  total: number | null;
+  completed: number;
+  throttled: boolean;
+  retryAt: number | null;
+  serverTime: number;
+  /** The server confirmed the batch is stopping and sends nothing more. */
+  stopping: boolean;
+  /** Cancel was pressed and the server has not confirmed it yet. */
+  cancelling: boolean;
+  /** Why the last Cancel was not confirmed; the batch may still be sending. */
+  cancelError: string | null;
+  stopReason: PulseMutationJobStatus["stopReason"];
+}
 function key(context: PulseDraftContext | null, owner: SessionOwner | null = null): string {
   return context ? JSON.stringify([context.connectionId, context.serverUrl, context.siteId, context.datasourceLuid, sessionOwnerKey(owner)]) : "null";
 }
@@ -134,6 +158,8 @@ export function createRegistryController(
   const cooldownVersions = new Map<string, number>();
   const cooldownPollRequests = new Map<string, number>();
   let generation = 0;
+  /** The bulk change in progress; Cancel acts on it. */
+  let activeJob: { cancel(): Promise<void> } | null = null;
   let inventoryRequest = 0;
   let deleteRequest = 0;
   let deleteBatches: PulseDeletePlan[] = [];
@@ -158,6 +184,96 @@ export function createRegistryController(
       const retryAt = Math.max(get().cooldown?.retryAt ?? 0, throttle.retryAt);
       set({ cooldown: { retryAt, remainingSeconds: Math.max(0, Math.ceil((retryAt - throttle.serverTime) / 1000)) } });
     };
+    /**
+     * Starts tracking a bulk change. Its requests report progress through the
+     * returned observer, offset by the items earlier requests already finished.
+     *
+     * Cancel is two separate guarantees. Pressing it keeps this client from
+     * starting any later request at once. The server job already running stops
+     * only when the server confirms the cancel; until then the UI says it is
+     * cancelling, and a failed cancel is shown and can be pressed again. A
+     * Cancel pressed while the next request has not reported its job yet is
+     * sent as soon as that job reports in.
+     */
+    const beginJob = (scope: ReturnType<typeof capture>, total: number | null) => {
+      let id: string | null = null;
+      let before = 0;
+      let stopReason: PulseMutationJobStatus["stopReason"] = null;
+      let requested = false;
+      let confirmed = false;
+      let sending = false;
+      let awaitingId = false;
+      const publish = (patch: Partial<RegistryJob>) => {
+        const job = get().job;
+        if (job && current(scope) && activeJob === handle) set({ job: { ...job, ...patch } });
+      };
+      const sendCancel = async (jobId: string) => {
+        sending = true;
+        awaitingId = false;
+        publish({ cancelling: true, cancelError: null });
+        try {
+          const status = await transport.cancelJob(jobId, scope.owner);
+          // A job that had already finished has nothing left to stop.
+          confirmed = status.state === "stopping";
+          stopReason = stopReason ?? status.stopReason;
+          publish(confirmed ? { cancelling: false, stopping: true, stopReason } : { cancelling: false });
+        } catch (error) {
+          publish({
+            cancelling: false,
+            cancelError: `Cancel was not confirmed, so the batch may still be sending changes. ${errorMessage(error)}`,
+          });
+        } finally {
+          sending = false;
+        }
+      };
+      const handle = {
+        async cancel() {
+          if (confirmed || sending || awaitingId) return;
+          requested = true;
+          if (id) return sendCancel(id);
+          awaitingId = true;
+          publish({ cancelling: true, cancelError: null });
+        },
+      };
+      activeJob = handle;
+      const observe = (status: PulseMutationJobStatus) => {
+        id = status.id;
+        stopReason = stopReason ?? status.stopReason;
+        if (status.state === "stopping") confirmed = true;
+        if (awaitingId) void sendCancel(status.id);
+        if (!current(scope) || activeJob !== handle) return;
+        const previous = get().job;
+        set({ job: {
+          kind: status.kind,
+          total: total ?? status.total,
+          completed: before + status.completed,
+          throttled: status.throttled || Boolean(previous?.throttled),
+          retryAt: status.retryAt,
+          serverTime: status.serverTime,
+          stopping: confirmed,
+          cancelling: sending || awaitingId,
+          cancelError: previous?.cancelError ?? null,
+          stopReason: stopReason ?? previous?.stopReason ?? null,
+        } });
+      };
+      return {
+        observe,
+        /** Moves progress past a finished request of `count` items. */
+        advance(count: number) { before += count; id = null; },
+        /** Cancel was pressed, or a request reported its job stopped; later requests are not sent. */
+        get cancelled() { return requested || stopReason !== null; },
+        /** Why the server stopped a request's job; null unless the server reported a stop. */
+        get stopReason(): PulseMutationJobStatus["stopReason"] { return stopReason; },
+        end() {
+          if (activeJob === handle) activeJob = null;
+          if (current(scope)) set({ job: null });
+        },
+      };
+    };
+    const stoppedMessage = (reason: PulseMutationJobStatus["stopReason"], noun: string) =>
+      reason === "time_limit"
+        ? `The batch stopped after 2 hours. Completed ${noun} stay done; the rest were not sent.`
+        : `The batch was cancelled. Completed ${noun} stay done; the rest were not sent.`;
     const captureCooldown = (scope: ReturnType<typeof capture>, error: unknown) => {
       if (error instanceof PulseApiError) captureThrottle(scope, error.throttle);
     };
@@ -369,6 +485,10 @@ export function createRegistryController(
       results: null,
       outcomes: {},
       cooldown: null,
+      job: null,
+      async cancelJob() {
+        await activeJob?.cancel();
+      },
       async pollCooldown() {
         const scope = capture();
         try {
@@ -413,6 +533,7 @@ export function createRegistryController(
           pendingProviderOperations: providerOperations.get(sessionOwnerKey(owner)) ?? 0,
           error: null,
           busy: null,
+          job: null,
           results: get().outcomes[key(context, owner)] ?? null,
           cooldown: sessionOwnerKey(owner) === sessionOwnerKey(get().owner) ? get().cooldown : null,
           createdMetricIds: [],
@@ -524,8 +645,9 @@ export function createRegistryController(
         const scope = capture();
         if (!scope.context || get().busy || !get().mutationAvailable || get().cooldown) return;
         set({ busy: "fork", error: null });
+        const job = beginJob(scope, null);
         try {
-          const summary = await get().trackProviderOperation(() => transport.fork(scope.context!, request, scope.owner, { snapshotId: get().inventory?.snapshotId, sourceContextId: request.sourceContextId }), scope.owner);
+          const summary = await get().trackProviderOperation(() => transport.fork(scope.context!, request, scope.owner, { snapshotId: get().inventory?.snapshotId, sourceContextId: request.sourceContextId }, job.observe), scope.owner);
           captureThrottle(scope, summary.throttle);
           applyPatch(scope, summary.inventoryPatch);
           if (current(scope))
@@ -545,7 +667,7 @@ export function createRegistryController(
           record(scope, {
             kind: "fork",
             title: "Variant results",
-            summary: summary.error,
+            summary: summary.error ?? (job.stopReason ? stoppedMessage(job.stopReason, "variants") : undefined),
             finishedAt: Date.now(),
             items: summary.results.map((result, index) =>
               forkRegistryActionItem(
@@ -579,6 +701,7 @@ export function createRegistryController(
             })),
           });
         } finally {
+          job.end();
           if (current(scope)) set({ busy: null });
         }
       },
@@ -692,6 +815,7 @@ export function createRegistryController(
         if (!scope.context || !plan || get().busy || !get().mutationAvailable || get().cooldown) return;
         set({ busy: "delete", deleteError: null });
         const batches = [...deleteBatches];
+        const job = beginJob(scope, batches.length === 1 ? null : plan.targets.length);
         const outcomes: Awaited<ReturnType<PulseApi["delete"]>>["outcomes"] =
           [];
         const sent = new Set<string>();
@@ -705,6 +829,10 @@ export function createRegistryController(
                 "The connection or datasource changed. Remaining deletions were not sent.";
               break;
             }
+            if (job.cancelled) {
+              failure = stoppedMessage(job.stopReason, "deletions");
+              break;
+            }
             batch.targets.forEach((target) =>
               sent.add(`${target.kind}:${target.id}`),
             );
@@ -715,10 +843,15 @@ export function createRegistryController(
               definitionIds: batch.definitionIds,
               previewFingerprint: batch.previewFingerprint,
               allowIncompleteInventory: batch.allowIncompleteInventory,
-            }), scope.owner);
+            }, job.observe), scope.owner);
+            job.advance(batch.targets.length);
             captureThrottle(scope, response.throttle);
             applyPatch(scope, response.inventoryPatch);
             outcomes.push(...response.outcomes);
+            if (job.stopReason) {
+              failure = stoppedMessage(job.stopReason, "deletions");
+              break;
+            }
             if (response.failures.length) {
               failure = response.failures.join(" ");
               break;
@@ -744,6 +877,7 @@ export function createRegistryController(
                   deletePlan: null,
                   busy: null,
                 });
+              job.end();
               return;
             }
           }
@@ -804,6 +938,7 @@ export function createRegistryController(
               ? { deleteError: null, error: errorMessage(error) }
               : { deleteError: errorMessage(error) }) });
         } finally {
+          job.end();
           if (current(scope)) set({ busy: null });
         }
       },
@@ -816,6 +951,7 @@ export function createRegistryController(
         const scope = capture();
         if (!scope.context || get().busy || !get().mutationAvailable || get().cooldown) return operations;
         set({ busy: kind });
+        const job = beginJob(scope, operations.length);
         const labels = {
           metricLabels: new Map(
             metrics.map((metric) => [metric.id, metric.label]),
@@ -839,18 +975,24 @@ export function createRegistryController(
                 "The connection or datasource changed. Remaining subscriptions were not sent.";
               break;
             }
+            if (job.cancelled) {
+              failure = stoppedMessage(job.stopReason, "subscriptions");
+              break;
+            }
             activeBatchStart = index;
             sentCount = index + Math.min(200, operations.length - index);
             const response = await get().trackProviderOperation(() => transport[kind](
               scope.context!,
               operations.slice(index, index + 200),
               scope.owner,
+              job.observe,
             ), scope.owner);
+            job.advance(Math.min(200, operations.length - index));
             captureThrottle(scope, response.throttle);
             for (const result of response.results) captureThrottle(scope, result.throttle);
             results.push(...response.results);
             if (response.terminated || response.stopped || response.throttle) {
-              failure = response.terminated
+              failure = job.stopReason ? stoppedMessage(job.stopReason, "subscriptions") : response.terminated
                 ? "The Tableau session ended. Remaining subscriptions were not sent."
                 : response.throttle ? "Tableau is limiting requests. Remaining subscriptions were not sent."
                 : "A subscription outcome is uncertain. Remaining subscriptions were not sent.";
@@ -917,6 +1059,7 @@ export function createRegistryController(
             if (scope.key === activeKey()) set({ followState: replaceFollowMetrics(get().followState, deferred, ids) });
           }
         }
+        job.end();
         if (current(scope)) set({ busy: null });
         return reconciled.retryOperations;
       },

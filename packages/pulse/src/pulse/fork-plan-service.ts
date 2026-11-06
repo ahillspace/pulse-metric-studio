@@ -1,9 +1,10 @@
 import type { TableauSession } from '@pulse-metric-studio/core';
 import {
   getFieldCatalog,
-  assertTableauMutationAdmission,
   getSessionContext,
   isSessionCurrent,
+  runPacedMutationBlocks,
+  tableauMutationProgress,
   TableauError,
   withTableauOperation,
 } from '@pulse-metric-studio/core';
@@ -131,7 +132,6 @@ export class PulseForkPlanService {
     input: unknown,
   ): Promise<PulseForkPlanSummary> {
     const request = canonicalizeForkPlanRequest(input);
-    assertTableauMutationAdmission(session);
     const sessionContext = getSessionContext(session);
     const capturedSiteId = session.siteId;
     const capturedCoordinates = JSON.stringify([session.serverUrl, session.siteId, session.userId]);
@@ -287,23 +287,6 @@ export class PulseForkPlanService {
         const creationStatus = response.created ? 'created' as const : 'existing' as const;
         const raw = response.raw;
         const providerMetric = isRecord(raw) && isRecord(raw.metric) ? raw.metric as PulseExactMetric : undefined;
-        try {
-          if (typeof response.created !== 'boolean' || typeof response.metricId !== 'string' || !response.metricId.trim()) throw new Error('Tableau returned invalid creation fields.');
-          if (providerMetric) {
-            if ((providerMetric.id !== undefined && providerMetric.id !== response.metricId) || (providerMetric.metadata?.id !== undefined && providerMetric.metadata.id !== response.metricId)) throw new Error('Tableau returned conflicting metric identifiers.');
-            const definitions = [providerMetric.definition_id, providerMetric.specification_reference?.definition_id, providerMetric.definition?.metadata?.id];
-            const sites = [providerMetric.site_id, providerMetric.site?.id];
-            if (definitions.some(id => id !== undefined && id !== source.definitionId) || sites.some(id => id !== undefined && id !== capturedSiteId)) throw new Error('Tableau returned conflicting metric ownership.');
-            for (const actualSpecification of [providerMetric.specification, providerMetric.metric_specification]) {
-              if (actualSpecification === undefined) continue;
-              if (!isRecord(actualSpecification)) throw new Error('Tableau returned an invalid metric specification.');
-              const actualDatasource = isRecord(actualSpecification.datasource) ? actualSpecification.datasource.id : undefined;
-              if (actualDatasource !== undefined && actualDatasource !== source.datasourceLuid) throw new Error('Tableau returned conflicting metric ownership.');
-              const comparable = structuredClone(actualSpecification); delete comparable.datasource;
-              if (canonicalDestination(comparable) !== canonicalDestination(specification)) throw new Error('Tableau returned a conflicting metric specification.');
-            }
-          }
-        } catch (error) { return failedResult(source.metricId, error, false, specification, response.metricId, 'ownership_mismatch', { creationStatus }); }
         const metric = exactMetricVariant(response.metricId, {}, { ...providerMetric, id: response.metricId, definition_id: source.definitionId, specification: structuredClone(specification) });
         return { sourceMetricId: source.metricId, definitionId: source.definitionId, status: creationStatus, creationStatus, sent: true, metricId: response.metricId, metric, requestedSpecification: specification };
 
@@ -328,13 +311,12 @@ export class PulseForkPlanService {
         );
       }
     };
-    const created: Array<PulseForkPlanResult | FailedResult> = [];
-    for (let offset = 0; offset < planned.length; offset += PROVIDER_CONCURRENCY) {
-      created.push(...await Promise.all(
-        planned.slice(offset, offset + PROVIDER_CONCURRENCY).map(plan =>
-          mutationControl.stopped || !current() ? mutationControl.notStarted(plan) : createDestination(plan)),
-      ));
-    }
+    tableauMutationProgress.total(planned.length);
+    const created = await runPacedMutationBlocks(planned, async plan => {
+      const outcome = mutationControl.stopped || !current() ? mutationControl.notStarted(plan) : await createDestination(plan);
+      tableauMutationProgress.completed();
+      return outcome;
+    });
 
     const results: PulseForkPlanResult[] = failures.map(
       (failure) => failure.result,
@@ -572,7 +554,7 @@ function failedResult(
   providerFailure: boolean,
   requestedSpecification: Record<string, unknown> = {},
   metricId?: string,
-  status: 'failed' | 'ownership_mismatch' = 'failed',
+  status: 'failed' = 'failed',
   context: Pick<PulseForkPlanResult, 'creationStatus' | 'reconciliationStatus'> = {},
 ): FailedResult {
   return {
@@ -620,10 +602,7 @@ function summarizeResults(
       (result) =>
         (result.creationStatus ?? result.status) === 'existing',
     ).length,
-    failed: destinations.filter(
-      (result) =>
-        result.status === 'failed' || result.status === 'ownership_mismatch',
-    ).length,
+    failed: destinations.filter((result) => result.status === 'failed').length,
     pendingVisibility: destinations.filter(
       (result) =>
         result.reconciliationStatus === 'pending_visibility' ||

@@ -490,13 +490,12 @@ export const PulseVariantResultSchema = z.object({
     'failed',
     'pending_visibility',
     'visible',
-    'ownership_mismatch',
   ]),
   creationStatus: z
     .enum(['created', 'existing', 'failed', 'unknown', 'not_attempted'])
     .optional(),
   reconciliationStatus: z
-    .enum(['visible', 'pending_visibility', 'ownership_mismatch', 'failed'])
+    .enum(['visible', 'pending_visibility', 'failed'])
     .optional(),
   metricId: z.string().optional(),
   requestedSpecification: z.record(z.unknown()),

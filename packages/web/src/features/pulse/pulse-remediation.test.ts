@@ -445,6 +445,26 @@ test('follow target search consumes Escape only when it clears a query', () => {
   }, '', () => assert.fail('empty Escape must not clear the query')), false);
 });
 
+test('fork friendly names collapse long filter scopes and mark exclusions', () => {
+  const values = (...names: string[]) => names.map((string_value) => ({ string_value }));
+  assert.equal(
+    forkFriendlyName(
+      { name: 'Sales', filters: [{ field: 'Customer', operator: 'OPERATOR_NOT_EQUAL', categorical_values: values('Acme') }] },
+      'Sales',
+      '00000000-0000-4000-8000-000000000004',
+    ),
+    'Sales - Customer: not Acme',
+  );
+  assert.equal(
+    forkFriendlyName(
+      { name: 'Sales', filters: [{ field: 'State', categorical_values: values('Ohio', 'Iowa', 'Utah', 'Maine', 'Idaho') }] },
+      'Sales',
+      '00000000-0000-4000-8000-000000000005',
+    ),
+    'Sales - State: Ohio, Iowa, Utah +2 more',
+  );
+});
+
 test('partial follower details retain confirmed rows and add a diagnostic without a leading LUID', () => {
   const items = followerDetailLines({
     metricId: 'metric-exact',
@@ -702,7 +722,6 @@ test('fork registry results preserve creation, reconciliation, and requested spe
     existing: 1,
     visible: 0,
     pendingVisibility: 1,
-    ownershipMismatch: 0,
     failed: 0,
   });
 });

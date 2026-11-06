@@ -77,7 +77,7 @@ export class PulseDimensionalForkService extends DimensionQueries {
         fieldId: request.fieldId,
         valueFingerprint: fingerprintValues(request.selection.values),
         status:
-          result.status === 'failed' || result.status === 'ownership_mismatch'
+          result.status === 'failed'
             ? 'failed'
             : result.creationStatus === 'created'
               ? 'created'

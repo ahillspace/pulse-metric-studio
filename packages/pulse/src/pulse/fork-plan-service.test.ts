@@ -318,7 +318,7 @@ test('preserves partial results when one exact source cannot resolve', async () 
   assert.equal(forkPlanHttpStatus(summary), 207);
 });
 
-test('conflicting get-or-create ownership preserves disposition but refuses its row', async () => {
+test('a get-or-create response describing the metric differently still yields the created variant', async () => {
   const summary = await new PulseForkPlanService(dependencies({
     getOrCreate: async () => ({ metricId: 'fork-1', created: false, raw: { metric: { id: 'fork-1', definition_id: 'another-definition' } } }),
   })).forkMetrics(session, {
@@ -329,10 +329,10 @@ test('conflicting get-or-create ownership preserves disposition but refuses its 
   });
 
   assert.equal(summary.existing, 1);
-  assert.equal(summary.failed, 1);
-  assert.equal(summary.results[0]?.status, 'ownership_mismatch');
-  assert.equal(summary.results[0]?.creationStatus, 'existing');
-  assert.equal(summary.results[0]?.metric, undefined);
+  assert.equal(summary.failed, 0);
+  assert.equal(summary.results[0]?.status, 'existing');
+  assert.equal(summary.results[0]?.metric?.metricId, 'fork-1');
+  assert.equal(forkPlanHttpStatus(summary), 200);
 });
 
 test('classifies a complete provider failure as 502', async () => {
@@ -352,20 +352,28 @@ test('classifies a complete provider failure as 502', async () => {
   assert.match(summary.results[0]!.error ?? '', /invalid specification/);
 });
 
-for (const aliases of [
-  { definition_id: 'definition-1', specification_reference: { definition_id: 'foreign' } },
-  { definition_id: 'definition-1', definition: { metadata: { id: 'foreign' } } },
-  { site_id: 'site-id', site: { id: 'foreign' } },
-  { specification: { filters: [] }, metric_specification: { filters: [{ unexpected: true }] } },
-]) test(`real getOrCreate adapter rejects conflicting supplied aliases ${JSON.stringify(aliases)}`, async () => {
+test('real getOrCreate adapter accepts a filtered variant whose returned specification Tableau normalized', async () => {
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (_input, init) => Response.json({ is_metric_created: true, metric: { id: 'fork-1', ...aliases, ...('specification' in aliases ? { specification: JSON.parse(String(init?.body)).specification } : {}) } });
+  globalThis.fetch = async (_input, init) => {
+    const requested = JSON.parse(String(init?.body)).specification;
+    return Response.json({
+      is_metric_created: true,
+      metric: {
+        id: 'fork-1',
+        definition_id: 'definition-1',
+        specification: {
+          ...requested,
+          filters: [{ field: 'Region', operator: 'OPERATOR_EQUAL', categorical_values: [{ string_value: 'West', bool_value: false, null_value: 'NULL_VALUE' }], include_null: false }],
+        },
+      },
+    });
+  };
   try {
     const summary = await new PulseForkPlanService(dependencies({ getOrCreate: getOrCreatePulseMetric })).forkMetrics(session, { version: 1, sourceMetricIds: ['metric-1'], timeframe: { key: 'LAST_30_DAYS' }, clauses: [] });
-    assert.equal(summary.results[0]?.status, 'ownership_mismatch');
+    assert.equal(summary.results[0]?.status, 'created');
     assert.equal(summary.results[0]?.creationStatus, 'created');
-    assert.equal(summary.results[0]?.metric, undefined);
-    assert.equal(summary.inventoryPatch, undefined);
+    assert.equal(summary.results[0]?.metric?.metricId, 'fork-1');
+    assert.equal(summary.failed, 0);
   } finally { globalThis.fetch = originalFetch; }
 });
 
