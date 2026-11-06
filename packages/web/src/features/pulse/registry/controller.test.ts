@@ -3,6 +3,7 @@ import test from "node:test";
 import type {
   PulseDeletePlan,
   PulseInventoryResponse,
+  PulseMutationJobStatus,
   PulseVariantSummary,
 } from "@pulse-metric-studio/shared";
 import { createRegistryController } from "./controller";
@@ -38,6 +39,7 @@ function fixture(
       pendingVisibility: 0,
       results: [],
     }),
+    cancelJob: async () => { throw new Error("No batch is running."); },
     ...overrides,
   };
   const deletion: Pick<PulseApi, "previewDelete" | "delete"> = {
@@ -1430,4 +1432,116 @@ for (const replacementOwner of [false, true]) test(`owner activity permits healt
   assert.equal(store.getState().pendingProviderOperations, 0);
   assert.equal(store.getState().busy, null);
   assert.equal(Object.keys(store.getState().outcomes).length, 2);
+});
+
+function jobStatus(id: string, overrides: Partial<PulseMutationJobStatus> = {}): PulseMutationJobStatus {
+  return { id, kind: "follow", state: "running", total: 1, completed: 0, throttled: true, retryAt: 60_000, serverTime: 0, stopReason: null, ...overrides };
+}
+const settle = () => new Promise<void>(resolve => setImmediate(resolve));
+
+test("a cancel the server does not confirm is reported and can be pressed again", async () => {
+  const response = deferred<Awaited<ReturnType<RegistryApi["follow"]>>>();
+  const cancels: string[] = [];
+  let reject = true;
+  const store = fixture({
+    follow: async (_context, _batch, _owner, observe) => { observe?.(jobStatus("job-1")); return response.promise; },
+    cancelJob: async (id) => {
+      cancels.push(id);
+      if (reject) throw new Error("The desktop service is unavailable.");
+      return jobStatus(id, { state: "stopping", stopReason: "cancelled" });
+    },
+  });
+  store.getState().setContext(draft().context, "A", session);
+  const running = store.getState().follow("follow", [{ metricId: "metric", target: { kind: "USER", id: "user" } }], [], []);
+  await settle();
+  await store.getState().cancelJob();
+  let job = store.getState().job!;
+  assert.equal(job.stopping, false, "an unconfirmed cancel does not claim the batch is stopping");
+  assert.equal(job.cancelling, false, "Cancel is available again");
+  assert.match(job.cancelError ?? "", /not confirmed.*desktop service is unavailable/);
+  reject = false;
+  await store.getState().cancelJob();
+  job = store.getState().job!;
+  assert.deepEqual({ stopping: job.stopping, cancelError: job.cancelError, stopReason: job.stopReason }, { stopping: true, cancelError: null, stopReason: "cancelled" });
+  assert.deepEqual(cancels, ["job-1", "job-1"]);
+  await store.getState().cancelJob();
+  assert.equal(cancels.length, 2, "a confirmed cancel is not resent");
+  response.resolve({ stopped: true, results: [{ metricId: "metric", targetKind: "USER", targetId: "user", ok: false, status: "not_attempted" }] });
+  await running;
+  assert.equal(store.getState().job, null);
+});
+
+test("a cancel pressed before the next request reports its job is sent once that job reports in", async () => {
+  const operations = Array.from({ length: 201 }, (_, index) => ({ metricId: `metric-${index}`, target: { kind: "USER" as const, id: "user" } }));
+  const second = deferred<Awaited<ReturnType<RegistryApi["follow"]>>>();
+  const reported = deferred<void>();
+  let observeSecond: ((status: PulseMutationJobStatus) => void) | undefined;
+  const cancels: string[] = [];
+  let requests = 0;
+  const store = fixture({
+    follow: async (_context, batch, _owner, observe) => {
+      if (++requests === 1) {
+        observe?.(jobStatus("job-1", { total: 200 }));
+        return { results: batch.map((operation) => ({ metricId: operation.metricId, targetKind: "USER" as const, targetId: "user", ok: true, status: "followed" as const })) };
+      }
+      observeSecond = observe;
+      reported.resolve();
+      return second.promise;
+    },
+    cancelJob: async (id) => { cancels.push(id); return jobStatus(id, { state: "stopping", stopReason: "cancelled" }); },
+  });
+  store.getState().setContext(draft().context, "A", session);
+  const running = store.getState().follow("follow", operations, [], []);
+  await reported.promise;
+  await store.getState().cancelJob();
+  assert.deepEqual(cancels, [], "no job id is known yet");
+  assert.equal(store.getState().job?.cancelling, true);
+  observeSecond!(jobStatus("job-2"));
+  await settle();
+  assert.deepEqual(cancels, ["job-2"], "the cancel reaches the request that was already sent");
+  assert.equal(store.getState().job?.stopping, true);
+  second.resolve({ stopped: true, results: [{ metricId: "metric-200", targetKind: "USER", targetId: "user", ok: false, status: "not_attempted" }] });
+  await running;
+  assert.equal(requests, 2);
+});
+
+test("a cancel pressed between requests keeps later requests from being sent even if the server is unreachable", async () => {
+  const operations = Array.from({ length: 401 }, (_, index) => ({ metricId: `metric-${index}`, target: { kind: "USER" as const, id: "user" } }));
+  const first = deferred<Awaited<ReturnType<RegistryApi["follow"]>>>();
+  let requests = 0;
+  const store = fixture({
+    follow: async (_context, batch, _owner, observe) => {
+      requests++;
+      observe?.(jobStatus(`job-${requests}`, { total: 200 }));
+      return requests === 1 ? first.promise : { results: batch.map((operation) => ({ metricId: operation.metricId, targetKind: "USER" as const, targetId: "user", ok: true, status: "followed" as const })) };
+    },
+    cancelJob: async () => { throw new Error("offline"); },
+  });
+  store.getState().setContext(draft().context, "A", session);
+  const running = store.getState().follow("follow", operations, [], []);
+  await settle();
+  await store.getState().cancelJob();
+  assert.match(store.getState().job?.cancelError ?? "", /offline/);
+  first.resolve({ results: operations.slice(0, 200).map((operation) => ({ metricId: operation.metricId, targetKind: "USER" as const, targetId: "user", ok: true, status: "followed" as const })) });
+  await running;
+  assert.equal(requests, 1, "later requests are not started after Cancel");
+  const results = store.getState().results!;
+  assert.equal(results.items.filter((item) => item.status === "not_attempted").length, 201);
+});
+
+test("a cancel that reaches a job that already finished does not report a stop", async () => {
+  const response = deferred<Awaited<ReturnType<RegistryApi["fork"]>>>();
+  const store = fixture({
+    fork: async (_context, _request, _owner, _options, observe) => { observe?.(jobStatus("job-1", { kind: "fork" })); return response.promise; },
+    cancelJob: async (id) => jobStatus(id, { kind: "fork", state: "finished" }),
+  });
+  store.getState().setContext(draft().context, "A", session);
+  const running = store.getState().fork({ version: 1, sourceMetricIds: ["metric"], timeframe: { key: "mtd" } } as any, new Map());
+  await settle();
+  await store.getState().cancelJob();
+  const job = store.getState().job!;
+  assert.deepEqual({ stopping: job.stopping, cancelling: job.cancelling, cancelError: job.cancelError, stopReason: job.stopReason }, { stopping: false, cancelling: false, cancelError: null, stopReason: null });
+  response.resolve({ attempted: 1, created: 1, existing: 0, failed: 0, pendingVisibility: 0, results: [] });
+  await running;
+  assert.doesNotMatch(store.getState().results?.summary ?? "", /cancelled/, "a batch that completed is not described as cancelled");
 });

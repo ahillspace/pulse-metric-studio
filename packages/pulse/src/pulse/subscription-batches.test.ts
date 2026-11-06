@@ -107,95 +107,144 @@ test('a conflict verification 401 leaves submitted recipients unknown and later 
   } finally { await app.close(); }
 });
 
-for (const action of ['follow', 'unfollow'] as const) test(`${action} refuses known cooldown before any subscription preflight`, async () => {
+const context = (owner: TableauSession) => ({ connectionId: 'connection', serverUrl: owner.serverUrl, siteId: owner.siteId, datasourceLuid: 'datasource' });
+const limited = (seconds = 1) => Response.json({ error: 'limited' }, { status: 429, headers: { 'Retry-After': String(seconds) } });
+
+/** Follows a job started by `start` until it answers with its final response. */
+async function finish(app: ReturnType<typeof Fastify>, start: { statusCode: number; body: string; json(): any }) {
+  let response = start;
+  if (response.statusCode === 200 && response.json().job) response = await app.inject({ method: 'GET', url: `/api/pulse/jobs/${response.json().job.id}` });
+  for (let polls = 0; response.statusCode === 202 && polls < 200; polls++) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    response = await app.inject({ method: 'GET', url: `/api/pulse/jobs/${response.json().job.id}` });
+  }
+  return response;
+}
+
+for (const action of ['follow', 'unfollow'] as const) test(`${action} started during a known cooldown waits for Tableau instead of refusing`, async () => {
   // A distinct owner isolates gate lifetime from other tests.
   const owner = { ...session, userId: `cooldown-${action}` }; setSession(owner, { connectionId: 'connection', patSecret: '' });
-  let calls = 0;
-  globalThis.fetch = async () => { calls++; return Response.json({ error: 'limited' }, { status: 429, headers: { 'Retry-After': '60' } }); };
-  await assert.rejects(postJson(owner, '/api/-/pulse/test', {}));
-  const before = calls;
-  let preflight = 0;
-  const result = await (action === 'follow' ? followTargets : unfollowTargets)(owner, { operations }, { ...defaultDependencies, listSubscriptions: async () => { preflight++; return []; } });
-  assert.equal(preflight, 0, 'Admission must refuse before subscription preflight even when adapters are injected.');
-  assert.equal(calls, before);
-  assert.ok(result.every(item => item.status === 'not_attempted' && item.sent === false && item.throttle?.retryAt));
+  let limitedOnce = false;
+  const calls: string[] = [];
+  globalThis.fetch = async (_input, init) => {
+    if (!limitedOnce) { limitedOnce = true; return limited(); }
+    const method = String(init?.method ?? 'GET'); calls.push(method);
+    if (method === 'GET') return Response.json({ subscriptions: action === 'unfollow' ? [{ id: 'subscription', follower: { user_id: 'recipient-a' } }] : [] });
+    if (method === 'DELETE') return new Response(null, { status: 204 });
+    return Response.json({ subscriptions: [{ follower: { user_id: 'recipient-a' } }] });
+  };
+  await assert.rejects(postJson(owner, '/api/-/pulse/test', {}, { timeoutMs: 100 }));
+  const app = Fastify(); registerPulseRoutes(app);
+  try {
+    const started = await app.inject({ method: 'POST', url: `/api/pulse/${action}`, payload: { context: context(owner), operations: [operations[0]] } });
+    assert.equal(started.statusCode, 202, started.body);
+    assert.equal(started.json().job.throttled, true);
+    assert.equal(calls.length, 0, 'Nothing is sent while Tableau is limiting requests.');
+    const response = await finish(app, started);
+    assert.equal(response.statusCode, 200, response.body);
+    assert.equal(response.json().results[0].status, action === 'follow' ? 'followed' : 'unfollowed');
+  } finally { await app.close(); }
 });
 
-test('real follow route preserves sent throttle receipts and stops later metric envelopes', async () => {
+test('real follow route resends a throttled write until Tableau accepts it', async () => {
   const owner = { ...session, userId: 'sent-follow-throttle' }; setSession(owner, { connectionId: 'connection', patSecret: '' });
   let posts = 0;
   globalThis.fetch = async (_input, init) => {
     if (init?.method === 'GET') return Response.json({ subscriptions: [] });
-    posts++; return Response.json({ error: 'limited' }, { status: 429, headers: { 'Retry-After': '60' } });
+    const body = JSON.parse(String(init?.body));
+    if (++posts === 1) return limited();
+    return Response.json({ subscriptions: body.followers.map((follower: unknown) => ({ metric_id: body.metric_id, follower })) });
   };
   const app = Fastify(); registerPulseRoutes(app);
   try {
-    const response = await app.inject({ method: 'POST', url: '/api/pulse/follow', payload: { context: { connectionId: 'connection', serverUrl: owner.serverUrl, siteId: owner.siteId, datasourceLuid: 'datasource' }, operations: [operations[0], { ...operations[1], metricId: 'later' }] } });
-    assert.equal(posts, 1);
-    assert.equal(response.statusCode, 207, response.body);
-    const body = response.json();
-    assert.equal(body.results[0].status, 'failed'); assert.equal(body.results[0].sent, true);
-    assert.equal(body.results[1].status, 'not_attempted'); assert.equal(body.results[1].sent, false);
-    assert.equal(body.throttle.reason, 'throttle'); assert.equal(body.sent, true); assert.equal(body.stopped, true);
+    const started = await app.inject({ method: 'POST', url: '/api/pulse/follow', payload: { context: context(owner), operations: [operations[0], { ...operations[1], metricId: 'later' }] } });
+    assert.equal(started.statusCode, 202, started.body);
+    assert.equal(started.json().job.total, 2);
+    const response = await finish(app, started);
+    assert.equal(response.statusCode, 200, response.body);
+    assert.deepEqual(response.json().results.map((item: { status: string }) => item.status), ['followed', 'followed']);
+    assert.equal(posts, 3, 'The throttled envelope is resent once; the later metric is sent once.');
   } finally { await app.close(); }
 });
 
-
-test('real unfollow route preserves rejected and unsent mutation dispositions', async () => {
+test('real unfollow route resends a throttled delete until Tableau accepts it', async () => {
   const owner = { ...session, userId: 'sent-unfollow-throttle' }; setSession(owner, { connectionId: 'connection', patSecret: '' });
   const calls: string[] = [];
   globalThis.fetch = async (_input, init) => {
     calls.push(String(init?.method));
-    return init?.method === 'GET' ? Response.json({ subscriptions: [{ id: 'subscription', follower: { user_id: 'recipient-a' } }] }) : Response.json({ error: 'limited' }, { status: 429, headers: { 'Retry-After': '60' } });
+    if (init?.method === 'GET') return Response.json({ subscriptions: [{ id: 'subscription', follower: { user_id: 'recipient-a' } }] });
+    return calls.filter(call => call === 'DELETE').length === 1 ? limited() : new Response(null, { status: 204 });
   };
   const app = Fastify(); registerPulseRoutes(app);
   try {
-    const response = await app.inject({ method: 'POST', url: '/api/pulse/unfollow', payload: { context: { connectionId: 'connection', serverUrl: owner.serverUrl, siteId: owner.siteId, datasourceLuid: 'datasource' }, operations: [operations[0], { ...operations[1], metricId: 'later' }] } });
-    assert.equal(response.statusCode, 207, response.body);
-    const body = response.json();
-    assert.deepEqual(body.results.map((item: { status: string; sent: boolean }) => [item.status, item.sent]), [['failed', true], ['not_attempted', false]]);
-    assert.equal(body.throttle.reason, 'throttle'); assert.equal(body.throttle.sent, true); assert.equal(body.stopped, true);
-    assert.deepEqual(calls, ['GET', 'DELETE']);
+    const response = await finish(app, await app.inject({ method: 'POST', url: '/api/pulse/unfollow', payload: { context: context(owner), operations: [operations[0]] } }));
+    assert.equal(response.statusCode, 200, response.body);
+    assert.deepEqual(response.json().results.map((item: { status: string; sent: boolean }) => [item.status, item.sent]), [['unfollowed', true]]);
+    assert.deepEqual(calls, ['GET', 'DELETE', 'DELETE']);
   } finally { await app.close(); }
 });
 
-test('throttled subscription preflight returns an entirely unsent HTTP429 receipt', async () => {
+test('a throttled subscription preflight waits and the batch completes', async () => {
   const owner = { ...session, userId: 'preflight-follow-throttle' }; setSession(owner, { connectionId: 'connection', patSecret: '' });
   const calls: string[] = [];
-  globalThis.fetch = async (_input, init) => { calls.push(String(init?.method)); return Response.json({ error: 'limited' }, { status: 429, headers: { 'Retry-After': '60' } }); };
-  const app = Fastify(); registerPulseRoutes(app);
-  try {
-    const response = await app.inject({ method: 'POST', url: '/api/pulse/follow', payload: { context: { connectionId: 'connection', serverUrl: owner.serverUrl, siteId: owner.siteId, datasourceLuid: 'datasource' }, operations: [operations[0]] } });
-    assert.equal(response.statusCode, 429, response.body);
-    const body = response.json();
-    assert.equal(body.results[0].status, 'not_attempted'); assert.equal(body.results[0].sent, false);
-    assert.equal(body.throttle.sent, false); assert.equal(body.sent, false); assert.equal(body.stopped, true);
-    assert.deepEqual(calls, ['GET']);
-  } finally { await app.close(); }
-});
-
-for (const localVerification of [false, true]) test(`follow conflict verification throttle preserves mutation disposition when verification local=${localVerification}`, async () => {
-  const owner = { ...session, userId: `verification-follow-throttle-${localVerification}` }; setSession(owner, { connectionId: 'connection', patSecret: '' });
-  const calls: string[] = []; let posts = 0;
-  globalThis.fetch = async (input, init) => {
-    const url = new URL(String(input)), method = init?.method ?? 'GET'; calls.push(`${method} ${url.pathname}`);
-    if (url.pathname.endsWith('/independent-read')) return Response.json({ error: 'limited' }, { status: 429, headers: { 'Retry-After': '60' } });
-    if (method === 'POST') {
-      posts++;
-      if (localVerification) await assert.rejects(getJson(owner, '/api/-/pulse/independent-read'));
-      return Response.json({ error: 'conflict' }, { status: 409 });
-    }
-    return posts ? Response.json({ error: 'limited' }, { status: 429, headers: { 'Retry-After': '60' } }) : Response.json({ subscriptions: [] });
+  globalThis.fetch = async (_input, init) => {
+    calls.push(String(init?.method));
+    if (calls.length === 1) return limited();
+    if (init?.method === 'GET') return Response.json({ subscriptions: [] });
+    return Response.json({ subscriptions: [{ follower: { user_id: 'recipient-a' } }] });
   };
   const app = Fastify(); registerPulseRoutes(app);
   try {
-    const response = await app.inject({ method: 'POST', url: '/api/pulse/follow', payload: { context: { connectionId: 'connection', serverUrl: owner.serverUrl, siteId: owner.siteId, datasourceLuid: 'datasource' }, operations: [operations[0], operations[1], { ...operations[2], metricId: 'later' }] } });
-    assert.equal(response.statusCode, 207, response.body);
+    const response = await finish(app, await app.inject({ method: 'POST', url: '/api/pulse/follow', payload: { context: context(owner), operations: [operations[0]] } }));
+    assert.equal(response.statusCode, 200, response.body);
+    assert.equal(response.json().results[0].status, 'followed');
+    assert.deepEqual(calls, ['GET', 'GET', 'POST']);
+  } finally { await app.close(); }
+});
+
+test('cancelling a throttled follow keeps completed work and reports queued writes as not sent', async () => {
+  const owner = { ...session, userId: 'cancel-follow-throttle' }; setSession(owner, { connectionId: 'connection', patSecret: '' });
+  let posts = 0;
+  globalThis.fetch = async (_input, init) => {
+    if (init?.method === 'GET') return Response.json({ subscriptions: [] });
+    const body = JSON.parse(String(init?.body));
+    if (++posts === 2) return limited(60);
+    return Response.json({ subscriptions: body.followers.map((follower: unknown) => ({ metric_id: body.metric_id, follower })) });
+  };
+  const app = Fastify(); registerPulseRoutes(app);
+  try {
+    const started = await app.inject({ method: 'POST', url: '/api/pulse/follow', payload: { context: context(owner), operations: [operations[0], { ...operations[1], metricId: 'later' }] } });
+    assert.equal(started.statusCode, 202, started.body);
+    const cancelled = await app.inject({ method: 'POST', url: `/api/pulse/jobs/${started.json().job.id}/cancel` });
+    assert.equal(cancelled.statusCode, 200, cancelled.body);
+    assert.equal(cancelled.json().job.state, 'stopping', 'Cancel answers with the confirmed stop, not the batch result.');
+    assert.equal(cancelled.json().job.stopReason, 'cancelled');
+    const response = await finish(app, cancelled);
     const body = response.json();
-    assert.deepEqual(body.results.map((item: { status: string; sent: boolean }) => [item.status, item.sent]), [['unknown', true], ['unknown', true], ['not_attempted', false]]);
-    assert.ok(body.results.every((item: { throttle?: { reason: string } }) => item.throttle?.reason === 'throttle'));
-    assert.equal(body.throttle.sent, true); assert.equal(body.sent, true); assert.equal(body.stopped, true); assert.equal(posts, 1);
-    assert.equal(calls.length, 4, 'Two preflights, one submitted envelope, and one provider verification or independent cooldown acquisition.');
-    assert.equal(calls.filter(call => call === 'GET /api/-/pulse/subscriptions').length, localVerification ? 2 : 3, 'Locally refused verification never reaches Tableau.');
+    assert.deepEqual(body.results.map((item: { status: string; sent: boolean }) => [item.status, item.sent]), [['followed', true], ['not_attempted', false]]);
+    assert.equal(body.results[1].code, 'batch_stopped');
+    assert.match(body.results[1].error, /cancelled/);
+    assert.equal(body.stopped, true);
+    assert.equal(posts, 2, 'A write waiting out a throttle is never resent after Cancel.');
+  } finally { await app.close(); }
+});
+
+test('a job is only visible to the session that started it', async () => {
+  const owner = { ...session, userId: 'job-owner' }; setSession(owner, { connectionId: 'connection', patSecret: '' });
+  globalThis.fetch = async (_input, init) => init?.method === 'GET' ? Response.json({ subscriptions: [] }) : limited(60);
+  const app = Fastify(); registerPulseRoutes(app);
+  try {
+    const started = await app.inject({ method: 'POST', url: '/api/pulse/follow', payload: { context: context(owner), operations: [operations[0]] } });
+    assert.equal(started.statusCode, 202, started.body);
+    const id = started.json().job.id;
+    setSession({ ...session, userId: 'someone-else' }, { connectionId: 'connection', patSecret: '' });
+    assert.equal((await app.inject({ method: 'GET', url: `/api/pulse/jobs/${id}` })).statusCode, 404);
+    assert.equal((await app.inject({ method: 'POST', url: `/api/pulse/jobs/${id}/cancel` })).statusCode, 404);
+    setSession(owner, { connectionId: 'connection', patSecret: '' });
+    const response = await finish(app, await app.inject({ method: 'POST', url: `/api/pulse/jobs/${id}/cancel` }));
+    assert.equal(response.json().results[0].status, 'not_attempted');
+    const late = await app.inject({ method: 'POST', url: `/api/pulse/jobs/${id}/cancel` });
+    assert.equal(late.statusCode, 200, late.body);
+    assert.equal(late.json().job.state, 'finished', 'Cancelling a finished job confirms there is nothing left to stop.');
   } finally { await app.close(); }
 });

@@ -20,6 +20,7 @@ import {
 } from "@pulse-metric-studio/shared";
 import { captureSessionOwner, notifySessionExpired } from "../shell/session-events";
 import { desktopFetch } from "../../../desktop-transport";
+import { mutationJobRequest, type MutationJobObserver } from "./mutation-jobs";
 
 export class PulseApiError extends Error {
   constructor(
@@ -52,33 +53,38 @@ export async function pulseRequest(
   const data: unknown = await response.json().catch(() => null);
   if (!response.ok) {
     if (response.status === 401) notifySessionExpired(owner);
-    const record =
-      data && typeof data === "object" ? (data as Record<string, unknown>) : {};
-    const error =
-      record.error && typeof record.error === "object"
-        ? (record.error as Record<string, unknown>)
-        : {};
-    const message =
-      typeof error.message === "string"
-        ? error.message
-        : typeof record.error === "string"
-          ? record.error
-          : typeof record.message === "string"
-            ? record.message
-            : `Request failed (${response.status})`;
-    throw new PulseApiError(
-      message,
-      response.status,
-      typeof error.code === "string"
-        ? error.code
-        : typeof record.code === "string"
-          ? record.code
-          : undefined,
-      error.details ?? record.details,
-      TableauThrottleMetadataSchema.safeParse(record.throttle).success ? TableauThrottleMetadataSchema.parse(record.throttle) : undefined,
-    );
+    throw pulseResponseError(response.status, data);
   }
   return data;
+}
+
+/** The error a failed Pulse API answer carries. */
+export function pulseResponseError(status: number, data: unknown): PulseApiError {
+  const record =
+    data && typeof data === "object" ? (data as Record<string, unknown>) : {};
+  const error =
+    record.error && typeof record.error === "object"
+      ? (record.error as Record<string, unknown>)
+      : {};
+  const message =
+    typeof error.message === "string"
+      ? error.message
+      : typeof record.error === "string"
+        ? record.error
+        : typeof record.message === "string"
+          ? record.message
+          : `Request failed (${status})`;
+  return new PulseApiError(
+    message,
+    status,
+    typeof error.code === "string"
+      ? error.code
+      : typeof record.code === "string"
+        ? record.code
+        : undefined,
+    error.details ?? record.details,
+    TableauThrottleMetadataSchema.safeParse(record.throttle).success ? TableauThrottleMetadataSchema.parse(record.throttle) : undefined,
+  );
 }
 
 function listUrl(
@@ -173,9 +179,14 @@ export const pulseApi = {
     PulseDeletePlanSchema.parse(
       await pulseRequest("/api/pulse/registry/delete-preview", "POST", input),
     ),
-  delete: async (input: ExecutePulseDeleteRequest) =>
-    PulseDeleteResultSchema.parse(
-      await pulseRequest("/api/pulse/registry/delete", "POST", input),
-    ),
+  delete: async (input: ExecutePulseDeleteRequest, observe?: MutationJobObserver) => {
+    const owner = captureSessionOwner();
+    const result = await mutationJobRequest("/api/pulse/registry/delete", input, null, observe);
+    if (!result.ok) {
+      if (result.status === 401) notifySessionExpired(owner);
+      throw pulseResponseError(result.status, result.data);
+    }
+    return PulseDeleteResultSchema.parse(result.data);
+  },
 };
 export type PulseApi = typeof pulseApi;

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
-import { assertTableauMutationAdmission, getJson, getTableauThrottleStatus, postJson, tableauFetch, tableauThrottleDelay, TableauError, TableauRequestGate, TableauThrottleError, type TableauSession } from './rest-client.js';
+import { getJson, getTableauThrottleStatus, postJson, tableauFetch, tableauThrottleDelay, TableauError, TableauRequestGate, TableauThrottleError, type TableauSession } from './rest-client.js';
 
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
@@ -136,7 +136,6 @@ test('real transport distinguishes sent provider rejection from unsent admission
   let sends = 0;
   globalThis.fetch = async () => { sends++; return Response.json({}, { status: 429, headers: { 'retry-after': '36' } }); };
   await assert.rejects(getJson(owner, '/api/-/pulse/metrics/fixture', undefined, 100), (error: unknown) => error instanceof TableauThrottleError && error.sent && error.throttle.retryAt >= Date.now() + 35_000);
-  assert.throws(() => assertTableauMutationAdmission(owner), (error: unknown) => error instanceof TableauThrottleError && !error.sent);
   await assert.rejects(getJson(owner, '/api/-/pulse/metrics/fixture', undefined, 100), (error: unknown) => error instanceof TableauThrottleError && !error.sent);
   assert.equal(getTableauThrottleStatus(owner).throttled, true);
   assert.equal(getTableauThrottleStatus(session('other-owner')).throttled, false);

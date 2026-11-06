@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
-import { getJson, MAX_CONCURRENT_TABLEAU_REQUESTS, postJson, retryAfterMs, TableauError, type TableauSession } from './rest-client.js';
+import { deleteReq, getJson, MAX_CONCURRENT_TABLEAU_REQUESTS, postJson, retryAfterMs, TableauError, type TableauSession } from './rest-client.js';
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
 let identities = 0;
@@ -116,4 +116,27 @@ test('REST version negotiation makes forward progress and commits only a success
   assert.deepEqual(await getJson(identity, '/api/3.29/sites/site/groups'), { ok: true });
   assert.equal(identity.apiVersion, '3.25');
   assert.equal(new Set(paths).size, paths.length);
+});
+
+test('a Tableau write waits out a full throttle window that would outlast a read deadline', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const identity = session();
+  const sent: Array<{ method: string; at: number }> = [];
+  globalThis.fetch = async (_input, init) => {
+    sent.push({ method: init?.method ?? 'GET', at: Date.now() });
+    return sent.length === 1 ? throttled('55') : new Response(null, { status: 204 });
+  };
+  const write = deleteReq(identity, '/api/-/pulse/metrics/m1');
+  while (!sent.length) await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  const readOutcome = getJson(identity, '/api/-/pulse/definitions')
+    .then(() => 'sent', (error: unknown) => error instanceof TableauError && error.status === 429 ? 'throttled' : 'other');
+  for (let elapsed = 0; elapsed < 60 && sent.length < 2; elapsed++) {
+    await new Promise((resolve) => setImmediate(resolve));
+    t.mock.timers.tick(1_000);
+  }
+  await write;
+  assert.deepEqual(sent.map((request) => request.method), ['DELETE', 'DELETE'], 'only the write is resent');
+  assert.ok(sent[1]!.at - sent[0]!.at >= 55_000, 'the resend waits for Retry-After');
+  assert.equal(await readOutcome, 'throttled', 'a read keeps its shorter deadline');
 });

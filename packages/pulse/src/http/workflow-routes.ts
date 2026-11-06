@@ -17,7 +17,9 @@ import {
   PulseDeletionService,
   type DeleteDependencies,
 } from "../application/deletion.js";
+import { requirePulseOwner } from "../application/context.js";
 import { PulseApplicationError } from "../application/errors.js";
+import { runMutationJob, type MutationJobResponse } from "./mutation-jobs.js";
 import {
   PulseProposalService,
   type ProposalDependencies,
@@ -34,6 +36,14 @@ export interface PulseWorkflowDependencies {
   propose?: ProposalDependencies["propose"];
   publish?: Partial<PublishDependencies>;
   deletion?: DeleteDependencies;
+}
+/** The response an application failure gives, so a job can answer exactly as its route would. */
+function applicationErrorResponse(error: unknown): MutationJobResponse | undefined {
+  if (!(error instanceof PulseApplicationError)) return undefined;
+  return {
+    status: error.statusCode,
+    body: { code: error.code, message: error.message, ...(error.details ? { details: error.details } : {}) },
+  };
 }
 function parse<Schema extends z.ZodTypeAny>(schema: Schema, input: unknown): z.output<Schema> {
   const result = schema.safeParse(input);
@@ -74,12 +84,8 @@ export function registerPulseWorkflowRoutes(
       try {
         return await work();
       } catch (error) {
-        if (error instanceof PulseApplicationError)
-          return reply.code(error.statusCode).send({
-            code: error.code,
-            message: error.message,
-            ...(error.details ? { details: error.details } : {}),
-          });
+        const response = applicationErrorResponse(error);
+        if (response) return reply.code(response.status).send(response.body);
         throw error;
       }
     };
@@ -183,10 +189,12 @@ export function registerPulseWorkflowRoutes(
       ),
     );
     app.post("/api/pulse/registry/delete", (req, reply) =>
-      respond(reply, async () => {
-        const result = await deletion.execute(parse(ExecutePulseDeleteRequestSchema, req.body));
-        if (result.throttle && result.outcomes.every(outcome => outcome.sent === false)) reply.code(429);
-        return result;
+      respond(reply, () => {
+        const request = parse(ExecutePulseDeleteRequestSchema, req.body);
+        return runMutationJob(reply, "delete", requirePulseOwner(request.context), async () => {
+          const result = await deletion.execute(request);
+          return { status: result.throttle && result.outcomes.every(outcome => outcome.sent === false) ? 429 : 200, body: result };
+        }, applicationErrorResponse);
       }),
     );
   });

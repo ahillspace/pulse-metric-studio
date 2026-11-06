@@ -12,7 +12,7 @@ import {
   type PulseVariantRequestV1,
 } from "@pulse-metric-studio/shared";
 import { captureSessionOwner, notifySessionExpired, ownedPulseUrl, type SessionOwner } from "../shell/session-events";
-import { desktopFetch } from "../../../desktop-transport";
+import { cancelMutationJob, mutationJobRequest, type MutationJobObserver } from "./mutation-jobs";
 import { extractErrorMessage } from "../../../api/client";
 import { PulseApiError, pulseRequest } from "./client";
 
@@ -40,24 +40,19 @@ export const registryApi = {
     context: PulseDraftContext,
     operations: PulseFollowOperation[],
     owner = captureSessionOwner(),
-  ) => subscriptionRequest("/api/pulse/follow", context, operations, owner),
+    observe?: MutationJobObserver,
+  ) => subscriptionRequest("/api/pulse/follow", context, operations, owner, observe),
   unfollow: async (
     context: PulseDraftContext,
     operations: PulseFollowOperation[],
     owner = captureSessionOwner(),
-  ) => subscriptionRequest("/api/pulse/unfollow", context, operations, owner),
-  fork: async (context: PulseDraftContext, request: PulseVariantRequestV1, owner = captureSessionOwner(), options: { snapshotId?: string; sourceContextId?: string } = {}) => {
-    const response = await desktopFetch(ownedPulseUrl("/api/pulse/metrics/fork", owner), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...request, context, ...options }),
-    });
-    return decodeVariantResponse(
-      response,
-      await response.json().catch(() => null),
-      owner,
-    );
+    observe?: MutationJobObserver,
+  ) => subscriptionRequest("/api/pulse/unfollow", context, operations, owner, observe),
+  fork: async (context: PulseDraftContext, request: PulseVariantRequestV1, owner = captureSessionOwner(), options: { snapshotId?: string; sourceContextId?: string } = {}, observe?: MutationJobObserver) => {
+    const result = await mutationJobRequest("/api/pulse/metrics/fork", { ...request, context, ...options }, owner, observe);
+    return decodeVariantResponse(result, result.data, owner);
   },
+  cancelJob: (id: string, owner = captureSessionOwner()) => cancelMutationJob(id, owner),
 };
 
 export type RegistryApi = Omit<typeof registryApi, "throttle"> & { throttle?: typeof registryApi.throttle };
@@ -67,13 +62,10 @@ async function subscriptionRequest(
   context: PulseDraftContext,
   operations: PulseFollowOperation[],
   owner: SessionOwner | null,
+  observe?: MutationJobObserver,
 ) {
-  const response = await desktopFetch(ownedPulseUrl(path, owner), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ context, operations }),
-  });
-  const data = await response.json().catch(() => null);
+  const response = await mutationJobRequest(path, { context, operations }, owner, observe);
+  const data = response.data;
   const parsed = PulseFollowResultsSchema.safeParse(data);
   if (response.status === 401 || (parsed.success && parsed.data.terminated))
     notifySessionExpired(owner);

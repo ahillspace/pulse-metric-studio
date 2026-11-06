@@ -1,4 +1,4 @@
-import { TableauError, sanitizeProviderMessage, tableauProviderErrorInfo } from '@pulse-metric-studio/core';
+import { TableauError, TableauMutationStoppedError, sanitizeProviderMessage, tableauProviderErrorInfo } from '@pulse-metric-studio/core';
 import type { DatasourceCatalog, PulseDiagnostic } from '@pulse-metric-studio/shared';
 import { boundedProviderDiagnostic } from './provider-diagnostics.js';
 
@@ -13,6 +13,7 @@ const labels: Record<PulseOperation, string> = {
 /** Explicit user operations opt in; background catalog and inventory reads keep their existing behavior. */
 export function pulseOperationDiagnostic(error: unknown, operation: PulseOperation, secrets: readonly string[] = []): PulseDiagnostic {
   if (!(error instanceof TableauError)) return { message: boundedProviderDiagnostic(error).message };
+  if (error instanceof TableauMutationStoppedError) return { message: error.message };
   const provider = tableauProviderErrorInfo(error, secrets);
   let explanation: string;
   if (operation === 'publish' && error.status === 409 && provider.providerCode === '409902') {

@@ -6,7 +6,7 @@ import { after, afterEach, test } from 'node:test';
 
 const dataDir = mkdtempSync(join(tmpdir(), 'pulse-local-throttle-'));
 process.env.PULSE_METRIC_STUDIO_DATA_DIR = dataDir;
-const { assertTableauMutationAdmission, clearSession, closeDb, getSessionContext, saveConnection, setSession, tableauFetch } = await import('@pulse-metric-studio/core');
+const { clearSession, closeDb, getSessionContext, saveConnection, setSession, tableauFetch } = await import('@pulse-metric-studio/core');
 const { buildApp } = await import('./app.js');
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; clearSession(); });
@@ -22,7 +22,7 @@ test('local cooldown status is owner fenced, performs zero Tableau calls, and ke
   globalThis.fetch = async () => { sends++; return Response.json({}, { status: 429, headers: { 'retry-after': '36' } }); };
   const lines: string[] = [];
   const app = buildApp({ registerPulseRoutes(instance) {
-    instance.post('/api/pulse/metrics/fixture', async () => { assertTableauMutationAdmission(session); return {}; });
+    instance.post('/api/pulse/metrics/fixture', async () => { await tableauFetch(session, '/api/-/pulse/metrics/fixture', { timeoutMs: 100 }); return {}; });
   } }, { logStream: { write: line => { lines.push(line); } } });
   try {
     await tableauFetch(session, '/api/-/pulse/metrics/fixture', { timeoutMs: 100 });
@@ -50,7 +50,7 @@ test('local cooldown status is owner fenced, performs zero Tableau calls, and ke
     assert.equal(refusal.json().throttle.sent, false);
     assert.equal(refusal.json().throttle.reason, 'throttle');
     assert.ok(completions().some(event => event.path === '/api/tableau/throttle' && event.status === 409));
-    assert.equal(sends, 1, 'polling, stale-owner rejection and command admission never contact Tableau');
+    assert.equal(sends, 1, 'polling, stale-owner rejection and a request that cannot outlast the cooldown never contact Tableau');
     clearSession();
     assert.equal((await app.inject('/api/tableau/throttle')).statusCode, 401);
     assert.doesNotMatch(lines.join(''), /PRIVATE_/);

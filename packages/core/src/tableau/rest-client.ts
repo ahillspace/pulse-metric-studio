@@ -11,6 +11,7 @@ import { getSessionContext, getStoredConnection, isSessionCurrent, type TableauS
 import { parseTableauProviderError, safeTableauProviderCode, type TableauProviderErrorInfo } from './provider-error-info.js';
 import { createTableauCallTrace, observedTableauFetch, finishObservedTableauResponse, captureTableauEventLogger, tableauRetryAfterMs, withTableauRetryReason, type TableauCallTrace } from './telemetry.js';
 import type { TableauThrottleMetadata, TableauThrottleStatus } from '@pulse-metric-studio/shared';
+import { currentTableauMutationJob, TABLEAU_MUTATION_TIMEOUT_MS, type TableauMutationJob, type TableauMutationStopReason } from './mutation-pacing.js';
 export { parseTableauProviderError, safeTableauProviderCode, type TableauProviderErrorInfo } from './provider-error-info.js';
 
 export interface TableauSession {
@@ -113,6 +114,24 @@ async function parseBody(resp: Response, maxBytes = DEFAULT_MAX_RESPONSE_BYTES, 
 
 function requestCancelled(): TableauError {
   return new TableauError('Tableau request was cancelled.', 0, '', 'network');
+}
+
+/**
+ * A write in a mutation job that was not sent because the job stopped. Tableau
+ * never processed it: every earlier attempt, if any, was answered with a 429.
+ */
+export class TableauMutationStoppedError extends TableauError {
+  declare readonly sent: false;
+  constructor(public readonly reason: TableauMutationStopReason) {
+    super(reason === 'time_limit'
+      ? 'Not sent because the batch reached its time limit.'
+      : 'Not sent because the batch was cancelled.', 0, '', 'network', undefined, undefined, false);
+    this.name = 'TableauMutationStoppedError';
+  }
+}
+
+function mutationStopped(job: TableauMutationJob): TableauMutationStoppedError {
+  return new TableauMutationStoppedError(job.signal.reason === 'time_limit' ? 'time_limit' : 'cancelled');
 }
 
 async function awaitAuthentication(refresh: Promise<boolean>, deadline: number, signal?: AbortSignal | null): Promise<boolean> {
@@ -300,6 +319,9 @@ interface GatePermit { generation: number | null; status?: number; }
 interface GateWaiter {
   deadline: number;
   signal?: AbortSignal | null;
+  cancelled(): TableauError;
+  /** Called while a cooldown holds this waiter. */
+  held?(): void;
   grant(permit: GatePermit): void;
   fail(error: TableauError): void;
 }
@@ -333,12 +355,13 @@ export class TableauRequestGate {
     this.timer = undefined;
     const now = Date.now();
     for (const waiter of [...this.waiting]) {
-      if (waiter.signal?.aborted) waiter.fail(requestCancelled());
+      if (waiter.signal?.aborted) waiter.fail(waiter.cancelled());
       else if (this.throttled && this.resumeAt >= waiter.deadline) waiter.fail(this.rejection());
       else if (now >= waiter.deadline) waiter.fail(this.throttled ? this.rejection() : new TableauError('Tableau request timed out while waiting for capacity.', 0, '', 'network'));
     }
     if (!this.waiting.length) return;
     if (this.throttled && this.resumeAt > now) {
+      for (const waiter of this.waiting) waiter.held?.();
       this.timer = setTimeout(() => this.drain(), this.resumeAt - now);
       return;
     }
@@ -350,14 +373,19 @@ export class TableauRequestGate {
     }
   }
 
-  async run<T>(task: (permit: GatePermit) => Promise<T>, deadline: number, signal?: AbortSignal | null, telemetry?: { trace: TableauCallTrace; method: string; path: string }): Promise<T> {
+  /**
+   * Waits for permission to send, then runs `task`. An infinite `deadline`
+   * waits out every cooldown; `signal` ends the wait with `cancelled()`.
+   */
+  async run<T>(task: (permit: GatePermit) => Promise<T>, deadline: number, signal?: AbortSignal | null, telemetry?: { trace: TableauCallTrace; method: string; path: string }, waiting: { cancelled?: () => TableauError; held?: () => void } = {}): Promise<T> {
+    const cancelled = waiting.cancelled ?? requestCancelled;
     const queuedAt = Date.now();
     const logEvent = captureTableauEventLogger();
     const permit = await new Promise<GatePermit>((resolve, reject) => {
       let settled = false;
       const cleanup = () => { clearTimeout(timeout); signal?.removeEventListener('abort', abort); const index = this.waiting.indexOf(waiter); if (index >= 0) this.waiting.splice(index, 1); };
       const waiter: GateWaiter = {
-        deadline, signal,
+        deadline, signal, cancelled, held: waiting.held,
         grant: (value) => {
           if (settled) return;
           settled = true;
@@ -373,15 +401,17 @@ export class TableauRequestGate {
           reject(error);
         },
       };
-      const timeout = setTimeout(() => { waiter.fail(this.throttled ? this.rejection() : new TableauError('Tableau request timed out while waiting for capacity.', 0, '', 'network')); this.drain(); }, Math.max(0, deadline - Date.now()));
-      const abort = () => { waiter.fail(requestCancelled()); this.drain(); };
+      const timeout = Number.isFinite(deadline)
+        ? setTimeout(() => { waiter.fail(this.throttled ? this.rejection() : new TableauError('Tableau request timed out while waiting for capacity.', 0, '', 'network')); this.drain(); }, Math.max(0, deadline - Date.now()))
+        : undefined;
+      const abort = () => { waiter.fail(cancelled()); this.drain(); };
       this.waiting.push(waiter);
       signal?.addEventListener('abort', abort, { once: true });
       this.drain();
     });
     let completed = false;
     try {
-      if (signal?.aborted) throw requestCancelled();
+      if (signal?.aborted) throw cancelled();
       if (Date.now() >= deadline) throw this.throttled ? this.rejection() : new TableauError('Tableau request timed out while waiting for capacity.', 0, '', 'network');
       const result = await task(permit);
       completed = true;
@@ -428,32 +458,40 @@ export function getTableauThrottleStatus(session: TableauSession): TableauThrott
   return requestGate(session).status();
 }
 
-/** Call once at command admission, not between steps of an admitted command. */
-export function assertTableauMutationAdmission(session: TableauSession): void {
-  const gate = requestGate(session);
-  if (gate.status().throttled) throw gate.rejection();
-}
-
 export function tableauThrottleDelay(retryAfter: number, retry: number, jitter = Math.floor(Math.random() * 251)): number {
   return Math.max(retryAfter, 1000 * 2 ** Math.min(3, Math.max(0, retry))) + Math.max(0, Math.min(250, jitter));
 }
 
-/** Sends through the identity's gate; a 429 means Tableau did not process the request, so it is resent. */
+/**
+ * Sends through the identity's gate; a 429 means Tableau did not process the
+ * request, so it is resent.
+ *
+ * Outside a mutation job, `deadline` bounds the whole call, including waits
+ * for a cooldown. Inside a job there is no overall bound: the call waits out
+ * every cooldown and resends until Tableau answers, and only each dispatched
+ * attempt is bounded by the request timeout. Stopping the job ends a wait to
+ * send, never an attempt Tableau is already processing.
+ */
 async function rawFetch(
   session: TableauSession,
   path: string,
   init: TableauRequestInit = {},
   token = session.token,
   context = getSessionContext(session),
-  deadline = Date.now() + (init.timeoutMs ?? 30_000),
+  callDeadline = Date.now() + (init.timeoutMs ?? 30_000),
   refreshAuthentication = false,
   trace = createTableauCallTrace(),
 ): Promise<Response> {
   const gate = requestGate(session);
+  const job = currentTableauMutationJob();
+  const waitSignal = job ? (init.signal ? AbortSignal.any([init.signal, job.signal]) : job.signal) : init.signal;
+  const cancelled = () => job?.signal.aborted && !init.signal?.aborted ? mutationStopped(job) : requestCancelled();
   let authenticationAttempted = false;
   let currentToken = token;
   for (let attempt = throttleRetries.get(trace) ?? 0; ;) {
     const result = await gate.run(async (permit) => {
+      // A job's attempt gets its own response deadline from the moment it may be sent.
+      const deadline = job ? Date.now() + (init.timeoutMs ?? 30_000) : callDeadline;
       const controller = new AbortController();
       const signal = init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal;
       const terminate = () => controller.abort();
@@ -481,7 +519,8 @@ async function rawFetch(
           // A new 429 still installs a new generation before this permit is released.
         }
         if (resp.status === 429) {
-          if (attempt < MAX_THROTTLE_RETRIES && (gate.status().retryAt ?? Date.now()) < deadline) {
+          job?.throttled();
+          if (job || (attempt < MAX_THROTTLE_RETRIES && (gate.status().retryAt ?? Date.now()) < deadline)) {
             if (resp.body) await cancelBody(() => resp!.body!.cancel(), deadline, signal, terminate);
             return { retry: 'throttle' as const };
           }
@@ -515,10 +554,10 @@ async function rawFetch(
         finishObservedTableauResponse(resp);
         terminate();
       }
-    }, deadline, init.signal, { trace, method: init.method ?? 'GET', path }).catch((error: unknown) => {
+    }, job ? Infinity : callDeadline, waitSignal, { trace, method: init.method ?? 'GET', path }, { cancelled, held: job ? () => job.throttled() : undefined }).catch((error: unknown) => {
       // A later unsent attempt must not erase the fact this logical call already sent work.
       if (error instanceof TableauThrottleError && trace.attempt > 0 && !error.sent) throw gate.rejection(true, error);
-      if (error instanceof TableauError && !(error instanceof TableauThrottleError)) {
+      if (error instanceof TableauError && !(error instanceof TableauThrottleError) && !(error instanceof TableauMutationStoppedError)) {
         Object.defineProperty(error, 'sent', { value: trace.attempt > 0, enumerable: true, configurable: true });
       }
       throw error;
@@ -634,7 +673,7 @@ export async function postJson<T>(
 }
 
 export async function deleteReq(session: TableauSession, path: string): Promise<void> {
-  const resp = await tableauFetch(session, path, { method: 'DELETE', maxResponseBytes: 64 * 1024, responseBody: { discardOnSuccess: true, discardOnStatuses: [404] } });
+  const resp = await tableauFetch(session, path, { method: 'DELETE', timeoutMs: TABLEAU_MUTATION_TIMEOUT_MS, maxResponseBytes: 64 * 1024, responseBody: { discardOnSuccess: true, discardOnStatuses: [404] } });
   if (!resp.ok && resp.status !== 404) {
     const bodyText = redactCredentials(await readBoundedBody(resp, 64 * 1024, 30_000).catch(() => ''), [session.token]);
     const info = parseTableauProviderError(bodyText, [session.token]);

@@ -29,11 +29,16 @@ import {
   variantRequest,
 } from "./variant-plan";
 import { CooldownBanner, type RegistryCooldown } from "./CooldownBanner";
+import { JobProgress } from "./JobProgress";
+import type { RegistryJob } from "./controller";
 import type { SessionOwner } from "../shell/session-events";
 import { getForkDisabledReason, SelectionCheckbox } from "./views";
 
 interface Props {
   cooldown?: RegistryCooldown | null;
+  /** The running variant batch, shown once Tableau limits it. */
+  job?: RegistryJob | null;
+  onCancelJob?(): void;
   snapshotId?: string;
   owner?: SessionOwner | null;
   metrics: PulseRegistryMetric[];
@@ -47,6 +52,8 @@ interface Props {
 }
 export function VariantDialog({
   cooldown,
+  job = null,
+  onCancelJob = () => {},
   snapshotId,
   owner,
   metrics,
@@ -177,7 +184,7 @@ export function VariantDialog({
         </>
       }
     >
-      <CooldownBanner cooldown={cooldown} />
+      {job?.throttled ? <JobProgress job={job} onCancel={onCancelJob} /> : <CooldownBanner cooldown={cooldown} />}
       <fieldset disabled={busy || Boolean(cooldown)} className="pulse-variant-fields">
         <div className="pulse-variant-layout">
           <div className="pulse-variant-config">

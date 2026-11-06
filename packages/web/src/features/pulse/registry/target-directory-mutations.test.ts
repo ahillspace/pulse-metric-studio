@@ -25,6 +25,7 @@ function fixture(first?: ReturnType<RegistryApi["followTargets"]>) {
     },
     followers: async () => ({ details: [] }), follow: async () => ({ results: [] }), unfollow: async () => ({ results: [] }),
     fork: async () => ({ attempted: 0, created: 0, existing: 0, failed: 0, pendingVisibility: 0, results: [] }),
+    cancelJob: async () => { throw new Error("No batch is running."); },
   });
   registry.getState().setContext(draft().context, "A", session);
   const changed = (_context: unknown, owner: SessionOwner | null, directoryChanged: boolean) => {

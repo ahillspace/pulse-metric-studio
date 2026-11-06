@@ -32,7 +32,8 @@ function fixture(overrides: Partial<RegistryApi> = {}, metricIds = ["metric", "o
     followTargets: async () => ({ targets: [], errors: [] }), followers: async () => ({ details: [] }),
     follow: async () => ({ results: [{ metricId: "metric", targetKind: "USER", targetId: session.userId, status: "followed", ok: true }] }),
     unfollow: async () => ({ results: [{ metricId: "metric", targetKind: "USER", targetId: session.userId, status: "unfollowed", ok: true }] }),
-    fork: async () => ({ attempted: 0, created: 0, existing: 0, failed: 0, pendingVisibility: 0, results: [] }), ...overrides,
+    fork: async () => ({ attempted: 0, created: 0, existing: 0, failed: 0, pendingVisibility: 0, results: [] }),
+    cancelJob: async () => { throw new Error("No batch is running."); }, ...overrides,
   };
   return createRegistryController(transport);
 }

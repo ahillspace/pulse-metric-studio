@@ -1,6 +1,6 @@
 interface PulseDefinitionResponse { definition?: { metadata?: { id?: string; name?: string } } }
 import type { TableauSession } from '@pulse-metric-studio/core';
-import { TableauError,TableauResponseSizeError,apiPath,deleteReq,getJson,isPastEndError,postJson,logTableauEvent,withTableauOperation } from '@pulse-metric-studio/core';
+import { TableauError,TableauMutationStoppedError,TABLEAU_MUTATION_TIMEOUT_MS,TableauMutationPacer,tableauMutationProgress,TableauResponseSizeError,apiPath,deleteReq,getJson,isPastEndError,postJson,logTableauEvent,withTableauOperation } from '@pulse-metric-studio/core';
 import { boundedProviderDiagnostic,type PulseProviderDiagnostic } from './provider-diagnostics.js';
 import { pulseOperationErrorMessage } from './operation-errors.js';
 
@@ -251,6 +251,7 @@ export async function getOrCreatePulseMetric(
   const data = await withTableauOperation('get_or_create', () => postJson<any>(session, `${PULSE}/metrics:getOrCreate`, body, {
     accept: 'application/vnd.tableau.metricqueryservice.v1.GetOrCreateMetricResponse+json',
     contentType: 'application/vnd.tableau.metricqueryservice.v1.GetOrCreateMetricRequest+json',
+    timeoutMs: TABLEAU_MUTATION_TIMEOUT_MS,
   }));
   const created = requireMetricCreatedFlag(data);
   const metricId = data?.metric?.metadata?.id ?? data?.metric?.id ?? null;
@@ -465,6 +466,10 @@ export interface SubscriptionWriteResult {
 export class SubscriptionBatchInterrupted extends TableauError {
   readonly throttle?: import('@pulse-metric-studio/shared').TableauThrottleMetadata;
   readonly failed: { metricId: string; targetId: string };
+  /** The mutation job stopped before this batch was sent. */
+  /** The job stop that kept the rest of this batch from being sent. */
+  readonly stoppedBy: TableauMutationStoppedError | undefined;
+  get stopped(): boolean { return this.stoppedBy !== undefined; }
   constructor(
     cause: TableauError,
     public readonly completed: SubscriptionWriteResult[],
@@ -473,6 +478,7 @@ export class SubscriptionBatchInterrupted extends TableauError {
     public readonly phase: 'submission' | 'confirmation' = 'submission',
   ) {
     super(cause.message, cause.status, cause.bodySnippet, cause.kind, cause.providerCode, cause.providerInfo, cause.sent);
+    this.stoppedBy = cause instanceof TableauMutationStoppedError ? cause : undefined;
     if ('throttle' in cause) this.throttle = (cause as TableauError & { throttle: import('@pulse-metric-studio/shared').TableauThrottleMetadata }).throttle;
     this.failed = failed;
   }
@@ -482,6 +488,9 @@ export class SubscriptionBatchInterrupted extends TableauError {
 export const SUBSCRIPTION_REQUEST_LIMIT = 200;
 export async function batchCreateSubscriptions(session: TableauSession, items: SubscriptionWriteTarget[]): Promise<SubscriptionWriteResult[]> {
   const results: SubscriptionWriteResult[] = [];
+  const pacer = new TableauMutationPacer();
+  let reported = 0;
+  const report = () => { tableauMutationProgress.completed(results.length - reported); reported = results.length; };
   const byMetric = new Map<string, SubscriptionWriteTarget[]>();
   for (const item of items) {
     const group = byMetric.get(item.metricId) ?? [];
@@ -490,17 +499,19 @@ export async function batchCreateSubscriptions(session: TableauSession, items: S
   }
   for (const [metricId, recipients] of byMetric) {
     for (let offset = 0; offset < recipients.length; offset += SUBSCRIPTION_REQUEST_LIMIT) {
+      report();
       const batch = recipients.slice(offset, offset + SUBSCRIPTION_REQUEST_LIMIT);
       let records: SubscriptionRecord[];
       let alreadyExists = false;
       try {
-        const data = await postJson<unknown>(session, `${PULSE}/subscriptions:batchCreate`, {
+        const data = await pacer.send(() => postJson<unknown>(session, `${PULSE}/subscriptions:batchCreate`, {
           metric_id: metricId,
           followers: batch.map((item) => item.targetType === 'GROUP' ? { group_id: item.targetId } : { user_id: item.targetId }),
         }, {
           contentType: 'application/vnd.tableau.pulse.subscriptionservice.v1.BatchCreateSubscriptionsRequest+json',
           accept: 'application/vnd.tableau.pulse.subscriptionservice.v1.BatchCreateSubscriptionsResponse+json',
-        });
+          timeoutMs: TABLEAU_MUTATION_TIMEOUT_MS,
+        }));
         try { records = normalizeSubscriptionEnvelope({ subscriptions: subscriptionRecords(data).filter((record) => record.metric_id === undefined || record.metric_id === metricId) }); }
         catch { records = []; }
       } catch (error) {
@@ -535,6 +546,7 @@ export async function batchCreateSubscriptions(session: TableauSession, items: S
       }
     }
   }
+  report();
   return results;
 }
 

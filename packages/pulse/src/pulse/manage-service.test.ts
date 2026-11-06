@@ -132,16 +132,15 @@ test('date forking preserves bounded structured provider diagnostics', async () 
   assert.ok((outcomes[0]?.error?.length ?? 0) <= 300);
 });
 
-test('date forking rejects conflicting response ownership', async () => {
+test('date forking keeps a created variant whose response metadata differs from the request', async () => {
   const outcomes = await forkMetrics(session, [
     { sourceMetricId: 'metric-1', timeframeKey: 'LAST_30_DAYS' },
   ], dependencies({
-    getOrCreate: async () => ({ metricId: 'fork-wrong-owner', created: true, raw: { metric: { id: 'fork-wrong-owner', definition_id: 'another-definition' } } }),
+    getOrCreate: async () => ({ metricId: 'fork-1', created: true, raw: { metric: { id: 'fork-1', definition_id: 'another-definition' } } }),
   }));
-  assert.equal(outcomes[0]?.status, 'ownership_mismatch');
+  assert.equal(outcomes[0]?.status, 'created');
   assert.equal(outcomes[0]?.creationStatus, 'created');
-  assert.equal(outcomes[0]?.metric, undefined);
-  assert.match(outcomes[0]?.error ?? '', /conflicting metric ownership/);
+  assert.equal(outcomes[0]?.error, undefined);
 });
 
 test('timeframe payloads use singular last_x_period and reject invalid custom periods', () => {

@@ -52,7 +52,6 @@ export interface ForkRegistryActionCounts {
   existing: number;
   visible: number;
   pendingVisibility: number;
-  ownershipMismatch: number;
   failed: number;
 }
 
@@ -85,7 +84,6 @@ export function forkRegistryActionCounts(
     existing: 0,
     visible: 0,
     pendingVisibility: 0,
-    ownershipMismatch: 0,
     failed: 0,
   };
   for (const item of items) {
@@ -110,8 +108,6 @@ export function forkRegistryActionCounts(
     if (item.reconciliationStatus === "visible") counts.visible += 1;
     else if (item.reconciliationStatus === "pending_visibility")
       counts.pendingVisibility += 1;
-    else if (item.reconciliationStatus === "ownership_mismatch")
-      counts.ownershipMismatch += 1;
     else if (item.reconciliationStatus === "failed" || item.status === "failed")
       counts.failed += 1;
   }
@@ -132,7 +128,6 @@ export function forkRegistryActionItem(
     result.reconciliationStatus ??
     (result.status === "visible" ||
     result.status === "pending_visibility" ||
-    result.status === "ownership_mismatch" ||
     result.status === "failed"
       ? result.status
       : undefined);
@@ -178,9 +173,7 @@ export function registryActionLabel(
         ? "visibility verified"
         : item.reconciliationStatus === "pending_visibility"
           ? "visibility pending"
-          : item.reconciliationStatus === "ownership_mismatch"
-            ? "ownership mismatch"
-            : item.reconciliationStatus === "failed"
+          : item.reconciliationStatus === "failed"
               ? "visibility verification failed"
               : "reconciliation status unavailable";
     if (!item.reconciliationStatus) return `${shared}${creation ?? "outcome unknown"}`;

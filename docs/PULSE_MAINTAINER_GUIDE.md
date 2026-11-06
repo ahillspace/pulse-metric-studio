@@ -195,14 +195,15 @@ Catalog expiry follows the core catalog TTL; dimension count and value answers e
 Each owned source cache retains eight contexts, and the shared dimension answer cache retains 128 entries.
 Timeframe-only variants require no field catalog or dimension discovery.
 Filtered variants acquire catalog facts lazily and validate each distinct nonempty filter clause before writing.
-[`tableauFetch`](../packages/core/src/tableau/rest-client.ts) owns registered-session checks, concurrency admission, authentication refresh, version adaptation, and bounded throttling retries.
+[`tableauFetch`](../packages/core/src/tableau/rest-client.ts) owns registered-session checks, concurrency admission, authentication refresh, version adaptation, and throttling retries.
 The per-identity limit of eight covers provider response bodies through bounded consumption or cancellation, rather than ending when headers arrive.
 Status-only operations discard irrelevant bodies without changing accepted mutation outcomes.
 Cancellation cleanup respects the original request deadline and aborts its request when that boundary expires.
 Read and mutation retries have different safety rules; an ambiguous write is not a confirmed rejection.
 Version negotiation makes forward progress and changes the session version only after a successful response.
 A provider's `Retry-After` remains a minimum, including when its value is zero.
-Four throttle retries use client floors of 1, 2, 4, and 8 seconds, plus nonnegative jitter up to 250 milliseconds.
+Outside a mutation job, four throttle retries use client floors of 1, 2, 4, and 8 seconds, plus nonnegative jitter up to 250 milliseconds.
+Inside a job, retries keep the 8-second floor without a count limit.
 The effective wait meets both the server minimum and the client floor.
 The retry budget and deadline survive authentication and REST version adaptation.
 Queued dispatch checks its captured session ownership before using the session's current token.
@@ -224,10 +225,23 @@ Pending work polls this endpoint at most once per second to display shared coold
 One bounded trailing local observation after the last provider request settles captures fast terminal throttles.
 Status responses require the captured owner to remain active; datasource navigation does not discard owner cooldown.
 Status polling stops when no work, trailing observation, or cooldown remains.
-New overlapping mutations are refused during known cooldown in both the interface and backend admission.
-Follow and unfollow admission runs before subscription preflight.
-Their per-target and summary receipts retain mutation dispatch and cooldown metadata.
-A throttled target stops later envelopes; unsent targets remain distinct from rejected submitted targets.
+The interface does not start a new mutation during known cooldown; the backend has no cooldown refusal.
+Bulk deletes, variant creation, follows, and unfollows run as mutation jobs ([`mutation-pacing.ts`](../packages/core/src/tableau/mutation-pacing.ts), [`mutation-jobs.ts`](../packages/pulse/src/http/mutation-jobs.ts)).
+Jobs send writes in blocks of five, wait for each block, and pause 250 milliseconds before the next.
+Inside a job, the wait for permission to send has no deadline and a 429 is resent until Tableau accepts or rejects the write.
+Each dispatched attempt keeps its own response deadline, so a stalled write still becomes an unknown outcome.
+The only overall limit is a two-hour anomaly guard, which stops the job exactly as Cancel would.
+Stopping a job never aborts a dispatched write; queued and later writes report `not_attempted` with `sent: false`.
+A job start answers with its final response when the job finishes within ten seconds and Tableau has not limited it.
+Otherwise it answers HTTP 202 with job status; the client polls `GET /api/pulse/jobs/:id` until the final response arrives.
+`POST /api/pulse/jobs/:id/cancel` stops a job; both routes return 404 for a job owned by another session.
+Cancel answers HTTP 200 with the job's `stopping` or `finished` status; the waiting request still receives the final response.
+The client stops starting later requests as soon as Cancel is pressed, but shows the batch as stopping only after the server confirms.
+A cancel the server does not confirm is shown with Cancel available again; a Cancel pressed before the next request reports its job is sent when that job reports in.
+The client shows completed and total counts, the time Tableau accepts more writes, and Cancel once a job is limited.
+Finished job responses are retained for ten minutes; jobs end with the app.
+Per-target and summary receipts retain mutation dispatch and cooldown metadata.
+A throttle that escapes outside a job stops later envelopes; unsent targets remain distinct from rejected submitted targets.
 An entirely unsent throttled response uses HTTP 429; a response containing submitted mutations uses HTTP 207.
 Structured throttle errors distinguish sent requests from local refusals and retain retry timing.
 Expiry permits eligible admitted requests to resume; it never resubmits a whole command or an ambiguous write.

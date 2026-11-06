@@ -63,10 +63,9 @@ export interface DimensionalForkResult {
     kind?: 'auth' | 'http' | 'network';
     detail?: string;
   };
-  reconciliationStatus?: 'visible' | 'pending_visibility' | 'ownership_mismatch' | 'failed';
+  reconciliationStatus?: 'visible' | 'pending_visibility' | 'failed';
   exactMetricResolved?: boolean;
   inventoryVisible?: boolean;
-  ownershipVerified?: boolean;
 }
 
 export interface DimensionalForkSummary {

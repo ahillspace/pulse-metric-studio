@@ -1,4 +1,4 @@
-import { assertTableauMutationAdmission, getSessionContext, isSessionCurrent } from "@pulse-metric-studio/core";
+import { getSessionContext, isSessionCurrent } from "@pulse-metric-studio/core";
 import type { TableauSession } from "@pulse-metric-studio/core";
 import type {
   ExecutePulseDeleteRequest,
@@ -138,7 +138,6 @@ export class PulseDeletionService {
   }
   async execute(request: ExecutePulseDeleteRequest) {
     const session = requirePulseOwner(request.context);
-    assertTableauMutationAdmission(session);
     const capturedContext = getSessionContext(session);
     const plan = await this.plan(request, session);
     if (plan.previewFingerprint !== request.previewFingerprint)

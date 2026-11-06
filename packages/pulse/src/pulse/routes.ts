@@ -31,6 +31,7 @@ import {
   type PulseForkPlanService,
 } from "./fork-plan-service.js";
 import { latestThrottle } from '../application/mutation-metadata.js';
+import { cancelMutationJob, readMutationJob, runMutationJob, type MutationJobResponse } from '../http/mutation-jobs.js';
 import { pulseOperationErrorMessage } from './operation-errors.js';
 
 async function dimensionOperation<T>(session: TableauSession, operation: () => Promise<T>): Promise<T> {
@@ -91,6 +92,27 @@ function requireSession(request?: FastifyRequest) {
   return s;
 }
 
+function subscriptionResponse(results: Awaited<ReturnType<typeof followTargets>>): MutationJobResponse {
+  const throttle = latestThrottle(results), sent = results.some(result => result.sent !== false);
+  return {
+    status: throttle ? (sent ? 207 : 429) : 200,
+    body: {
+      sent,
+      ...(throttle ? { throttle: { ...throttle, sent } } : {}),
+      results,
+      terminated: results.some(
+        (result) => result.code === "authentication_required",
+      ),
+      stopped: results.some(
+        (result) =>
+          result.code === "authentication_required" ||
+          result.code === "subscription_interrupted" ||
+          result.code === "batch_stopped" || result.throttle !== undefined,
+      ),
+    },
+  };
+}
+
 export function registerPulseRoutes(
   app: FastifyInstance,
   dependencies: PulseWorkflowDependencies & {
@@ -147,8 +169,22 @@ export function registerPulseRoutes(
     const parsed = PulseVariantCommandSchema.safeParse(req.body);
     if (!parsed.success) throw app.httpErrors.badRequest(parsed.error.message);
     const session = requirePulseOwner(parsed.data.context, requireSession(req));
-    const summary = await forkPlanService.forkMetrics(session, parsed.data);
-    return reply.code(forkPlanHttpStatus(summary)).send(summary);
+    return runMutationJob(reply, "fork", session, async () => {
+      const summary = await forkPlanService.forkMetrics(session, parsed.data);
+      return { status: forkPlanHttpStatus(summary), body: summary };
+    });
+  });
+
+  const JobParamsSchema = z.object({ id: z.string().min(1).max(128) }).strict();
+  app.get("/api/pulse/jobs/:id", async (req, reply) => {
+    const params = JobParamsSchema.safeParse(req.params);
+    if (!params.success) throw app.httpErrors.badRequest("A job id is required.");
+    return readMutationJob(reply, requireSession(req), params.data.id);
+  });
+  app.post("/api/pulse/jobs/:id/cancel", async (req, reply) => {
+    const params = JobParamsSchema.safeParse(req.params);
+    if (!params.success) throw app.httpErrors.badRequest("A job id is required.");
+    return cancelMutationJob(reply, requireSession(req), params.data.id);
   });
 
   app.post("/api/pulse/follow-state", async (req) => {
@@ -203,22 +239,7 @@ export function registerPulseRoutes(
     if (!parsed.success) throw app.httpErrors.badRequest(parsed.error.message);
     const session = requirePulseOwner(parsed.data.context, requireSession(req));
     const operations = parsed.data.operations;
-    const results = await followTargets(session, { operations });
-    const throttle = latestThrottle(results), sent = results.some(result => result.sent !== false);
-    if (throttle) reply.code(sent ? 207 : 429);
-    return {
-      sent,
-      ...(throttle ? { throttle: { ...throttle, sent } } : {}),
-      results,
-      terminated: results.some(
-        (result) => result.code === "authentication_required",
-      ),
-      stopped: results.some(
-        (result) =>
-          result.code === "authentication_required" ||
-          result.code === "subscription_interrupted" || result.throttle !== undefined,
-      ),
-    };
+    return runMutationJob(reply, "follow", session, async () => subscriptionResponse(await followTargets(session, { operations })));
   });
 
   app.post("/api/pulse/unfollow", async (req, reply) => {
@@ -226,22 +247,7 @@ export function registerPulseRoutes(
     if (!parsed.success) throw app.httpErrors.badRequest(parsed.error.message);
     const session = requirePulseOwner(parsed.data.context, requireSession(req));
     const operations = parsed.data.operations;
-    const results = await unfollowTargets(session, { operations });
-    const throttle = latestThrottle(results), sent = results.some(result => result.sent !== false);
-    if (throttle) reply.code(sent ? 207 : 429);
-    return {
-      sent,
-      ...(throttle ? { throttle: { ...throttle, sent } } : {}),
-      results,
-      terminated: results.some(
-        (result) => result.code === "authentication_required",
-      ),
-      stopped: results.some(
-        (result) =>
-          result.code === "authentication_required" ||
-          result.code === "subscription_interrupted" || result.throttle !== undefined,
-      ),
-    };
+    return runMutationJob(reply, "unfollow", session, async () => subscriptionResponse(await unfollowTargets(session, { operations })));
   });
 
   app.post("/api/pulse/followers-detail", async (req) => {

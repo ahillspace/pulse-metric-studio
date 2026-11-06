@@ -297,8 +297,6 @@ export function registryResultHeadlines(
       visibility.push(`${forkCounts.visible} verified`);
     if (forkCounts.pendingVisibility > 0)
       visibility.push(`${forkCounts.pendingVisibility} pending`);
-    if (forkCounts.ownershipMismatch > 0)
-      visibility.push(`${forkCounts.ownershipMismatch} ownership mismatch`);
     if (forkCounts.failed > 0) visibility.push(`${forkCounts.failed} failed`);
     if (visibility.length) headlines.push(`Visibility: ${visibility.join(", ")}.`);
     if (forkCounts.shared > 0)
@@ -617,6 +615,9 @@ export function forkFriendlyName(
   return base;
 }
 
+/** Values shown per filter in a label before the rest collapse to a count. */
+const FILTER_SUMMARY_VALUE_LIMIT = 3;
+
 function dimensionalFilterSummary(filters: unknown[]): string {
   return filters
     .map((filter) => {
@@ -635,7 +636,11 @@ function dimensionalFilterSummary(filters: unknown[]): string {
             )
             .filter(Boolean)
         : [];
-      return values.length > 0 ? `${field}: ${values.join(", ")}` : field;
+      if (!values.length) return field;
+      const shown = values.slice(0, FILTER_SUMMARY_VALUE_LIMIT).join(", ");
+      const hidden = values.length - FILTER_SUMMARY_VALUE_LIMIT;
+      const list = hidden > 0 ? `${shown} +${hidden} more` : shown;
+      return `${field}: ${record.operator === "OPERATOR_NOT_EQUAL" ? `not ${list}` : list}`;
     })
     .filter(Boolean)
     .join("; ");

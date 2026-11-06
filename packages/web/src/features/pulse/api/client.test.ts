@@ -153,3 +153,23 @@ test("valid delete and subscription receipts preserve sent throttle metadata", a
   const deleted = await pulseApi.delete({ context: draft().context, snapshotId: "snapshot", metricIds: ["metric"], definitionIds: [], previewFingerprint: "reviewed", allowIncompleteInventory: false });
   assert.deepEqual(deleted.throttle, throttle);
 });
+
+test("cancel resolves only on the server's confirmation", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const job = (state: string) => ({ job: { id: "job", kind: "follow", state, total: 2, completed: 1, throttled: true, retryAt: null, serverTime: 0, stopReason: state === "running" ? null : "cancelled" } });
+  globalThis.fetch = async () => Response.json(job("stopping"));
+  assert.equal((await registryApi.cancelJob("job", null)).state, "stopping");
+  globalThis.fetch = async () => Response.json(job("finished"));
+  assert.equal((await registryApi.cancelJob("job", null)).state, "finished");
+  for (const [label, respond] of [
+    ["unreachable", async () => { throw new TypeError("fetch failed"); }],
+    ["server error", async () => Response.json({ message: "Internal failure" }, { status: 500 })],
+    ["unknown job", async () => Response.json({ code: "job_not_found", message: "This batch is no longer running." }, { status: 404 })],
+    ["still running", async () => Response.json(job("running"))],
+    ["malformed", async () => Response.json({ ok: true })],
+  ] as const) {
+    globalThis.fetch = respond as typeof fetch;
+    await assert.rejects(registryApi.cancelJob("job", null), label);
+  }
+});
