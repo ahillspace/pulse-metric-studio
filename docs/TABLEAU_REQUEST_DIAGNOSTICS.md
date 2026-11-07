@@ -1,7 +1,8 @@
 # Measure Tableau requests
 
 Use this procedure to measure Metric Manager request counts and Tableau throttling.
-It covers retained inventory, local mutation patches, lazy filter discovery, shared subscription coverage, cooldown recovery, and bulk mutation jobs.
+It covers retained inventory, local mutation patches, lazy filter discovery, shared subscription coverage, cooldown recovery, and mutation jobs.
+Bulk deletes, variant creation, follows, unfollows, publication, publication undo, and publication group deletion all run as mutation jobs.
 Use a datasource where creating test variants and deleting the reviewed test targets is acceptable.
 Desktop and live Tableau qualification remain user-led; automated checks use isolated provider fixtures.
 
@@ -59,7 +60,7 @@ Names and filter values are unnecessary in your notes.
    Leave the app idle through the reported wait and record admitted work that resumes.
    Expiry must not resubmit the whole command or an unknown write.
    Do not restart during this window, because restarting clears the in-memory shared cooldown and ends any running job.
-   For a bulk change of more than 15 items, record the progress count, the **Waiting for Tableau until** time, and that the batch completes with no time cap.
+   For a bulk change large enough that Tableau limits it, record the progress count, that the status alternates between **Waiting for Tableau to accept more changes** and **Sending changes**, and that the batch completes with no time cap.
    Repeat once and click **Cancel remaining** while waiting; completed items stay done and the rest are reported as not sent.
    The banner must show **Stopping** only after the app confirms the cancel; if it reports that Cancel was not confirmed, Cancel must be available again.
 10. Review deletion of the intended test targets and record preview and submission separately.
@@ -70,6 +71,8 @@ Names and filter values are unnecessary in your notes.
 
 If an outcome is unknown, inspect Tableau before retrying.
 Publication receipts, default-metric resolution, and undo retain their independent safety rules.
+A publication, undo, or group deletion that Tableau limits shows the same progress and **Cancel remaining** in its dialog.
+After Cancel, created metrics stay published, deleted metrics stay deleted, and the rest are reported as not sent.
 No fixed attempt count can guarantee a 429 because Tableau's limits and other traffic vary.
 
 ## Compare healthy call budgets
@@ -88,9 +91,15 @@ Compare warm-context calls separately from source or catalog misses, transport r
 | Delete reviewed targets with healthy responses | One DELETE per reviewed destination |
 | Expand metrics with retained relationship coverage | 0 repeated detail or summary-count calls |
 
-The first detail demand uses one shared discovery page and bounded targeted fallback when site coverage is incomplete or unqualified.
-A demand cannot exceed 20 subscription calls; explicit continuation retains progress and respects site bounds of 20 pages and 2,000 records.
+Each detail request reads follower counts once, in batches of up to 100 metrics.
+A count of zero, or a count equal to the followers already found, settles that metric without a subscription read.
+Retained coverage that disagrees with a fresh count is read again.
+Metrics without a usable count use one shared discovery page and bounded targeted fallback when site coverage is incomplete or unqualified.
+The client sends detail requests of up to 100 metrics, and each request may send one discovery page plus two subscription pages per metric in a full batch.
+Targeted reads run five at a time per request, breadth first, so a request that reaches its budget stops evenly across its metrics.
+Explicit continuation retains progress and respects per-target bounds of 20 pages and 2,000 records.
 These bounds are app preferences, not Tableau service limits.
+A follower-count request that Tableau rejects with 400 or 414 is split in half and retried, with a fixed number of extra sends per batch.
 Cold or expired source facts and catalog metadata add required acquisition calls without changing the warm budgets.
 Explicit retries reacquire failed source facts without retaining transient failures for the successful-fact cache lifetime.
 Fresh successful sources keep their original acquisition times and avoid repeated reads during that recovery.
@@ -167,6 +176,8 @@ The diagnostics also record these measurement facts:
   Manager get-or-create confirmation does not poll metric visibility.
 - Dimension context events identify cache hits and misses; operation labels distinguish source, catalog, and filter-validation calls.
 - Subscription events identify pagination without recording follower identities or response bodies.
+- `tableau.follower_counts` events record the batch size, HTTP status, provider error code, and split depth of each follower-count request.
+  They never record metric IDs, names, sites, or URLs.
 - Throttle events record Retry-After, shared cooldown, actual waits, and rejections before a request is sent.
 
 Record actual counts and diagnostics alongside these expected budgets.

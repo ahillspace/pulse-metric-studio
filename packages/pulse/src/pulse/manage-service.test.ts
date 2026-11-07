@@ -390,6 +390,8 @@ test('follow state records every distinct group follower for the row summary, re
     ['metric-1'],
     {},
     dependencies({
+      // Four distinct followers, so the count cannot settle the metric before the list is read.
+      followerCounts: async () => ({ countsByMetricId: { 'metric-1': 4 }, errorsByMetricId: {} }),
       listSubscriptions: async () => [
         { follower: { id: 'group-i-belong-to', type: 'GROUP' } },
         { follower: { id: 'group-someone-else-added', type: 'GROUP' } },
@@ -442,6 +444,7 @@ test('follow state marks unsupported follower types and group context as relatio
     ['metric-1'],
     { groupContextUnavailable: true },
     dependencies({
+      followerCounts: async () => ({ countsByMetricId: { 'metric-1': 1 }, errorsByMetricId: {} }),
       listSubscriptions: async () => [{ follower: { id: 'unknown-1', type: 'UNKNOWN' } }],
     }),
   );

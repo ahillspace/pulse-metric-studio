@@ -26,7 +26,7 @@ import {
   ReviewedResourceId,
   ReviewedMetricFollowers,
 } from "../registry/views";
-import { JobProgress } from "../registry/JobProgress";
+import { JobProgress } from "../jobs/JobProgress";
 import { CooldownBanner } from "../registry/CooldownBanner";
 import { VariantDialog } from "../registry/VariantDialog";
 import { InventoryFailures } from "../registry/InventoryFailures";
@@ -417,14 +417,14 @@ export const ExistingMetrics = memo(function ExistingMetrics({ visible = true }:
         {existing && <InventoryFailures inventory={existing} />}
         {registry.followState?.errors.length ? (
           <p className="warning-banner" role="status">
-            Some follow information is unavailable. Unknown relationships are
-            not shown as confirmed zero.
+            Some follower information could not be loaded. Hover a row for
+            the reason; unconfirmed rows are never shown as not followed.
           </p>
         ) : null}
-        {canLoadMoreFollowDetails && <button className="btn small" disabled={registry.followLoading} onClick={() => void registry.loadMoreFollowState(JSON.parse(detailIdsKey) as string[])}>Load more follow details</button>}
+        {canLoadMoreFollowDetails && <button className="btn small" disabled={registry.followLoading} onClick={() => void registry.loadMoreFollowState(JSON.parse(detailIdsKey) as string[])}>Load more followers</button>}
         {onlyFollowed && allMetrics.some((metric) =>
           registry.followState?.availabilityByMetricId?.[metric.metricId]?.relationshipStatus === "not_requested") && (
-          <p role="status">Loading follow details. Metrics with unknown follow state remain visible.</p>
+          <p role="status">Loading followers. Metrics still loading stay in the list.</p>
         )}
         {registry.loading && !existing && (
           <p role="status">Loading Tableau definitions...</p>

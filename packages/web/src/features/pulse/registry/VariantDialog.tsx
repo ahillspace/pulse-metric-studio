@@ -29,15 +29,15 @@ import {
   variantRequest,
 } from "./variant-plan";
 import { CooldownBanner, type RegistryCooldown } from "./CooldownBanner";
-import { JobProgress } from "./JobProgress";
-import type { RegistryJob } from "./controller";
+import { JobProgress } from "../jobs/JobProgress";
+import type { MutationJobProgress } from "../jobs/tracker";
 import type { SessionOwner } from "../shell/session-events";
 import { getForkDisabledReason, SelectionCheckbox } from "./views";
 
 interface Props {
   cooldown?: RegistryCooldown | null;
   /** The running variant batch, shown once Tableau limits it. */
-  job?: RegistryJob | null;
+  job?: MutationJobProgress | null;
   onCancelJob?(): void;
   snapshotId?: string;
   owner?: SessionOwner | null;

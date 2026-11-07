@@ -226,8 +226,9 @@ One bounded trailing local observation after the last provider request settles c
 Status responses require the captured owner to remain active; datasource navigation does not discard owner cooldown.
 Status polling stops when no work, trailing observation, or cooldown remains.
 The interface does not start a new mutation during known cooldown; the backend has no cooldown refusal.
-Bulk deletes, variant creation, follows, and unfollows run as mutation jobs ([`mutation-pacing.ts`](../packages/core/src/tableau/mutation-pacing.ts), [`mutation-jobs.ts`](../packages/pulse/src/http/mutation-jobs.ts)).
+Bulk deletes, variant creation, follows, unfollows, publication, publication undo, and publication group deletion run as mutation jobs ([`mutation-pacing.ts`](../packages/core/src/tableau/mutation-pacing.ts), [`mutation-jobs.ts`](../packages/pulse/src/http/mutation-jobs.ts)).
 Jobs send writes in blocks of five, wait for each block, and pause 250 milliseconds before the next.
+Every write in one job continues the same pacing sequence, so a publication that moves from creates to follows still pauses after each block of five.
 Inside a job, the wait for permission to send has no deadline and a 429 is resent until Tableau accepts or rejects the write.
 Each dispatched attempt keeps its own response deadline, so a stalled write still becomes an unknown outcome.
 The only overall limit is a two-hour anomaly guard, which stops the job exactly as Cancel would.
@@ -238,7 +239,9 @@ Otherwise it answers HTTP 202 with job status; the client polls `GET /api/pulse/
 Cancel answers HTTP 200 with the job's `stopping` or `finished` status; the waiting request still receives the final response.
 The client stops starting later requests as soon as Cancel is pressed, but shows the batch as stopping only after the server confirms.
 A cancel the server does not confirm is shown with Cancel available again; a Cancel pressed before the next request reports its job is sent when that job reports in.
-The client shows completed and total counts, the time Tableau accepts more writes, and Cancel once a job is limited.
+Once Tableau limits a job, the client shows completed and total counts, whether it is waiting for Tableau or sending, and Cancel.
+It never shows a Tableau rate or a resume time, because Tableau sets and changes its write limits server-side.
+The web [`jobs`](../packages/web/src/features/pulse/jobs/tracker.ts) module owns this progress and Cancel tracking for every job the client starts.
 Finished job responses are retained for ten minutes; jobs end with the app.
 Per-target and summary receipts retain mutation dispatch and cooldown metadata.
 A throttle that escapes outside a job stops later envelopes; unsent targets remain distinct from rejected submitted targets.
@@ -288,6 +291,11 @@ The follow receipt records its mode, captured self recipient when applicable, an
 Digest groups use `pmStudio - Datasource Name - chosen name`, with the complete datasource and audience labels.
 The transport escapes XML while preserving the group name.
 Group actions use recorded group IDs and publication ownership.
+A publication's creates, group setup, and membership share one pacer, and its follows go out as one paced subscription batch.
+The publish job's total counts each metric creation and each follow.
+Cancel or the time limit stops a publication before its next write: later metrics are `not_attempted` with a not-sent diagnostic, and unsent follow, group, and membership steps are `not_attempted`.
+Created metrics stay published and their receipt stays eligible for undo.
+Author shows the receipt with a notice that the publication stopped and the rest were not sent.
 
 For a new rule, add pure validation in `packages/shared/src/pulse-domain.ts` and verify the relevant UI workflow.
 Use [`pulse-domain.test.ts`](../packages/shared/src/pulse-domain.test.ts) for pure rules, [`pulse-workflows.test.ts`](../packages/server/src/pulse-workflows.test.ts) for route integration, and [authoring UI tests](../packages/web/src/features/pulse/author/authoring-ui.test.tsx) for presentation.
@@ -319,6 +327,9 @@ Do not delete reused metrics or groups merely because they appear in a receipt.
 Undo compensates confirmed definition creations and rechecks connection ownership.
 It is a destructive action against those definitions, including their Tableau dependents; review the displayed scope before using it.
 Group deletion is a separate receipt-owned operation for groups confirmed created by that publication.
+Undo and group deletion run as mutation jobs; their confirmation dialogs show progress and Cancel once Tableau limits them.
+A stopped undo keeps confirmed deletions and leaves unsent metrics pending, so the receipt stays eligible for another undo.
+A stopped group deletion that was never sent restores the group's previous deletion outcome.
 Author and Activity read the same updated receipt outcomes.
 Activity places actions for the selected publication above its history and details, retaining the receipt's original connection and eligibility guards.
 Confirmation dialogs mount outside the sticky action toolbar's stacking context but remain inside the shell's disabled boundary for shutdown and backend unavailability.
@@ -364,8 +375,18 @@ Relationship reads share pending work per owned metric, including overlapping ex
 The retained inventory view shares one lazily acquired subscription discovery page across expansions and selections.
 The app requests 100 records per page; this preference is not a documented Tableau maximum.
 Incomplete or unqualified site coverage falls back to requested metrics without automatically scanning the entire site.
-Each follow-state API request uses at most 20 subscription calls, including discovery and targeted pages.
+Each follow-detail request reads fresh follower counts once, after any refresh invalidation, and returns them with the relationships.
+A fresh count of zero settles a metric as not followed, and a count equal to the distinct followers already found settles it as complete; neither sends a subscription read.
+Counts never settle a metric that a mutation touched after the count was read, and personal-only scope still never reports group absence.
+A fresh count is newer than retained coverage: complete coverage, or complete site discovery, that disagrees with it is read again instead of being reported.
+Discovery followers a count disproves, including any beyond the count, are retired for that metric, so they never confirm absence or match a later count.
+A metric that a mutation touches while its request is running reports that followers changed while loading, with Load more, instead of evidence chosen before the write.
+Metrics without a usable count fall back to targeted subscription reads.
+A detail response without a usable count keeps a count the interface already holds, and its tooltip still explains why the fresh count failed.
+The shared `PULSE_FOLLOW_DETAIL_BATCH_LIMIT` sets the client detail batch, and the server derives its per-request subscription budget from it: one discovery page plus two pages per metric in a full batch.
+Targeted reads run with a small fixed concurrency, breadth first, so a full batch of single-page metrics completes in one request and a budget stop is spread evenly.
 Larger interface demands use bounded batches and aggregate continuation from the currently demanded metrics rather than the last batch.
+A metric stopped by the request budget keeps **Load more followers** and says so in its row tooltip.
 Per-metric continuation ends when its scan completes, reaches a terminal limit, leaves the demand, or is superseded.
 A failed continuation request retains explicit retry for previously resumable metrics without treating their relationship details as confirmed.
 Explicit continuation retains progress and limits site scanning to 20 pages and 2,000 records per view.
@@ -377,7 +398,13 @@ Absent site records remain unknown until site-negative coverage is qualified aga
 The default backend keeps site-negative qualification disabled.
 Personal-only queries cannot establish group or all-follower absence.
 Unchanged metric IDs and group reuse existing evidence; cached group identities support local reprojection.
-Detail acquisition does not repeat batched summary counts or replace valid counts with missing fields.
+Detail acquisition does not send a separate summary-count request or replace valid counts with missing fields.
+Follower-count requests send at most 100 metric IDs each; this is a local request-size bound, not a Tableau limit.
+A 400 or 414 response splits the batch in half and retries both halves, with a fixed number of extra sends per batch, so one rejected ID does not cost its neighbours their counts.
+Authentication failures from count reads stop the request instead of becoming unavailable counts.
+Row labels read **Not followed**, **You follow**, **Group follows**, or **You + group**, followed by the follower count when known.
+Rows that are still loading read **Loading followers...**, rows that cannot be confirmed read **Followers unavailable**, and rows a budget stopped read **More followers to load**.
+Diagnostics appear in the row tooltip rather than in the label.
 Unrecoverable authentication errors stop subscription acquisition and retain the API's authentication response instead of becoming partial coverage.
 Manual inventory refresh supersedes earlier relationship evidence; subscription reconciliation requests evidence dispatched after the relevant mutation.
 Late results cannot replace newer relationship evidence in the display, retained inventory, or pending inventory enrichment.

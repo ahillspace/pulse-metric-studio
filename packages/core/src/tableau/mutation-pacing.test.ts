@@ -84,6 +84,34 @@ test('sequential pacer pauses before every block after the first', async () => {
   });
 });
 
+test('every pacer and block run inside one job continues the same pacing sequence', async () => {
+  const { job } = testJob();
+  const sends: Array<{ kind: string; at: number }> = [];
+  const record = (kind: string) => async () => { sends.push({ kind, at: performance.now() }); };
+  await runTableauMutationJob(job, async () => {
+    const creates = new TableauMutationPacer();
+    for (let send = 0; send < TABLEAU_MUTATION_BLOCK_SIZE; send++) await creates.send(record('create'));
+    // A later phase with its own pacer is still the sixth write of the job.
+    const follows = new TableauMutationPacer();
+    await follows.send(record('follow'));
+    // A block run after sequential writes also waits before its first block.
+    await runPacedMutationBlocks([1, 2], async () => record('block')());
+  });
+  const at = (index: number) => sends[index]!.at;
+  assert.deepEqual(sends.map((send) => send.kind), [...Array(TABLEAU_MUTATION_BLOCK_SIZE).fill('create'), 'follow', 'block', 'block']);
+  assert.ok(at(TABLEAU_MUTATION_BLOCK_SIZE - 1) - at(0) < TABLEAU_MUTATION_BLOCK_PAUSE_MS / 2, 'the first block goes out without a pause');
+  assert.ok(at(TABLEAU_MUTATION_BLOCK_SIZE) - at(TABLEAU_MUTATION_BLOCK_SIZE - 1) >= TABLEAU_MUTATION_BLOCK_PAUSE_MS - 5, 'the first follow waits for the pause owed after five creates');
+  assert.ok(at(TABLEAU_MUTATION_BLOCK_SIZE + 1) - at(TABLEAU_MUTATION_BLOCK_SIZE) >= TABLEAU_MUTATION_BLOCK_PAUSE_MS - 5, 'a block after earlier writes pauses first');
+});
+
+test('pacers outside a job keep their own sequences', async () => {
+  const first = new TableauMutationPacer();
+  for (let send = 0; send < TABLEAU_MUTATION_BLOCK_SIZE; send++) await first.send(async () => undefined);
+  const started = performance.now();
+  await new TableauMutationPacer().send(async () => undefined);
+  assert.ok(performance.now() - started < TABLEAU_MUTATION_BLOCK_PAUSE_MS / 2, 'unrelated writes outside a job are not held by each other');
+});
+
 test('workers inside a job see the job and report progress to it', async () => {
   const { job, progress } = testJob();
   assert.equal(currentTableauMutationJob(), undefined);

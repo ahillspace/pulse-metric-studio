@@ -27,6 +27,7 @@ import {
 import {
   PulsePublishService,
   type PublishDependencies,
+  type PulsePublicationCommand,
 } from "../application/publish.js";
 import { previewPulseMetric } from "../application/metric-preview.js";
 import { PulseRepository } from "../persistence/repository.js";
@@ -89,6 +90,18 @@ export function registerPulseWorkflowRoutes(
         throw error;
       }
     };
+    /**
+     * Answers a publication command: with its receipt when one already
+     * answers it, otherwise by running its Tableau writes as a mutation job
+     * whose final response is the receipt.
+     */
+    const runPublication = (
+      reply: FastifyReply,
+      kind: "publish" | "undo" | "group_delete",
+      command: PulsePublicationCommand,
+    ): unknown => "receipt" in command
+      ? command.receipt
+      : runMutationJob(reply, kind, command.session, async () => ({ status: 200, body: await command.run() }), applicationErrorResponse);
     app.post("/api/pulse/metrics/:metricId/preview", (req, reply) =>
       respond(reply, () => previewPulseMetric(
         parse(z.string().min(1).max(255), (req.params as { metricId: string }).metricId),
@@ -135,10 +148,10 @@ export function registerPulseWorkflowRoutes(
     );
     app.post("/api/pulse/drafts/:id/publish", (req, reply) =>
       respond(reply, () =>
-        publish.publish(
+        runPublication(reply, "publish", publish.publish(
           id(req.params),
           parse(PublishPulseDraftRequestSchema, req.body),
-        ),
+        )),
       ),
     );
     app.post("/api/pulse/drafts/:id/proposals", (req, reply) =>
@@ -161,17 +174,17 @@ export function registerPulseWorkflowRoutes(
       respond(reply, () => repository.getReceipt(id(req.params))),
     );
     app.post("/api/pulse/receipts/:id/undo", (req, reply) =>
-      respond(reply, () => publish.undo(id(req.params))),
+      respond(reply, () => runPublication(reply, "undo", publish.undo(id(req.params)))),
     );
     app.post("/api/pulse/receipts/:id/delete-group", (req, reply) =>
       respond(reply, () =>
-        publish.deleteCreatedGroup(
+        runPublication(reply, "group_delete", publish.deleteCreatedGroup(
           id(req.params),
           parse(
             z.object({ groupId: z.string().trim().min(1).max(200) }).strict(),
             req.body,
           ).groupId,
-        ),
+        )),
       ),
     );
     app.delete("/api/pulse/receipts/:id", (req, reply) =>

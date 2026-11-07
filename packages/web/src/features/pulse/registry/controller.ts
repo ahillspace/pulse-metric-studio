@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { PULSE_FOLLOW_DETAIL_BATCH_LIMIT } from "@pulse-metric-studio/shared";
 import type {
   PulseDeletePlan,
   PulseDraftContext,
@@ -26,6 +27,7 @@ import {
 } from "../follow-target-actions";
 import { errorMessage } from "../shell/notifications";
 import { sessionOwnerKey, type SessionOwner } from "../shell/session-events";
+import { createMutationJobTracker, stoppedMessage, type MutationJobProgress } from "../jobs/tracker";
 
 interface RegistryState {
   context: PulseDraftContext | null;
@@ -47,7 +49,7 @@ interface RegistryState {
   cooldown: { retryAt: number; remainingSeconds: number } | null;
   pollCooldown(): Promise<void>;
   /** The running bulk change, once the server reports it as a job. */
-  job: RegistryJob | null;
+  job: MutationJobProgress | null;
   /** Stops sending the running bulk change; completed changes stay done. */
   cancelJob: () => Promise<void>;
   deletePlan: PulseDeletePlan | null;
@@ -95,25 +97,6 @@ interface RegistryState {
     metricIds: string[],
   ) => Promise<{ details: PulseFollowersDetail[] }>;
 }
-/**
- * Progress of the running bulk change across all of its requests. `total` is
- * null when the server has not reported a count yet.
- */
-export interface RegistryJob {
-  kind: PulseMutationJobStatus["kind"];
-  total: number | null;
-  completed: number;
-  throttled: boolean;
-  retryAt: number | null;
-  serverTime: number;
-  /** The server confirmed the batch is stopping and sends nothing more. */
-  stopping: boolean;
-  /** Cancel was pressed and the server has not confirmed it yet. */
-  cancelling: boolean;
-  /** Why the last Cancel was not confirmed; the batch may still be sending. */
-  cancelError: string | null;
-  stopReason: PulseMutationJobStatus["stopReason"];
-}
 function key(context: PulseDraftContext | null, owner: SessionOwner | null = null): string {
   return context ? JSON.stringify([context.connectionId, context.serverUrl, context.siteId, context.datasourceLuid, sessionOwnerKey(owner)]) : "null";
 }
@@ -159,7 +142,7 @@ export function createRegistryController(
   const cooldownPollRequests = new Map<string, number>();
   let generation = 0;
   /** The bulk change in progress; Cancel acts on it. */
-  let activeJob: { cancel(): Promise<void> } | null = null;
+  const jobs = createMutationJobTracker((id, owner) => transport.cancelJob(id, owner));
   let inventoryRequest = 0;
   let deleteRequest = 0;
   let deleteBatches: PulseDeletePlan[] = [];
@@ -184,96 +167,16 @@ export function createRegistryController(
       const retryAt = Math.max(get().cooldown?.retryAt ?? 0, throttle.retryAt);
       set({ cooldown: { retryAt, remainingSeconds: Math.max(0, Math.ceil((retryAt - throttle.serverTime) / 1000)) } });
     };
-    /**
-     * Starts tracking a bulk change. Its requests report progress through the
-     * returned observer, offset by the items earlier requests already finished.
-     *
-     * Cancel is two separate guarantees. Pressing it keeps this client from
-     * starting any later request at once. The server job already running stops
-     * only when the server confirms the cancel; until then the UI says it is
-     * cancelling, and a failed cancel is shown and can be pressed again. A
-     * Cancel pressed while the next request has not reported its job yet is
-     * sent as soon as that job reports in.
-     */
-    const beginJob = (scope: ReturnType<typeof capture>, total: number | null) => {
-      let id: string | null = null;
-      let before = 0;
-      let stopReason: PulseMutationJobStatus["stopReason"] = null;
-      let requested = false;
-      let confirmed = false;
-      let sending = false;
-      let awaitingId = false;
-      const publish = (patch: Partial<RegistryJob>) => {
-        const job = get().job;
-        if (job && current(scope) && activeJob === handle) set({ job: { ...job, ...patch } });
-      };
-      const sendCancel = async (jobId: string) => {
-        sending = true;
-        awaitingId = false;
-        publish({ cancelling: true, cancelError: null });
-        try {
-          const status = await transport.cancelJob(jobId, scope.owner);
-          // A job that had already finished has nothing left to stop.
-          confirmed = status.state === "stopping";
-          stopReason = stopReason ?? status.stopReason;
-          publish(confirmed ? { cancelling: false, stopping: true, stopReason } : { cancelling: false });
-        } catch (error) {
-          publish({
-            cancelling: false,
-            cancelError: `Cancel was not confirmed, so the batch may still be sending changes. ${errorMessage(error)}`,
-          });
-        } finally {
-          sending = false;
-        }
-      };
-      const handle = {
-        async cancel() {
-          if (confirmed || sending || awaitingId) return;
-          requested = true;
-          if (id) return sendCancel(id);
-          awaitingId = true;
-          publish({ cancelling: true, cancelError: null });
-        },
-      };
-      activeJob = handle;
-      const observe = (status: PulseMutationJobStatus) => {
-        id = status.id;
-        stopReason = stopReason ?? status.stopReason;
-        if (status.state === "stopping") confirmed = true;
-        if (awaitingId) void sendCancel(status.id);
-        if (!current(scope) || activeJob !== handle) return;
-        const previous = get().job;
-        set({ job: {
-          kind: status.kind,
-          total: total ?? status.total,
-          completed: before + status.completed,
-          throttled: status.throttled || Boolean(previous?.throttled),
-          retryAt: status.retryAt,
-          serverTime: status.serverTime,
-          stopping: confirmed,
-          cancelling: sending || awaitingId,
-          cancelError: previous?.cancelError ?? null,
-          stopReason: stopReason ?? previous?.stopReason ?? null,
-        } });
-      };
-      return {
-        observe,
-        /** Moves progress past a finished request of `count` items. */
-        advance(count: number) { before += count; id = null; },
-        /** Cancel was pressed, or a request reported its job stopped; later requests are not sent. */
-        get cancelled() { return requested || stopReason !== null; },
-        /** Why the server stopped a request's job; null unless the server reported a stop. */
-        get stopReason(): PulseMutationJobStatus["stopReason"] { return stopReason; },
-        end() {
-          if (activeJob === handle) activeJob = null;
-          if (current(scope)) set({ job: null });
-        },
-      };
-    };
-    const stoppedMessage = (reason: PulseMutationJobStatus["stopReason"], noun: string) =>
-      reason === "time_limit"
-        ? `The batch stopped after 2 hours. Completed ${noun} stay done; the rest were not sent.`
-        : `The batch was cancelled. Completed ${noun} stay done; the rest were not sent.`;
+    /** Starts tracking a bulk change; see createMutationJobTracker for Cancel's guarantees. */
+    const beginJob = (scope: ReturnType<typeof capture>, total: number | null) => jobs.begin({
+      owner: scope.owner,
+      total,
+      current: () => current(scope),
+      read: () => get().job,
+      write: (job) => set({ job }),
+    });
+    const stopped = (reason: PulseMutationJobStatus["stopReason"], noun: string) =>
+      stoppedMessage(reason, "The batch", `Completed ${noun} stay done; the rest were not sent.`);
     const captureCooldown = (scope: ReturnType<typeof capture>, error: unknown) => {
       if (error instanceof PulseApiError) captureThrottle(scope, error.throttle);
     };
@@ -378,30 +281,27 @@ export function createRegistryController(
       const ids = [...new Set(metricIds)];
       const reads = detailScopeFor(scope.key);
       const missing = ids.filter(id => !reads.pending.has(id) && !reads.evidence.has(id));
-      for (let offset = 0; offset < missing.length; offset += 200) {
-        const batch = missing.slice(offset, offset + 200);
+      // Detail batches match the server's per-request budget, so a full batch completes without Load more.
+      for (let offset = 0; offset < missing.length; offset += PULSE_FOLLOW_DETAIL_BATCH_LIMIT) {
+        const batch = missing.slice(offset, offset + PULSE_FOLLOW_DETAIL_BATCH_LIMIT);
         const versions = new Map(batch.map(id => [id, reads.versions.get(id) ?? 0]));
         const request = detailRequest(async () => {
           const valid = batch.filter(id => evidenceCurrent(scope, reads, id, versions.get(id)!));
           if (!valid.length) return null;
           try {
             const previous = current(scope) ? get().followState : cache.get(scope.key)?.followState;
-            const missingCounts = valid.filter(id => refresh || previous?.availabilityByMetricId?.[id]?.followerCountStatus === "not_requested");
-            const [details, counts] = await Promise.all([
-              get().trackProviderOperation(() => transport.followState(valid, true, scope.owner, { snapshotId: (current(scope) ? get().inventory : cache.get(scope.key)?.inventory)?.snapshotId, continueCoverage, refresh }), scope.owner).catch(error => {
-                const unavailable = unavailableFollowState(valid, errorMessage(error));
-                for (const [id, availability] of Object.entries(unavailable.availabilityByMetricId ?? {})) {
-                  availability.followerCountStatus = "not_requested";
-                  // A failed continuation supplies no replacement cursor evidence.
-                  // Keep its explicit retry hint, while identities remain unavailable.
-                  if (continueCoverage && previous?.availabilityByMetricId?.[id]?.canLoadMore === true)
-                    availability.canLoadMore = true;
-                }
-                return unavailable;
-              }),
-              missingCounts.length ? get().trackProviderOperation(() => transport.followState(missingCounts, false, scope.owner), scope.owner).catch(error => unavailableFollowState(missingCounts, errorMessage(error))) : Promise.resolve(null),
-            ]);
-            return counts ? replaceFollowDetails(counts, details, valid) : details;
+            // Detail responses carry follower counts read in the same request, so no separate count read is needed.
+            return await get().trackProviderOperation(() => transport.followState(valid, true, scope.owner, { snapshotId: (current(scope) ? get().inventory : cache.get(scope.key)?.inventory)?.snapshotId, continueCoverage, refresh }), scope.owner).catch(error => {
+              const unavailable = unavailableFollowState(valid, errorMessage(error));
+              for (const [id, availability] of Object.entries(unavailable.availabilityByMetricId ?? {})) {
+                availability.followerCountStatus = "not_requested";
+                // A failed continuation supplies no replacement cursor evidence.
+                // Keep its explicit retry hint, while identities remain unavailable.
+                if (continueCoverage && previous?.availabilityByMetricId?.[id]?.canLoadMore === true)
+                  availability.canLoadMore = true;
+              }
+              return unavailable;
+            });
           }
           catch (error) { return unavailableFollowState(valid, errorMessage(error)); }
         });
@@ -487,7 +387,7 @@ export function createRegistryController(
       cooldown: null,
       job: null,
       async cancelJob() {
-        await activeJob?.cancel();
+        await jobs.cancel();
       },
       async pollCooldown() {
         const scope = capture();
@@ -667,7 +567,7 @@ export function createRegistryController(
           record(scope, {
             kind: "fork",
             title: "Variant results",
-            summary: summary.error ?? (job.stopReason ? stoppedMessage(job.stopReason, "variants") : undefined),
+            summary: summary.error ?? (job.stopReason ? stopped(job.stopReason, "variants") : undefined),
             finishedAt: Date.now(),
             items: summary.results.map((result, index) =>
               forkRegistryActionItem(
@@ -830,7 +730,7 @@ export function createRegistryController(
               break;
             }
             if (job.cancelled) {
-              failure = stoppedMessage(job.stopReason, "deletions");
+              failure = stopped(job.stopReason, "deletions");
               break;
             }
             batch.targets.forEach((target) =>
@@ -849,7 +749,7 @@ export function createRegistryController(
             applyPatch(scope, response.inventoryPatch);
             outcomes.push(...response.outcomes);
             if (job.stopReason) {
-              failure = stoppedMessage(job.stopReason, "deletions");
+              failure = stopped(job.stopReason, "deletions");
               break;
             }
             if (response.failures.length) {
@@ -976,7 +876,7 @@ export function createRegistryController(
               break;
             }
             if (job.cancelled) {
-              failure = stoppedMessage(job.stopReason, "subscriptions");
+              failure = stopped(job.stopReason, "subscriptions");
               break;
             }
             activeBatchStart = index;
@@ -992,7 +892,7 @@ export function createRegistryController(
             for (const result of response.results) captureThrottle(scope, result.throttle);
             results.push(...response.results);
             if (response.terminated || response.stopped || response.throttle) {
-              failure = job.stopReason ? stoppedMessage(job.stopReason, "subscriptions") : response.terminated
+              failure = job.stopReason ? stopped(job.stopReason, "subscriptions") : response.terminated
                 ? "The Tableau session ended. Remaining subscriptions were not sent."
                 : response.throttle ? "Tableau is limiting requests. Remaining subscriptions were not sent."
                 : "A subscription outcome is uncertain. Remaining subscriptions were not sent.";

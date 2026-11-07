@@ -3,15 +3,16 @@ import { createPortal } from "react-dom";
 import type { PulsePublishReceipt } from "@pulse-metric-studio/shared";
 import { contextMatches } from "../author/controller";
 import { useConnection } from "../connections/controller";
-import { BusyLabel, Modal } from "../components/ui";
+import { BusyLabel } from "../components/ui";
 import { useActivity } from "./controller";
 import { ConfirmUndo } from "./ConfirmUndo";
+import { ConfirmGroupDeletion } from "./ConfirmGroupDeletion";
 
 export function ReceiptActions({ receipt }: { receipt: PulsePublishReceipt }) {
   const [confirmGroup, setConfirmGroup] = useState(false);
   const [confirmUndo, setConfirmUndo] = useState(false);
   const session = useConnection((state) => state.session);
-  const { undoBusy, groupBusy, undoReceiptId, groupReceiptId, groupError } = useActivity();
+  const { undoBusy, groupBusy, undoReceiptId, groupReceiptId, groupError, job, cancelJob } = useActivity();
   const group = receipt.follow.group;
   const canConnect = Boolean(receipt.context && contextMatches(receipt.context, session));
   const undoReason = !receipt.context
@@ -24,6 +25,7 @@ export function ReceiptActions({ receipt }: { receipt: PulsePublishReceipt }) {
   const canDeleteGroup = createdGroup && group.deletion?.status !== "deleted";
   const busy = undoBusy || groupBusy || receipt.publishing;
   const undoingThisReceipt = undoBusy && undoReceiptId === receipt.id;
+  const deletingThisGroup = groupBusy && groupReceiptId === receipt.id;
   // Stay inside the shell's disabled fieldset without inheriting the toolbar's stacking context.
   const dialogHost = typeof document === "undefined" ? null : document.getElementById("pulse-workspace-dialogs");
 
@@ -37,7 +39,7 @@ export function ReceiptActions({ receipt }: { receipt: PulsePublishReceipt }) {
       </button>}
       {canDeleteGroup && <button className="btn small danger"
         disabled={!canConnect || busy} onClick={() => setConfirmGroup(true)}>
-        <BusyLabel busy={groupBusy && groupReceiptId === receipt.id}
+        <BusyLabel busy={deletingThisGroup}
           idle={`Delete "${group.name || "Digest group"}" Group`} active="Deleting group..." />
       </button>}
     </div>
@@ -50,25 +52,19 @@ export function ReceiptActions({ receipt }: { receipt: PulsePublishReceipt }) {
       {groupReceiptId === receipt.id && groupError && <p className="warning-banner" role="alert">{groupError}</p>}
     </div>}
     {showUndo && undoReason && <p className="pulse-receipt-note">{undoReason}</p>}
-    {confirmGroup && dialogHost && createPortal(<Modal
-      title={`Delete "${group.name || "Digest group"}" group?`}
-      onClose={busy ? undefined : () => setConfirmGroup(false)}
-      actions={<>
-        <button className="btn" disabled={busy} onClick={() => setConfirmGroup(false)}>Cancel</button>
-        <button className="btn danger" disabled={busy || !canConnect || !canDeleteGroup}
-          onClick={() => {
-            if (busy || !canConnect || !canDeleteGroup) return;
-            void useActivity.getState().deleteGroup(receipt.id, group.id!)
-              .then(() => setConfirmGroup(false));
-          }}>
-          <BusyLabel busy={groupBusy} idle="Delete group" active="Deleting..." />
-        </button>
-      </>}>
-      <p>Delete this group from Tableau, including its memberships and subscriptions. Metrics remain.</p>
-      <p>This cannot be undone.</p>
-    </Modal>, dialogHost)}
+    {confirmGroup && dialogHost && createPortal(<ConfirmGroupDeletion
+      name={group.name || "Digest group"} busy={busy} deleting={deletingThisGroup}
+      disabled={!canConnect || !canDeleteGroup}
+      job={job} onCancelJob={() => void cancelJob()}
+      onCancel={() => setConfirmGroup(false)}
+      onConfirm={() => {
+        if (busy || !canConnect || !canDeleteGroup) return;
+        void useActivity.getState().deleteGroup(receipt.id, group.id!)
+          .then(() => setConfirmGroup(false));
+      }} />, dialogHost)}
     {confirmUndo && dialogHost && createPortal(<ConfirmUndo receipt={receipt} busy={undoingThisReceipt}
       disabled={Boolean(undoReason) || busy || !showUndo}
+      job={job} onCancelJob={() => void cancelJob()}
       onCancel={() => setConfirmUndo(false)}
       onConfirm={() => {
         if (undoReason || busy || !showUndo) return;

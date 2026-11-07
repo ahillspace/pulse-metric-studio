@@ -25,6 +25,7 @@ import {
 import { errorMessage } from "../shell/notifications";
 import { useActivity } from "../activity/controller";
 import { sessionOwnerKey, type SessionOwner } from "../shell/session-events";
+import { createMutationJobTracker, stoppedMessage, type MutationJobProgress, type MutationJobTracker } from "../jobs/tracker";
 
 export interface DraftEditor {
   record: PulseDraftRecord;
@@ -52,6 +53,10 @@ export interface DraftEditor {
   publishBusy: boolean;
   publishError: string | null;
   publishCommandId: string | null;
+  /** The running publication, once the server reports it as a job. */
+  publishJob: MutationJobProgress | null;
+  /** What a stopped publication left unsent, shown with its receipt. */
+  publishNotice: string | null;
   receipt: PulsePublishReceipt | null;
 }
 type AuthorTransport = Pick<
@@ -64,6 +69,7 @@ type AuthorTransport = Pick<
   | "propose"
   | "preview"
   | "publish"
+  | "cancelJob"
 >;
 interface AuthorState {
   drafts: PulseDraftSummary[];
@@ -98,6 +104,8 @@ interface AuthorState {
   reviewPublication: () => Promise<void>;
   closePreview: () => void;
   publishReviewed: () => Promise<void>;
+  /** Stops sending the active draft's running publication; created metrics stay published. */
+  cancelPublish: () => Promise<void>;
   closeReceipt: () => void;
   prepareClose: (mode?: "save" | "discard") => Promise<void>;
   cancelClose: () => void;
@@ -159,8 +167,18 @@ function editor(record: PulseDraftRecord): DraftEditor {
     publishBusy: false,
     publishError: null,
     publishCommandId: null,
+    publishJob: null,
+    publishNotice: null,
     receipt: null,
   };
+}
+
+/** A stopped publication left part of its work unsent. */
+function publicationLeftUnsent(receipt: PulsePublishReceipt): boolean {
+  const follow = receipt.follow;
+  return receipt.unattemptedCount > 0 ||
+    follow.subscriptions.some((row) => row.status === "not_attempted") ||
+    (follow.mode === "group" && (follow.group.status === "not_attempted" || follow.membership.status === "not_attempted"));
 }
 
 export function createAuthorController(
@@ -179,6 +197,13 @@ export function createAuthorController(
   let navigation = 0;
   let listRequest = 0;
   let closeAttempt = 0;
+  /** Each draft publishes on its own, so each follows its own publication job. */
+  const publications = new Map<string, MutationJobTracker>();
+  const publication = (id: string) => {
+    let tracker = publications.get(id);
+    if (!tracker) publications.set(id, tracker = createMutationJobTracker((jobId, owner) => transport.cancelJob(jobId, owner)));
+    return tracker;
+  };
   const store = create<AuthorState>((set, get) => {
     const update = (
       id: string,
@@ -760,11 +785,19 @@ export function createAuthorController(
         update(id, {
           publishBusy: true,
           publishError: null,
+          publishNotice: null,
           publishCommandId: commandId,
         });
         let sent = false;
         let directoryChanged = false;
         const owner = session();
+        const job = publication(id).begin({
+          owner,
+          total: null,
+          current: () => Boolean(get().entries[id]),
+          read: () => get().entries[id]?.publishJob ?? null,
+          write: (publishJob) => update(id, { publishJob }),
+        });
         try {
           if (!entry.publishCommandId) requireRemote(entry);
           sent = true;
@@ -772,9 +805,12 @@ export function createAuthorController(
             expectedRevision: entry.preview.revision,
             previewFingerprint: entry.preview.previewFingerprint,
             commandId,
-          });
+          }, job.observe);
           directoryChanged = receipt.follow.group.status === "created" || receipt.follow.group.status === "unknown";
-          update(id, { receipt, preview: null, publishCommandId: null });
+          const publishNotice = job.stopReason && publicationLeftUnsent(receipt)
+            ? stoppedMessage(job.stopReason, "The publication", "Created metrics stay published; the rest were not sent.")
+            : null;
+          update(id, { receipt, preview: null, publishCommandId: null, publishNotice });
           onReceipt(receipt);
         } catch (error) {
           directoryChanged = entry.preview.followMode === "group" && (!(error instanceof PulseApiError) || error.status >= 500);
@@ -789,13 +825,18 @@ export function createAuthorController(
               : {}),
           });
         } finally {
+          job.end();
           update(id, { publishBusy: false });
           if (sent) onInventoryChanged(entry.preview.context, owner, directoryChanged);
         }
       },
+      async cancelPublish() {
+        const id = get().activeId;
+        if (id) await publications.get(id)?.cancel();
+      },
       closeReceipt() {
         const id = get().activeId;
-        if (id) update(id, { receipt: null });
+        if (id) update(id, { receipt: null, publishNotice: null });
       },
       async prepareClose(mode = "save") {
         const attempt = ++closeAttempt;

@@ -6,6 +6,8 @@ import {
   TableauError,
   getGroupCreationAccess,
   getSessionContext,
+  tableauMutationProgress,
+  TableauMutationPacer,
   type TableauSession,
 } from "@pulse-metric-studio/core";
 import {
@@ -36,6 +38,7 @@ import {
   batchCreateGroupSubscriptions,
   batchCreateUserSubscriptions,
   SubscriptionBatchInterrupted,
+  type SubscriptionWriteResult,
   createDefinition,
   deleteDefinition,
   resolveDefaultMetricId,
@@ -87,6 +90,34 @@ const defaultDependencies: PublishDependencies = {
     return result.user?.id ?? result.user?.luid ?? "";
   },
 };
+
+/** A metric the publication never sent because it stopped first. */
+export const PUBLICATION_STOPPED_METRIC = "Not sent: the publication stopped before this metric.";
+/** A follow the publication never sent because it stopped first. */
+export const PUBLICATION_STOPPED_FOLLOW = "Not sent: the publication stopped before this follow.";
+/** A digest group step the publication never sent because it stopped first. */
+export const PUBLICATION_STOPPED_STEP = "Not sent: the publication stopped before this step.";
+
+/**
+ * A publication operation after admission: a receipt that already answers it,
+ * or the owning session and the run that sends its Tableau writes.
+ */
+export type PulsePublicationCommand =
+  | { receipt: PulsePublishReceipt }
+  | { session: TableauSession; run(): Promise<PulsePublishReceipt> };
+
+function publishRequestHash(draftId: string, request: PublishPulseDraftRequest): string {
+  return fingerprint({
+    draftId,
+    expectedRevision: request.expectedRevision,
+    previewFingerprint: request.previewFingerprint,
+  });
+}
+
+/** Tableau never received this write, so it has no effect to report or undo. */
+function unsent(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && "sent" in error && error.sent === false);
+}
 
 export function digestGroupName(
   datasourceName: string,
@@ -224,17 +255,26 @@ export class PulsePublishService {
     return (await this.prepare(draftId, revision)).plan;
   }
 
-  async publish(
+  /**
+   * Admits a publication. A repeated command answers with its receipt; a new
+   * one needs its owning connection and runs as a Tableau mutation job.
+   */
+  publish(
     draftId: string,
     request: PublishPulseDraftRequest,
+  ): PulsePublicationCommand {
+    const requestHash = publishRequestHash(draftId, request);
+    if (this.repository.findReceipt(request.commandId))
+      return { receipt: this.duplicate(request.commandId, requestHash) };
+    const session = requirePulseOwner(this.repository.getDraft(draftId).context);
+    return { session, run: () => this.execute(draftId, request, requestHash) };
+  }
+
+  private async execute(
+    draftId: string,
+    request: PublishPulseDraftRequest,
+    requestHash: string,
   ): Promise<PulsePublishReceipt> {
-    const requestHash = fingerprint({
-      draftId,
-      expectedRevision: request.expectedRevision,
-      previewFingerprint: request.previewFingerprint,
-    });
-    const existing = this.repository.findReceipt(request.commandId);
-    if (existing) return this.duplicate(request.commandId, requestHash);
     const { draft, session, payloads, plan, assertGroupAccess, assertOwner } = await this.prepare(
       draftId,
       request.expectedRevision,
@@ -285,31 +325,51 @@ export class PulsePublishService {
       follow,
     });
     activePublishRuns.add(request.commandId);
+    // The job reports one step per metric created and one per follow requested.
+    tableauMutationProgress.total(items.length + follow.subscriptions.length);
+    // Creates, the digest group, and its membership share one pacer, so they
+    // reach Tableau as one paced sequence of writes.
+    const pacer = new TableauMutationPacer();
     let authenticationFailed = false;
+    // Set once a write was never sent: the publication sends nothing after it.
+    let stopped = false;
+    let subscriptionsSettled = false;
     try {
       for (const item of items) {
+        if (stopped || authenticationFailed) {
+          if (stopped) {
+            item.diagnostic = { message: PUBLICATION_STOPPED_METRIC };
+            this.repository.saveItem(request.commandId, item);
+          }
+          tableauMutationProgress.completed();
+          continue;
+        }
         assertOwner();
         item.creationStatus = "unknown";
         this.repository.saveItem(request.commandId, item);
         let created: Awaited<ReturnType<typeof createDefinition>>;
         try {
-          created = await this.dependencies.create(
+          created = await pacer.send(() => this.dependencies.create(
             session,
             payloads[item.itemIndex]!,
-          );
+          ));
         } catch (error) {
-          item.diagnostic = diagnostic(error, 'publish', session);
-          // Only definitive validation/auth/permission rejection establishes no creation.
-          if (
-            error instanceof TableauError &&
-            [400, 401, 403, 422].includes(error.status)
-          )
-            item.creationStatus = "not_created";
-          this.repository.saveItem(request.commandId, item);
-          if (error instanceof TableauError && error.kind === "auth") {
-            authenticationFailed = true;
-            break;
+          if (unsent(error)) {
+            stopped = true;
+            item.creationStatus = "not_attempted";
+            item.diagnostic = { message: PUBLICATION_STOPPED_METRIC };
+          } else {
+            item.diagnostic = diagnostic(error, 'publish', session);
+            // Only definitive validation/auth/permission rejection establishes no creation.
+            if (
+              error instanceof TableauError &&
+              [400, 401, 403, 422].includes(error.status)
+            )
+              item.creationStatus = "not_created";
+            authenticationFailed = error instanceof TableauError && error.kind === "auth";
           }
+          this.repository.saveItem(request.commandId, item);
+          tableauMutationProgress.completed();
           continue;
         }
         if (!created.definitionId) {
@@ -318,6 +378,7 @@ export class PulsePublishService {
               "Tableau returned no definition identifier. Inspect Tableau before retrying this item.",
           };
           this.repository.saveItem(request.commandId, item);
+          tableauMutationProgress.completed();
           continue;
         }
         item.definitionId = created.definitionId;
@@ -335,15 +396,21 @@ export class PulsePublishService {
           );
           item.resolutionStatus = item.metricId ? "resolved" : "pending";
         } catch (error) {
-          item.resolutionStatus = "failed";
-          item.diagnostic = diagnostic(error, 'visibility', session);
-          authenticationFailed =
-            error instanceof TableauError && error.kind === "auth";
+          if (unsent(error)) {
+            // The metric exists; the publication stopped before confirming it.
+            stopped = true;
+          } else {
+            item.resolutionStatus = "failed";
+            item.diagnostic = diagnostic(error, 'visibility', session);
+            authenticationFailed =
+              error instanceof TableauError && error.kind === "auth";
+          }
         }
         this.repository.saveItem(request.commandId, item);
-        if (authenticationFailed) break;
+        tableauMutationProgress.completed();
       }
       if (
+        !stopped &&
         !authenticationFailed &&
         follow.mode === 'group' &&
         items.some((item) => item.creationStatus === "created")
@@ -357,12 +424,13 @@ export class PulsePublishService {
         this.repository.saveFollow(request.commandId, follow);
         let group: Awaited<ReturnType<typeof ensureGroup>> | null = null;
         try {
-          group = await this.dependencies.ensureGroup(session, name);
+          group = await pacer.send(() => this.dependencies.ensureGroup(session, name));
         } catch (error) {
+          stopped = unsent(error);
           follow.group = {
-            status: "unknown",
+            status: stopped ? "not_attempted" : "unknown",
             name,
-            error: pulseOperationErrorMessage(error, 'group', [session.token]),
+            error: stopped ? PUBLICATION_STOPPED_STEP : pulseOperationErrorMessage(error, 'group', [session.token]),
           };
         }
         if (group)
@@ -385,29 +453,48 @@ export class PulsePublishService {
                 "Publishing user could not be resolved. Group membership was not requested.",
               );
             membershipRequested = true;
-            await this.dependencies.addMember(session, group.id, userId);
+            await pacer.send(() => this.dependencies.addMember(session, group.id, userId));
             follow.membership = { status: "created" };
           } catch (error) {
+            stopped = unsent(error);
             authenticationFailed =
               error instanceof TableauError && error.kind === "auth";
-            follow.membership = {
-              status: membershipRequested ? "unknown" : "failed",
-              error: pulseOperationErrorMessage(error, 'membership', [session.token]),
-            };
+            follow.membership = stopped
+              ? { status: "not_attempted", error: PUBLICATION_STOPPED_STEP }
+              : {
+                  status: membershipRequested ? "unknown" : "failed",
+                  error: pulseOperationErrorMessage(error, 'membership', [session.token]),
+                };
           }
           this.repository.saveFollow(request.commandId, follow);
-          if (!authenticationFailed)
-            authenticationFailed = await this.subscribeConfirmedMetrics(session, request.commandId, follow, items, { kind: 'GROUP', id: group.id }, assertOwner);
+          if (!authenticationFailed && !stopped) {
+            subscriptionsSettled = true;
+            ({ authenticationFailed, stopped } = await this.subscribeConfirmedMetrics(session, request.commandId, follow, items, { kind: 'GROUP', id: group.id }, assertOwner));
+          }
         }
       }
-      if (!authenticationFailed && follow.mode === 'self' && plan.selfRecipient && items.some((item) => item.creationStatus === 'created'))
-        await this.subscribeConfirmedMetrics(session, request.commandId, follow, items, { kind: 'USER', id: plan.selfRecipient.id }, assertOwner);
+      if (!stopped && !authenticationFailed && follow.mode === 'self' && plan.selfRecipient && items.some((item) => item.creationStatus === 'created')) {
+        subscriptionsSettled = true;
+        ({ stopped } = await this.subscribeConfirmedMetrics(session, request.commandId, follow, items, { kind: 'USER', id: plan.selfRecipient.id }, assertOwner));
+      }
+      if (stopped) {
+        for (const subscription of follow.subscriptions)
+          if (subscription.status === 'not_attempted' && !subscription.error) subscription.error = PUBLICATION_STOPPED_FOLLOW;
+        this.repository.saveFollow(request.commandId, follow);
+      }
+      if (!subscriptionsSettled) tableauMutationProgress.completed(follow.subscriptions.length);
       this.repository.finish(request.commandId);
     } finally {
       activePublishRuns.delete(request.commandId);
     }
     return this.repository.getReceipt(request.commandId);
   }
+
+  /**
+   * Follows every confirmed metric with one subscription batch. Each follow is
+   * recorded as unknown before the batch is sent, then settled from its result.
+   * The batch reports progress for the follows it sends; this reports the rest.
+   */
   private async subscribeConfirmedMetrics(
     session: TableauSession,
     commandId: string,
@@ -415,7 +502,8 @@ export class PulsePublishService {
     items: PulsePublishItemReceipt[],
     target: { kind: 'USER' | 'GROUP'; id: string },
     assertOwner: () => void,
-  ): Promise<boolean> {
+  ): Promise<{ authenticationFailed: boolean; stopped: boolean }> {
+    const pending: PulseFollowReceipt['subscriptions'] = [];
     for (const subscription of follow.subscriptions) {
       const item = items[subscription.itemIndex]!;
       if (item.creationStatus !== 'created' || !item.metricId) {
@@ -423,31 +511,59 @@ export class PulsePublishService {
         subscription.error = item.resolutionStatus === 'failed' && item.diagnostic?.message
           ? `Default metric confirmation failed: ${item.diagnostic.message}`
           : 'No confirmed default metric is available.';
-        this.repository.saveFollow(commandId, follow);
+        tableauMutationProgress.completed();
         continue;
       }
-      assertOwner();
       subscription.metricId = item.metricId;
-      subscription.status = 'unknown';
+      pending.push(subscription);
+    }
+    this.repository.saveFollow(commandId, follow);
+    if (!pending.length) return { authenticationFailed: false, stopped: false };
+    assertOwner();
+    for (const subscription of pending) subscription.status = 'unknown';
+    this.repository.saveFollow(commandId, follow);
+    const settle = (subscription: PulseFollowReceipt['subscriptions'][number], result: SubscriptionWriteResult | undefined) => {
+      subscription.status = result?.ok ? result.alreadyExists ? 'reused' : 'created' : result?.unknown ? 'unknown' : result ? 'failed' : 'unknown';
+      if (result?.error) subscription.error = sanitizeProviderMessage(result.error);
+    };
+    try {
+      const results = target.kind === 'USER'
+        ? await this.dependencies.subscribeUser(session, pending.map((subscription) => ({ metricId: subscription.metricId!, userId: target.id })))
+        : await this.dependencies.subscribe(session, pending.map((subscription) => ({ metricId: subscription.metricId!, groupId: target.id })));
+      const byMetric = new Map(results.map((result) => [result.metricId, result]));
+      for (const subscription of pending) settle(subscription, byMetric.get(subscription.metricId!));
       this.repository.saveFollow(commandId, follow);
-      let authenticationFailed = false;
-      try {
-        const [result] = target.kind === 'USER'
-          ? await this.dependencies.subscribeUser(session, [{ metricId: item.metricId, userId: target.id }])
-          : await this.dependencies.subscribe(session, [{ metricId: item.metricId, groupId: target.id }]);
-        subscription.status = result?.ok ? result.alreadyExists ? 'reused' : 'created' : result?.unknown ? 'unknown' : result ? 'failed' : 'unknown';
-        if (result?.error) subscription.error = sanitizeProviderMessage(result.error);
-      } catch (error) {
-        authenticationFailed = error instanceof TableauError && error.kind === 'auth';
-        const confirmation = error instanceof SubscriptionBatchInterrupted && error.phase === 'confirmation';
-        if (error instanceof TableauError && !confirmation && (authenticationFailed || [400, 403, 404, 422].includes(error.status)))
-          subscription.status = 'failed';
-        subscription.error = pulseOperationErrorMessage(error, 'follow', [session.token]);
+      return { authenticationFailed: false, stopped: false };
+    } catch (error) {
+      const interrupted = error instanceof SubscriptionBatchInterrupted ? error : undefined;
+      const completed = new Map((interrupted?.completed ?? []).map((result) => [result.metricId, result]));
+      // A batch that did not interrupt itself reports nothing, so its follows all failed together.
+      const failed = new Set(interrupted ? interrupted.failedTargets.map((entry) => entry.metricId) : pending.map((subscription) => subscription.metricId!));
+      const confirmation = interrupted?.phase === 'confirmation';
+      // A follow Tableau confirmed before a conflict check stopped was sent, even if the check was not.
+      const notSent = !confirmation && unsent(error);
+      const authenticationFailed = error instanceof TableauError && error.kind === 'auth';
+      const message = pulseOperationErrorMessage(error, 'follow', [session.token]);
+      for (const subscription of pending) {
+        const result = completed.get(subscription.metricId!);
+        if (result) settle(subscription, result);
+        else if (failed.has(subscription.metricId!)) {
+          subscription.status = notSent
+            ? 'not_attempted'
+            : error instanceof TableauError && !confirmation && (authenticationFailed || [400, 403, 404, 422].includes(error.status))
+              ? 'failed'
+              : 'unknown';
+          subscription.error = message;
+        } else {
+          // The batch stops at its first interruption, so Tableau never received these.
+          subscription.status = 'not_attempted';
+          if (notSent) subscription.error = PUBLICATION_STOPPED_FOLLOW;
+        }
       }
       this.repository.saveFollow(commandId, follow);
-      if (authenticationFailed) return true;
+      tableauMutationProgress.completed(pending.length - (interrupted ? interrupted.completed.length : 0));
+      return { authenticationFailed, stopped: notSent };
     }
-    return false;
   }
   private duplicate(id: string, hash: string): PulsePublishReceipt {
     if (this.repository.requestHash(id) !== hash)
@@ -458,10 +574,24 @@ export class PulsePublishService {
       );
     return this.repository.getReceipt(id);
   }
-  async deleteCreatedGroup(
+  /** Claims a receipt for one operation, or refuses while another is running. */
+  private claim(id: string): void {
+    if (activePublishRuns.has(id) || this.undoInFlight.has(id))
+      throw new PulseApplicationError(
+        "publication_busy",
+        "Wait for the current operation to finish.",
+        409,
+      );
+    this.undoInFlight.add(id);
+  }
+  /**
+   * Admits deleting the exact group a publication created. A group already
+   * deleted answers with its receipt; otherwise the deletion runs as a job.
+   */
+  deleteCreatedGroup(
     id: string,
     approvedGroupId: string,
-  ): Promise<PulsePublishReceipt> {
+  ): PulsePublicationCommand {
     const receipt = this.repository.getReceipt(id);
     const group = receipt.follow.group;
     if (
@@ -475,43 +605,53 @@ export class PulsePublishService {
         "Only the exact group created by this publication can be deleted.",
         409,
       );
-    const session = requirePulseOwner(receipt.context);
-    if (activePublishRuns.has(id) || this.undoInFlight.has(id))
-      throw new PulseApplicationError(
-        "publication_busy",
-        "Wait for the current operation to finish.",
-        409,
-      );
-    if (group.deletion?.status === "deleted") return receipt;
-    this.undoInFlight.add(id);
-    try {
-      // Persist uncertainty before sending the deletion. Reopening never replays it.
-      group.deletion = { status: "unknown" };
-      this.repository.saveFollow(id, receipt.follow);
-      try {
-        requirePulseOwner(receipt.context, session);
-        await this.dependencies.deleteGroup(session, group.id);
-        group.deletion = { status: "deleted" };
-      } catch (error) {
-        group.deletion =
-          error instanceof TableauError && error.status === 404
-            ? { status: "deleted" }
-            : {
-                status:
-                  error instanceof TableauError &&
-                  [400, 401, 403, 422].includes(error.status)
-                    ? "failed"
-                    : "unknown",
-                message: pulseOperationErrorMessage(error, 'group-delete', [session.token]),
-              };
-      }
-      this.repository.saveFollow(id, receipt.follow);
-      return this.repository.getReceipt(id);
-    } finally {
+    const context = receipt.context;
+    const groupId = group.id;
+    const session = requirePulseOwner(context);
+    this.claim(id);
+    if (group.deletion?.status === "deleted") {
       this.undoInFlight.delete(id);
+      return { receipt };
     }
+    return { session, run: async () => {
+      try {
+        tableauMutationProgress.total(1);
+        const previous = group.deletion;
+        // Persist uncertainty before sending the deletion. Reopening never replays it.
+        group.deletion = { status: "unknown" };
+        this.repository.saveFollow(id, receipt.follow);
+        try {
+          requirePulseOwner(context, session);
+          await this.dependencies.deleteGroup(session, groupId);
+          group.deletion = { status: "deleted" };
+        } catch (error) {
+          if (unsent(error)) {
+            // Tableau never received it, so the earlier outcome still stands.
+            if (previous) group.deletion = previous;
+            else delete group.deletion;
+          } else
+            group.deletion =
+              error instanceof TableauError && error.status === 404
+                ? { status: "deleted" }
+                : {
+                    status:
+                      error instanceof TableauError &&
+                      [400, 401, 403, 422].includes(error.status)
+                        ? "failed"
+                        : "unknown",
+                    message: pulseOperationErrorMessage(error, 'group-delete', [session.token]),
+                  };
+        }
+        this.repository.saveFollow(id, receipt.follow);
+        tableauMutationProgress.completed();
+        return this.repository.getReceipt(id);
+      } finally {
+        this.undoInFlight.delete(id);
+      }
+    } };
   }
-  async undo(id: string): Promise<PulsePublishReceipt> {
+  /** Admits undoing a publication; its definition deletes run as a job. */
+  undo(id: string): PulsePublicationCommand {
     const receipt = this.repository.getReceipt(id);
     if (!receipt.context)
       throw new PulseApplicationError(
@@ -519,45 +659,53 @@ export class PulsePublishService {
         "This historical receipt has no verified owner and cannot authorize undo.",
         409,
       );
-    const session = requirePulseOwner(receipt.context);
-    if (activePublishRuns.has(id) || this.undoInFlight.has(id))
-      throw new PulseApplicationError(
-        "publication_busy",
-        "Wait for the current operation to finish.",
-        409,
-      );
-    this.undoInFlight.add(id);
-    try {
-      for (const item of receipt.items.filter(
-        (item) =>
-          item.creationStatus === "created" &&
-          item.definitionId &&
-          item.undoStatus !== "deleted",
-      )) {
-        requirePulseOwner(receipt.context, session);
-        item.undoStatus = "unknown";
-        this.repository.saveItem(id, item);
-        try {
-          await this.dependencies.deleteDefinition(session, item.definitionId!);
-          item.undoStatus = "deleted";
-          item.undoDiagnostic = null;
-        } catch (error) {
-          item.undoStatus =
-            error instanceof TableauError && error.status === 404
-              ? "deleted"
-              : error instanceof TableauError &&
-                  [400, 401, 403, 422].includes(error.status)
-                ? "failed"
-                : "unknown";
-          item.undoDiagnostic =
-            item.undoStatus === "deleted" ? null : diagnostic(error, 'delete', session);
+    const context = receipt.context;
+    const session = requirePulseOwner(context);
+    this.claim(id);
+    return { session, run: async () => {
+      try {
+        const eligible = receipt.items.filter(
+          (item) =>
+            item.creationStatus === "created" &&
+            item.definitionId &&
+            item.undoStatus !== "deleted",
+        );
+        tableauMutationProgress.total(eligible.length);
+        const pacer = new TableauMutationPacer();
+        for (const item of eligible) {
+          requirePulseOwner(context, session);
+          const previous = { undoStatus: item.undoStatus, undoDiagnostic: item.undoDiagnostic };
+          item.undoStatus = "unknown";
+          this.repository.saveItem(id, item);
+          try {
+            await pacer.send(() => this.dependencies.deleteDefinition(session, item.definitionId!));
+            item.undoStatus = "deleted";
+            item.undoDiagnostic = null;
+          } catch (error) {
+            if (unsent(error)) {
+              // Tableau never received it, and nothing after it is sent.
+              Object.assign(item, previous);
+              this.repository.saveItem(id, item);
+              break;
+            }
+            item.undoStatus =
+              error instanceof TableauError && error.status === 404
+                ? "deleted"
+                : error instanceof TableauError &&
+                    [400, 401, 403, 422].includes(error.status)
+                  ? "failed"
+                  : "unknown";
+            item.undoDiagnostic =
+              item.undoStatus === "deleted" ? null : diagnostic(error, 'delete', session);
+          }
+          this.repository.saveItem(id, item);
+          invalidatePulseDefinitionInventory(session);
+          tableauMutationProgress.completed();
         }
-        this.repository.saveItem(id, item);
-        invalidatePulseDefinitionInventory(session);
+        return this.repository.getReceipt(id);
+      } finally {
+        this.undoInFlight.delete(id);
       }
-      return this.repository.getReceipt(id);
-    } finally {
-      this.undoInFlight.delete(id);
-    }
+    } };
   }
 }

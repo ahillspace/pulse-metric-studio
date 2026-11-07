@@ -9,6 +9,7 @@ import { useConnection } from "../connections/controller";
 import { useActivity } from "../activity/controller";
 import { PublicationResult } from "../author/PublicationResult";
 import { BusyLabel, Modal } from "./ui";
+import { JobProgress } from "../jobs/JobProgress";
 
 export function PublishSection({
   onActivity,
@@ -78,6 +79,7 @@ export function PublishSection({
           <PublicationResult
             key={receipt.id}
             receipt={receipt}
+            notice={entry.publishNotice}
             onClose={() => useAuthor.getState().closeReceipt()}
             onActivity={() => { useAuthor.getState().closeReceipt(); onActivity(); }}
           />
@@ -201,10 +203,16 @@ export function PublishSection({
               {entry.publishError}
             </p>
           )}
-          {entry.publishBusy && (
+          {entry.publishBusy && !entry.publishJob?.throttled && (
             <p role="status">
               Publishing metrics. Results will appear in Activity.
             </p>
+          )}
+          {entry.publishBusy && (
+            <JobProgress
+              job={entry.publishJob}
+              onCancel={() => void useAuthor.getState().cancelPublish()}
+            />
           )}
         </Modal>
       )}

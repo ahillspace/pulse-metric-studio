@@ -6,6 +6,7 @@ import {
   type PulseAuthorProposal,
   type PulseDraftRecord,
   type PulsePublishPlan,
+  type PulseMutationJobStatus,
 } from "@pulse-metric-studio/shared";
 import {
   createAuthorController,
@@ -97,6 +98,7 @@ function fixture(
       issues: [],
     }),
     publish: async () => receipt(),
+    cancelJob: async (): Promise<never> => { throw new Error("No publication is running."); },
     ...overrides,
   };
   const store = createAuthorController(
@@ -978,4 +980,98 @@ test("same-owner permission metadata refresh does not discard an already request
   await opening; await loaded;
   assert.equal(reads, 1);
   assert.equal(activeEditor(store.getState())?.catalog?.datasourceLuid, "a");
+});
+
+function publishJobStatus(overrides: Partial<PulseMutationJobStatus> = {}): PulseMutationJobStatus {
+  return { id: "publish-job", kind: "publish", state: "running", total: 4, completed: 1, throttled: true, retryAt: 60_000, serverTime: 0, stopReason: null, ...overrides };
+}
+
+test("a throttled publication shows its progress and Cancel stops it with a stopped notice", async (t) => {
+  const pending = deferred<ReturnType<typeof receipt>>();
+  const reported = deferred<void>();
+  const cancels: string[] = [];
+  const { store } = fixture({
+    publish: async (_id: string, _input: unknown, observe?: (status: PulseMutationJobStatus) => void) => {
+      observe?.(publishJobStatus());
+      reported.resolve();
+      return pending.promise;
+    },
+    cancelJob: async (id: string) => { cancels.push(id); return publishJobStatus({ state: "stopping", stopReason: "cancelled" }); },
+  });
+  t.after(() => store.getState().dispose());
+  await store.getState().openDraft("a");
+  await store.getState().reviewPublication();
+  const publishing = store.getState().publishReviewed();
+  await reported.promise;
+  assert.deepEqual(
+    (({ kind, total, completed, throttled }) => ({ kind, total, completed, throttled }))(store.getState().entries.a.publishJob!),
+    { kind: "publish", total: 4, completed: 1, throttled: true },
+  );
+  await store.getState().cancelPublish();
+  assert.deepEqual(cancels, ["publish-job"]);
+  assert.equal(store.getState().entries.a.publishJob?.stopping, true);
+  const stopped = receipt();
+  stopped.items.push({ ...stopped.items[0], itemIndex: 1, name: "Profit", creationStatus: "not_attempted", definitionId: null, metricId: null, resolutionStatus: "pending",
+    diagnostic: { message: "Not sent: the publication stopped before this metric." } } as any);
+  stopped.unattemptedCount = 1;
+  pending.resolve(stopped);
+  await publishing;
+  const entry = store.getState().entries.a;
+  assert.equal(entry.publishJob, null, "progress goes away once the publication answers");
+  assert.equal(entry.receipt?.id, "receipt");
+  assert.equal(entry.publishNotice, "The publication was cancelled. Created metrics stay published; the rest were not sent.");
+  assert.equal(entry.publishError, null);
+  store.getState().closeReceipt();
+  assert.equal(store.getState().entries.a.publishNotice, null);
+});
+
+test("a publication that reached its time limit says so, and one that finished before Cancel took effect does not", async (t) => {
+  for (const [stopReason, unsent, expected] of [
+    ["time_limit", true, "The publication stopped after 2 hours. Created metrics stay published; the rest were not sent."],
+    ["cancelled", false, null],
+  ] as const) {
+    const { store } = fixture({
+      publish: async (_id: string, _input: unknown, observe?: (status: PulseMutationJobStatus) => void) => {
+        observe?.(publishJobStatus({ state: "stopping", stopReason }));
+        const result = receipt();
+        if (unsent) result.unattemptedCount = 1;
+        return result;
+      },
+    });
+    t.after(() => store.getState().dispose());
+    await store.getState().openDraft("a");
+    await store.getState().reviewPublication();
+    await store.getState().publishReviewed();
+    assert.equal(store.getState().entries.a.publishNotice, expected, stopReason);
+  }
+});
+
+test("a publication cancel the server does not confirm is reported and can be pressed again", async (t) => {
+  const pending = deferred<ReturnType<typeof receipt>>();
+  const reported = deferred<void>();
+  let reject = true;
+  const { store } = fixture({
+    publish: async (_id: string, _input: unknown, observe?: (status: PulseMutationJobStatus) => void) => {
+      observe?.(publishJobStatus());
+      reported.resolve();
+      return pending.promise;
+    },
+    cancelJob: async () => {
+      if (reject) throw new Error("The desktop service is unavailable.");
+      return publishJobStatus({ state: "stopping", stopReason: "cancelled" });
+    },
+  });
+  t.after(() => store.getState().dispose());
+  await store.getState().openDraft("a");
+  await store.getState().reviewPublication();
+  const publishing = store.getState().publishReviewed();
+  await reported.promise;
+  await store.getState().cancelPublish();
+  assert.match(store.getState().entries.a.publishJob?.cancelError ?? "", /not confirmed.*desktop service is unavailable/);
+  assert.equal(store.getState().entries.a.publishJob?.stopping, false);
+  reject = false;
+  await store.getState().cancelPublish();
+  assert.equal(store.getState().entries.a.publishJob?.stopping, true);
+  pending.resolve(receipt());
+  await publishing;
 });

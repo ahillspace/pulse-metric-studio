@@ -3,7 +3,7 @@ import { afterEach, test } from 'node:test';
 import { runWithTableauTelemetry, type TableauSession } from '@pulse-metric-studio/core';
 import { getExistingMetrics, clearInventoryCache } from '../application/inventory.js';
 import { PulseDimensionalForkService } from './dimensional-fork-service.js';
-import { getOrCreatePulseMetric, listSubscriptionsForMetric } from './pulse-client.js';
+import { batchGetFollowerCounts, getOrCreatePulseMetric, listSubscriptionsForMetric } from './pulse-client.js';
 
 const metricId = '10000000-0000-4000-8000-000000000001';
 const secondMetricId = '10000000-0000-4000-8000-000000000002';
@@ -101,4 +101,25 @@ test('dimension diagnostics identify warm context reuse without logging fields o
   assert.deepEqual(calls, { metric: 1, definition: 1, catalog: 1, values: 1, count: 1 });
   assert.deepEqual(records.map((record) => record.cacheHit), [false, true, true]);
   assert.doesNotMatch(JSON.stringify(records), /private-/);
+});
+
+test('follower-count diagnostics report batch shape and provider codes without metric IDs, URLs, or bodies', async () => {
+  globalThis.fetch = async (input) => {
+    const metricIds = new URL(String(input)).searchParams.get('metric_ids')!.split(',');
+    if (metricIds.includes(secondMetricId)) return Response.json({ error: { code: 'invalid_metric_id', message: 'private-body-text' } }, { status: 400 });
+    return Response.json({ follower_counts: metricIds.map((metric_id) => ({ metric_id, follower_count: 1 })) });
+  };
+  const { records, result } = capture(() => batchGetFollowerCounts(session, [metricId, secondMetricId]));
+  const counts = await result;
+  assert.equal(counts.countsByMetricId[metricId], 1);
+  assert.equal(counts.errorsByMetricId[secondMetricId]?.status, 400);
+  const events = records.filter((record) => record.event === 'tableau.follower_counts');
+  assert.deepEqual(events.map(({ batchSize, status, providerCode, splitDepth }) => ({ batchSize, status, providerCode, splitDepth })), [
+    { batchSize: 2, status: 400, providerCode: 'invalid_metric_id', splitDepth: 0 },
+    { batchSize: 1, status: 200, providerCode: undefined, splitDepth: 1 },
+    { batchSize: 1, status: 400, providerCode: 'invalid_metric_id', splitDepth: 1 },
+  ]);
+  for (const event of events) assert.deepEqual(Object.keys(event).filter((key) => !['event', 'reqId', 'batchSize', 'status', 'providerCode', 'splitDepth'].includes(key)), []);
+  const serialized = JSON.stringify(events);
+  for (const forbidden of [metricId, secondMetricId, 'private-', 'metric_ids', 'example.test', '?']) assert.ok(!serialized.includes(forbidden), forbidden);
 });

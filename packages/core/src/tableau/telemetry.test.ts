@@ -262,3 +262,16 @@ test('a queued deadline during a shared hold records the known throttle cause', 
   await Promise.all(waiters);
   assert.equal(calls, 9);
 });
+
+test('follower-count events keep only bounded numeric shape and a safe provider code', () => {
+  const records: Record[] = [];
+  collect('follower-counts', records, () => {
+    logTableauEvent({ event: 'tableau.follower_counts', batchSize: 100, status: 400, providerCode: 'invalid_metric_id', splitDepth: 0 });
+    logTableauEvent({ event: 'tableau.follower_counts', batchSize: 3, status: null, providerCode: 'SECRET TOKEN <b>', splitDepth: 2, metricIds: ['SECRET-ID'], path: '/api/-/pulse/subscriptions:batchGetMetricFollowerCounts?metric_ids=SECRET-ID' } as Parameters<typeof logTableauEvent>[0]);
+  });
+  assert.deepEqual(records.map(({ batchSize, status, providerCode, splitDepth }) => ({ batchSize, status, providerCode, splitDepth })), [
+    { batchSize: 100, status: 400, providerCode: 'invalid_metric_id', splitDepth: 0 },
+    { batchSize: 3, status: null, providerCode: undefined, splitDepth: 2 },
+  ]);
+  assert.doesNotMatch(JSON.stringify(records), /SECRET|metricIds|metric_ids/);
+});

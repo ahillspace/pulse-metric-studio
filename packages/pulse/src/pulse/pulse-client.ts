@@ -566,7 +566,24 @@ export async function deleteSubscription(session: TableauSession, subscriptionId
   await deleteReq(session, `${PULSE}/subscriptions/${encodeURIComponent(subscriptionId)}`);
 }
 
-export const FOLLOWER_COUNT_BATCH_LIMIT = 200;
+/**
+ * Local bound on metric IDs per follower-count GET; it is not a documented Tableau limit.
+ * The IDs travel in the query string, and 100 UUIDs with separators keep the request
+ * line near 4 KB, comfortably inside the 8 KB request-line ceilings common to proxies.
+ */
+export const FOLLOWER_COUNT_BATCH_LIMIT = 100;
+
+/**
+ * Extra sends allowed per original batch while halving a rejected batch.
+ * Isolating one rejected ID in a full batch costs two sends per halving level,
+ * 2 * ceil(log2(100)) = 14, so one stale ID never costs its neighbours their counts.
+ * The budget is fixed so several rejected IDs cannot multiply requests; metrics
+ * still unresolved when it runs out keep the rejection as their diagnostic.
+ */
+export const FOLLOWER_COUNT_SPLIT_SENDS_PER_BATCH = 14;
+
+/** Statuses where the batch itself, not the service, was refused, so smaller batches can succeed. */
+const SPLITTABLE_FOLLOWER_COUNT_STATUSES = new Set([400, 414]);
 
 export interface FollowerCountBatchResult {
   countsByMetricId: Record<string, number>;
@@ -601,27 +618,61 @@ export async function batchGetFollowerCounts(
 ): Promise<FollowerCountBatchResult> {
   const uniqueMetricIds = [...new Set(metricIds.map((metricId) => String(metricId).trim()).filter(Boolean))];
   const result: FollowerCountBatchResult = { countsByMetricId: {}, errorsByMetricId: {} };
-  for (let index = 0; index < uniqueMetricIds.length; index += FOLLOWER_COUNT_BATCH_LIMIT) {
-    const batch = uniqueMetricIds.slice(index, index + FOLLOWER_COUNT_BATCH_LIMIT);
-    try {
-      const query = new URLSearchParams({ metric_ids: batch.join(',') });
-      const data = await getJson<unknown>(session,
-        `${PULSE}/subscriptions:batchGetMetricFollowerCounts?${query}`,
-        'application/vnd.tableau.pulse.subscriptionservice.v1.BatchGetMetricFollowerCountsResponse+json');
-      const counts = normalizeFollowerCountEnvelope(data);
+  const settle = (batch: string[], outcome: unknown) => {
+    if (!(outcome instanceof Error)) {
+      const counts = outcome as Record<string, number>;
       for (const metricId of batch) {
         if (Object.hasOwn(counts, metricId)) result.countsByMetricId[metricId] = counts[metricId]!;
         else result.errorsByMetricId[metricId] = {
           message: 'Tableau omitted this metric from the follower-count response.',
         };
       }
-    } catch (error) {
-      if (error instanceof TableauError && error.kind === 'auth') throw error;
-      const diagnostic = boundedProviderDiagnostic(error);
-      for (const metricId of batch) result.errorsByMetricId[metricId] = diagnostic;
+      return;
+    }
+    const diagnostic = boundedProviderDiagnostic(outcome);
+    for (const metricId of batch) result.errorsByMetricId[metricId] = diagnostic;
+  };
+  for (let index = 0; index < uniqueMetricIds.length; index += FOLLOWER_COUNT_BATCH_LIMIT) {
+    const batch = uniqueMetricIds.slice(index, index + FOLLOWER_COUNT_BATCH_LIMIT);
+    // Breadth-first halving spends the fixed budget evenly across rejected groups.
+    const queue: Array<{ batch: string[]; depth: number }> = [{ batch, depth: 0 }];
+    let splitSends = 0;
+    while (queue.length) {
+      const next = queue.shift()!;
+      const outcome = await sendFollowerCountBatch(session, next.batch, next.depth);
+      const splittable = outcome instanceof TableauError && SPLITTABLE_FOLLOWER_COUNT_STATUSES.has(outcome.status) && next.batch.length > 1;
+      if (!splittable || splitSends >= FOLLOWER_COUNT_SPLIT_SENDS_PER_BATCH) { settle(next.batch, outcome); continue; }
+      const middle = Math.ceil(next.batch.length / 2);
+      for (const half of [next.batch.slice(0, middle), next.batch.slice(middle)]) {
+        if (splitSends < FOLLOWER_COUNT_SPLIT_SENDS_PER_BATCH) { splitSends++; queue.push({ batch: half, depth: next.depth + 1 }); }
+        else settle(half, outcome);
+      }
     }
   }
   return result;
+}
+
+/** One provider send. Returns counts, or the recoverable error; authentication failures always throw. */
+async function sendFollowerCountBatch(session: TableauSession, batch: string[], splitDepth: number): Promise<Record<string, number> | Error> {
+  let data: unknown;
+  try {
+    const query = new URLSearchParams({ metric_ids: batch.join(',') });
+    data = await getJson<unknown>(session,
+      `${PULSE}/subscriptions:batchGetMetricFollowerCounts?${query}`,
+      'application/vnd.tableau.pulse.subscriptionservice.v1.BatchGetMetricFollowerCountsResponse+json');
+  } catch (error) {
+    const providerError = error instanceof TableauError ? error : undefined;
+    logTableauEvent({
+      event: 'tableau.follower_counts', batchSize: batch.length, splitDepth,
+      status: providerError && providerError.status >= 100 ? providerError.status : null,
+      ...(providerError?.providerCode ? { providerCode: providerError.providerCode } : {}),
+    });
+    if (providerError?.kind === 'auth') throw error;
+    return error instanceof Error ? error : new Error(String(error));
+  }
+  logTableauEvent({ event: 'tableau.follower_counts', batchSize: batch.length, status: 200, splitDepth });
+  try { return normalizeFollowerCountEnvelope(data); }
+  catch (error) { return error instanceof Error ? error : new Error(String(error)); }
 }
 
 export async function getTableauUserName(session: TableauSession, userId: string): Promise<string | null> {

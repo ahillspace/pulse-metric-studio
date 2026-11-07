@@ -1,5 +1,7 @@
 import type { PulsePublishReceipt } from "@pulse-metric-studio/shared";
 import { BusyLabel, Modal } from "../components/ui";
+import { JobProgress } from "../jobs/JobProgress";
+import type { MutationJobProgress } from "../jobs/tracker";
 
 /** Metrics an undo would remove: created by this publication and not yet deleted. */
 export function undoTargets(receipt: PulsePublishReceipt) {
@@ -14,12 +16,17 @@ export function ConfirmUndo({
   disabled,
   onCancel,
   onConfirm,
+  job = null,
+  onCancelJob = () => {},
 }: {
   receipt: PulsePublishReceipt;
   busy: boolean;
   disabled: boolean;
   onCancel(): void;
   onConfirm(): void;
+  /** The running undo, shown once Tableau limits it. */
+  job?: MutationJobProgress | null;
+  onCancelJob?(): void;
 }) {
   const targets = undoTargets(receipt);
   return (
@@ -53,6 +60,7 @@ export function ConfirmUndo({
         </ul>
       )}
       <p>This cannot be undone.</p>
+      {busy && <JobProgress job={job} onCancel={onCancelJob} />}
     </Modal>
   );
 }

@@ -1,7 +1,22 @@
 import { getSessionContext, TableauError, type TableauSession } from '@pulse-metric-studio/core';
+import { PULSE_FOLLOW_DETAIL_BATCH_LIMIT } from '@pulse-metric-studio/shared';
 import type { SubscriptionRecord } from '../pulse/pulse-client.js';
 import type { SubscriptionDependencies } from './registry-dependencies.js';
 import { getInventoryView } from './inventory-snapshots.js';
+import { mapWithConcurrency } from './registry-collections.js';
+
+/**
+ * Subscription calls one follow-detail request may send: one discovery page plus two pages for each metric
+ * in a full client batch. It is derived from the shared batch bound so the client and server always agree and
+ * a full batch completes in one request. It is a local work bound, not a Tableau limit; larger demands stop
+ * with an explicit Load more instead of growing the request.
+ */
+export const SUBSCRIPTION_CALLS_PER_REQUEST = 1 + 2 * PULSE_FOLLOW_DETAIL_BATCH_LIMIT;
+/**
+ * Targeted subscription reads in flight for one request. Small and fixed so one batch cannot crowd out other
+ * Tableau work; the client runs only a few detail requests at once and the shared request gate caps the total.
+ */
+export const SUBSCRIPTION_READ_CONCURRENCY = 5;
 
 interface TargetCoverage { records: SubscriptionRecord[]; complete: boolean; token?: string; seen: Set<string>; pages: number; scanned: number; version: number; demanded: boolean; terminal?: boolean; pending?: Promise<void>; error?: unknown }
 interface ViewCoverage {
@@ -10,22 +25,36 @@ interface ViewCoverage {
 }
 interface CoverageStore { owner: ReturnType<typeof getSessionContext>; coordinates: string; views: Map<string, ViewCoverage> }
 const stores = new WeakMap<TableauSession, Map<object, CoverageStore>>();
+/** Per-metric invalidation epochs, so a count read before a mutation cannot settle coverage after it. */
+const epochs = new WeakMap<TableauSession, Map<string, number>>();
 function fresh(): TargetCoverage { return { records: [], complete: false, seen: new Set(), pages: 0, scanned: 0, version: 0, demanded: false }; }
 function stopAtLimit(target: TargetCoverage): void {
   target.terminal = true;
-  target.error = new Error('Subscription coverage reached the local safety limit. Refresh metrics to start a new view.');
+  target.error = new Error('Follower list stopped at the local safety limit. Showing the followers found so far.');
 }
 export function invalidateSubscriptionCoverage(session: TableauSession, metricIds: string[]): void {
+  const counter = epochs.get(session) ?? new Map<string, number>(); epochs.set(session, counter);
+  for (const id of metricIds) counter.set(id, (counter.get(id) ?? 0) + 1);
   for (const store of stores.get(session)?.values() ?? []) for (const view of store.views.values()) for (const id of metricIds) {
     view.invalidated.add(id); const target = view.targeted.get(id); if (target) target.version++;
     view.targeted.delete(id);
   }
 }
-export async function subscriptionCoverage(session: TableauSession, metricIds: string[], options: { snapshotId?: string; continueCoverage?: boolean; personalOnly?: boolean; refresh?: boolean }, dependencies: SubscriptionDependencies): Promise<{ entries: Array<{ metricId: string; subscriptions: SubscriptionRecord[] | null; complete: boolean; canLoadMore: boolean; diagnostic?: { message: string } }>; coverage: { status: 'available' | 'partial' | 'unavailable'; canLoadMore: boolean } }> {
+const MORE_FOLLOWERS = 'More followers to load. Select Load more followers to continue.';
+const CHANGED_WHILE_LOADING = 'Followers changed while loading. Select Load more followers to read them again.';
+const identityCount = (records: SubscriptionRecord[]) => new Set(records.map(record => `${record.follower.type}\u0000${record.follower.id}`)).size;
+
+/**
+ * Relationship coverage for the requested metrics. `readFollowerCounts` supplies counts read inside this request:
+ * a count of zero, or a count equal to the followers already found, settles a metric without further reads.
+ * Metrics without a usable count fall back to targeted subscription reads.
+ */
+export async function subscriptionCoverage(session: TableauSession, metricIds: string[], options: { snapshotId?: string; continueCoverage?: boolean; personalOnly?: boolean; refresh?: boolean; readFollowerCounts?: () => Promise<Record<string, number>> }, dependencies: SubscriptionDependencies): Promise<{ entries: Array<{ metricId: string; subscriptions: SubscriptionRecord[] | null; complete: boolean; canLoadMore: boolean; diagnostic?: { message: string } }>; coverage: { status: 'available' | 'partial' | 'unavailable'; canLoadMore: boolean } }> {
   // An explicit refresh treats these metrics as changed: retained evidence is dropped, older reads are fenced,
   // and unrelated metrics keep their coverage.
   if (options.refresh) invalidateSubscriptionCoverage(session, metricIds);
   const owner = getSessionContext(session), coordinates = JSON.stringify([session.serverUrl, session.siteId, session.userId]);
+  const current = () => owner === getSessionContext(session) && coordinates === JSON.stringify([session.serverUrl, session.siteId, session.userId]);
   const sessionStores = stores.get(session) ?? new Map<object, CoverageStore>(); stores.set(session, sessionStores);
   let store = sessionStores.get(dependencies);
   if (!store || store.owner !== owner || store.coordinates !== coordinates) { store = { owner, coordinates, views: new Map() }; sessionStores.set(dependencies, store); }
@@ -39,10 +68,16 @@ export async function subscriptionCoverage(session: TableauSession, metricIds: s
     view.site.records = view.site.records.filter(record => record.metricId && view!.metricIds.has(record.metricId));
     for (const id of view.targeted.keys()) if (!view.metricIds.has(id)) view.targeted.delete(id);
   } else for (const id of metricIds) view.metricIds.add(id);
+  // Counts are read only after ownership is validated. They come from this request, so they are newer than
+  // retained pages unless a mutation touched the metric while they were in flight.
+  const epochOf = (id: string) => epochs.get(session)?.get(id) ?? 0;
+  const countEpochs = new Map(metricIds.map(id => [id, epochOf(id)]));
+  const counts = options.readFollowerCounts ? await options.readFollowerCounts() : {};
+  if (!current()) throw new Error('The Tableau session changed while followers were loading.');
+  const freshCount = (id: string) => countEpochs.get(id) === epochOf(id) && typeof counts[id] === 'number' ? counts[id] : undefined;
   const captured = view;
-  const current = () => owner === getSessionContext(session) && coordinates === JSON.stringify([session.serverUrl, session.siteId, session.userId]);
-  let calls = 0;
-  const canSend = () => { if (!current()) throw new Error('The Tableau session changed while subscription coverage was loading.'); if (calls >= 20) return false; calls++; return true; };
+  let calls = 0, halted = false;
+  const canSend = () => { if (!current()) throw new Error('The Tableau session changed while followers were loading.'); if (halted || calls >= SUBSCRIPTION_CALLS_PER_REQUEST) return false; calls++; return true; };
   async function page(target: TargetCoverage, metricId?: string): Promise<void> {
     if (target.pending) return target.pending;
     if (target.complete || target.terminal || target.pages >= 20 || target.scanned >= 2000 || !canSend()) return;
@@ -68,7 +103,7 @@ export async function subscriptionCoverage(session: TableauSession, metricIds: s
         target.records.push(...records);
         if (overflow) { target.token = undefined; stopAtLimit(target); return; }
         if (!result.nextPageToken) { target.complete = true; target.token = undefined; return; }
-        if (target.seen.has(result.nextPageToken) || !result.subscriptions.length) { target.error = new Error('Subscription continuation is invalid.'); target.token = undefined; target.terminal = true; return; }
+        if (target.seen.has(result.nextPageToken) || !result.subscriptions.length) { target.error = new Error('Tableau returned an invalid follower page token, so the list stopped.'); target.token = undefined; target.terminal = true; return; }
         target.seen.add(result.nextPageToken); target.token = result.nextPageToken;
         if (target.scanned >= 2000 || target.pages >= 20) stopAtLimit(target);
       } catch (error) {
@@ -78,32 +113,98 @@ export async function subscriptionCoverage(session: TableauSession, metricIds: s
     })().finally(() => { target.pending = undefined; });
     return target.pending;
   }
-  if (!view.discovered) {
+  const positives = (metricId: string) => view!.invalidated.has(metricId) ? [] : view!.site.records.filter(record => record.metricId === metricId);
+  const settled = new Set<string>();
+  // The target each metric uses in this request; a concurrent mutation may drop it from the view meanwhile.
+  const chosen = new Map<string, TargetCoverage>();
+  // The invalidation epoch each metric's evidence was chosen under; a later mutation makes that evidence stale.
+  const chosenAt = new Map<string, number>();
+  const choose = (metricId: string, target: TargetCoverage) => { chosen.set(metricId, target); chosenAt.set(metricId, epochOf(metricId)); };
+  const settle = (metricId: string, records: SubscriptionRecord[]) => {
+    const previous = view!.targeted.get(metricId);
+    if (previous) previous.version++; // reads still in flight cannot overwrite the newer evidence
+    const target = { ...fresh(), records, complete: true, demanded: true };
+    view!.targeted.set(metricId, target); choose(metricId, target);
+    settled.add(metricId);
+  };
+  const settleByCount = (metricId: string, target: TargetCoverage) => {
+    const count = freshCount(metricId);
+    if (count === undefined || target.complete) return false;
+    const found = [...positives(metricId), ...target.records];
+    if (identityCount(found) !== count) return false;
+    settle(metricId, found);
+    return true;
+  };
+  // A fresh count is newer than discovery. Discovery that names more followers than the count, or complete site
+  // discovery that disagrees with it, is stale for that metric: its identities are retired for the view, so they
+  // never confirm absence or join a later count match. Personal discovery lists only the user's own follows, so
+  // finding fewer than the count says nothing about it.
+  const retireContradictedDiscovery = (metricId: string) => {
+    const count = freshCount(metricId);
+    if (count === undefined || view!.invalidated.has(metricId)) return;
+    const found = identityCount(positives(metricId));
+    if (found > count || (view!.scope === 'site' && view!.site.complete && found !== count)) view!.invalidated.add(metricId);
+  };
+  // Complete targeted coverage that disagrees with a fresh count is stale and is read again; a zero settles at
+  // once. Coverage acquired in this request is never second-guessed.
+  for (const metricId of metricIds) {
+    retireContradictedDiscovery(metricId);
+    const count = freshCount(metricId);
+    if (count === 0) { settle(metricId, []); continue; }
+    const retained = view.targeted.get(metricId);
+    if (count !== undefined && retained?.complete && identityCount(retained.records) !== count) {
+      retained.version++;
+      view.targeted.delete(metricId);
+    }
+  }
+  if (!view.discovered && metricIds.some(id => !settled.has(id))) {
     if (!view.discovery) view.discovery = page(view.site).finally(() => { view!.discovered = true; view!.discovery = undefined; });
     await view.discovery;
   }
-  if (options.continueCoverage && dependencies.listSubscriptionPage) while (view.site.token && !view.site.complete && calls < 20 && view.site.pages < 20) {
+  if (options.continueCoverage && dependencies.listSubscriptionPage) while (view.site.token && !view.site.complete && calls < SUBSCRIPTION_CALLS_PER_REQUEST && view.site.pages < 20) {
     const previous = view.site.pages; await page(view.site); if (view.site.error || previous === view.site.pages) break;
   }
+  // Discovery read in this request is checked against the count as well, including for metrics a zero already
+  // settled: their answer stands, but discovery the zero disproves must not survive into a later request.
+  for (const metricId of metricIds) retireContradictedDiscovery(metricId);
   const qualified = (view.scope === 'site' && dependencies.siteNegativeCoverageQualified === true) || (view.scope === 'user' && options.personalOnly === true);
-  const entries = [];
+  const siteCovered = (metricId: string) => !settled.has(metricId) && qualified && view!.site.complete && view!.siteEligible.has(metricId) && !view!.invalidated.has(metricId);
+  let round: Array<{ metricId: string; target: TargetCoverage }> = [];
   for (const metricId of metricIds) {
-    if (qualified && view.site.complete && view.siteEligible.has(metricId) && !view.invalidated.has(metricId)) {
-      entries.push({ metricId, subscriptions: view.site.records.filter(record => record.metricId === metricId), complete: true, canLoadMore: false }); continue;
-    }
+    if (settled.has(metricId) || siteCovered(metricId)) continue;
     let target = view.targeted.get(metricId);
     if (!target) { target = fresh(); view.targeted.set(metricId, target); }
+    choose(metricId, target);
+    if (settleByCount(metricId, target)) continue;
     if (!target.complete && ((!target.demanded && !target.error) || target.pending || options.continueCoverage)) {
-      target.demanded = true;
-      do { const previous = target.pages; await page(target, metricId); if (target.error || previous === target.pages) break; } while (target.token && !target.complete && calls < 20);
+      target.demanded = true; round.push({ metricId, target });
     }
-    const positive = view.invalidated.has(metricId) ? [] : view.site.records.filter(record => record.metricId === metricId);
-    const records = target.complete ? target.records : [...positive, ...target.records].slice(0, 2000);
+  }
+  // Breadth first: every demanded metric gets its next page before any metric gets another, so a budget stop is fair.
+  while (round.length && !halted && calls < SUBSCRIPTION_CALLS_PER_REQUEST) {
+    const progressed = await mapWithConcurrency(round, SUBSCRIPTION_READ_CONCURRENCY, async ({ metricId, target }) => {
+      const previous = target.pages;
+      try { await page(target, metricId); } catch (error) { halted = true; throw error; }
+      return previous !== target.pages && !target.error && !target.complete && Boolean(target.token);
+    });
+    round = round.filter(({ metricId, target }, index) => progressed[index] && view!.targeted.get(metricId) === target && !settleByCount(metricId, target));
+  }
+  const entries = [];
+  for (const metricId of metricIds) {
+    if (siteCovered(metricId)) {
+      entries.push({ metricId, subscriptions: view.site.records.filter(record => record.metricId === metricId), complete: true, canLoadMore: false }); continue;
+    }
+    // A mutation touched this metric after its evidence was chosen, so that evidence cannot be reported.
+    const target = chosen.get(metricId);
+    if (!target || chosenAt.get(metricId) !== epochOf(metricId)) {
+      entries.push({ metricId, subscriptions: null, complete: false, canLoadMore: true, diagnostic: { message: CHANGED_WHILE_LOADING } }); continue;
+    }
+    const records = target.complete ? target.records : [...positives(metricId), ...target.records].slice(0, 2000);
     const hasEvidence = target.complete || records.length > 0;
     const canLoadMore = !target.complete && !target.terminal && target.pages < 20 && target.scanned < 2000;
-    entries.push({ metricId, subscriptions: hasEvidence ? records : null, complete: target.complete, canLoadMore, ...(!target.complete ? { diagnostic: { message: target.error instanceof Error ? target.error.message : 'Subscription coverage is partial. Load more follow details to continue.' } } : {}) });
+    entries.push({ metricId, subscriptions: hasEvidence ? records : null, complete: target.complete, canLoadMore, ...(!target.complete ? { diagnostic: { message: target.error instanceof Error ? target.error.message : MORE_FOLLOWERS } } : {}) });
   }
-  if (!current()) throw new Error('The Tableau session changed while subscription coverage was loading.');
+  if (!current()) throw new Error('The Tableau session changed while followers were loading.');
   const complete = entries.every(entry => entry.complete);
   const canLoadMore = entries.some(entry => entry.canLoadMore);
   return { entries, coverage: { status: complete ? 'available' : entries.some(entry => entry.subscriptions) ? 'partial' : 'unavailable', canLoadMore } };

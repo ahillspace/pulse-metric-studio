@@ -32,7 +32,7 @@ function reviewFixture(t: TestContext) {
     proposalEpoch: 0, proposalNotice: null, proposalBusy: false,
     proposalMessage: "", proposalError: null, composer: "", preview: null,
     previewSequence: 0, previewBusy: false, publishBusy: false,
-    publishError: null, publishCommandId: null, receipt: null,
+    publishError: null, publishCommandId: null, publishJob: null, publishNotice: null, receipt: null,
   };
   useAuthor.setState({ activeId: record.id, entries: { [record.id]: entry } });
   useConnection.setState({ session });

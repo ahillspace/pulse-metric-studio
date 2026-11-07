@@ -34,7 +34,8 @@ test('follow details propagate revoked authentication after memberships were cac
     if (definitionId) return Response.json({ metrics: (definitionId === 'a' ? ['a-1'] : ['b-1', 'b-2']).map(id => ({ id, is_default: id.endsWith('-1') })) });
     const metricId = /\/metrics\/([ab]-\d)$/.exec(url.pathname)?.[1];
     if (metricId) return Response.json({ metric: { id: metricId, definition_id: metricId[0], is_default: metricId.endsWith('-1'), specification: { measurement_period: {}, filters: [], comparison: {} } } });
-    if (url.pathname.endsWith('subscriptions:batchGetMetricFollowerCounts')) return Response.json({ counts: url.searchParams.get('metric_ids')!.split(',').map(id => ({ metric_id: id, count: 0 })) });
+    // Nonzero counts, so detail reads cannot settle from the count alone.
+    if (url.pathname.endsWith('subscriptions:batchGetMetricFollowerCounts')) return Response.json({ counts: url.searchParams.get('metric_ids')!.split(',').map(id => ({ metric_id: id, count: 1 })) });
     assert.ok(url.pathname.endsWith('/subscriptions'), url.pathname);
     return Response.json({ subscriptions: [] });
   };
@@ -55,6 +56,6 @@ test('follow details propagate revoked authentication after memberships were cac
     const revokedCounts = await server.inject({ method: 'POST', url: '/api/pulse/follow-state', payload: { metricIds: ['b-1'], snapshotId, detail: false } });
     assert.equal(revokedCounts.statusCode, 401, 'count summary is the existing authentication control');
     assert.equal(details.statusCode, 401, details.body);
-    assert.deepEqual(detailRequests, ['/api/-/pulse/subscriptions?page_size=100&metric_id=b-1', '/api/3.27/auth/signin'], 'typed auth stops the batch before b-2 and does not repeat cached memberships or site discovery');
+    assert.deepEqual(detailRequests.map(url => url.split('?')[0]), ['/api/-/pulse/subscriptions:batchGetMetricFollowerCounts', '/api/3.27/auth/signin'], 'typed auth from the count read stops the batch before any subscription read and does not repeat cached memberships or site discovery');
   } finally { await server.close(); }
 });

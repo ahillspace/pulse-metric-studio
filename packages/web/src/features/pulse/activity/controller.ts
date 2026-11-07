@@ -8,6 +8,7 @@ import type {
 import { pulseApi, PulseApiError, type PulseApi } from "../api/client";
 import { errorMessage } from "../shell/notifications";
 import { captureSessionOwner, type SessionOwner } from "../shell/session-events";
+import { createMutationJobTracker, stoppedMessage, type MutationJobProgress } from "../jobs/tracker";
 
 interface ActivityState {
   receipts: PulsePublishReceiptSummary[];
@@ -19,10 +20,16 @@ interface ActivityState {
   loading: boolean;
   undoBusy: boolean;
   groupBusy: boolean;
+  /** Why the last group deletion did not finish, including a stop before it was sent. */
   groupError: string | null;
   groupReceiptId: string | null;
+  /** Why the last undo did not finish, including a stop before every deletion was sent. */
   undoError: string | null;
   undoReceiptId: string | null;
+  /** The running undo or group deletion, once the server reports it as a job. */
+  job: MutationJobProgress | null;
+  /** Stops sending the running undo or group deletion; completed deletions stay done. */
+  cancelJob: () => Promise<void>;
   readError: string | null;
   readReceiptId: string | null;
   error: string | null;
@@ -34,13 +41,19 @@ interface ActivityState {
   deleteGroup: (id: string, groupId: string) => Promise<void>;
 }
 export function createActivityController(
-  transport: Pick<PulseApi, "listReceipts" | "readReceipt" | "undo"> = pulseApi,
+  transport: Pick<PulseApi, "listReceipts" | "readReceipt" | "undo" | "cancelJob"> = pulseApi,
   deleteGroup: PulseApi["deletePublicationGroup"] = pulseApi.deletePublicationGroup,
   onInventoryChanged: (context: PulseDraftContext | null, owner: SessionOwner | null, directoryChanged: boolean) => void = () => {},
 ) {
   let listRequest = 0;
   let selectionRequest = 0;
-  return create<ActivityState>((set, get) => ({
+  /** Undo and group deletion never overlap, so one tracker follows whichever is running. */
+  const jobs = createMutationJobTracker((id, owner) => transport.cancelJob(id, owner));
+  return create<ActivityState>((set, get) => {
+    const beginJob = (owner: SessionOwner | null) => jobs.begin({
+      owner, total: null, current: () => true, read: () => get().job, write: (job) => set({ job }),
+    });
+    return {
     receipts: [],
     total: 0,
     offset: 0,
@@ -54,6 +67,10 @@ export function createActivityController(
     groupReceiptId: null,
     undoError: null,
     undoReceiptId: null,
+    job: null,
+    async cancelJob() {
+      await jobs.cancel();
+    },
     readError: null,
     readReceiptId: null,
     error: null,
@@ -122,16 +139,24 @@ export function createActivityController(
       const owner = captureSessionOwner();
       const request = ++selectionRequest;
       let directoryChanged = false;
+      const before = JSON.stringify(get().receiptById[id]?.follow.group.deletion ?? null);
       set({ groupBusy: true, groupError: null, groupReceiptId: id });
+      const job = beginJob(owner);
       try {
-        const receipt = await deleteGroup(id, groupId);
-        directoryChanged = receipt.follow.group.deletion?.status === "deleted" || receipt.follow.group.deletion?.status === "unknown";
+        const receipt = await deleteGroup(id, groupId, job.observe);
+        const deletion = receipt.follow.group.deletion;
+        directoryChanged = deletion?.status === "deleted" || deletion?.status === "unknown";
         get().received(receipt);
         if (request === selectionRequest) set({ selected: receipt });
+        // A stopped deletion that was never sent leaves the receipt as it was;
+        // an unconfirmed one keeps its own warning.
+        if (job.stopReason && deletion?.status !== "unknown" && JSON.stringify(deletion ?? null) === before)
+          set({ groupError: stoppedMessage(job.stopReason, "The group deletion", "The group was not deleted.") });
       } catch (error) {
         directoryChanged = !(error instanceof PulseApiError) || error.status >= 500;
         set({ groupError: errorMessage(error) });
       } finally {
+        job.end();
         if (context || directoryChanged) onInventoryChanged(context, owner, directoryChanged);
         set({ groupBusy: false });
       }
@@ -142,19 +167,24 @@ export function createActivityController(
       const request = selectionRequest;
       const owner = captureSessionOwner();
       set({ undoBusy: true, error: null, undoError: null, undoReceiptId: id });
+      const job = beginJob(owner);
       try {
-        const receipt = await transport.undo(id);
+        const receipt = await transport.undo(id, job.observe);
         get().received(receipt);
         if (request === selectionRequest) set({ selected: receipt });
+        if (job.stopReason && receipt.undoEligible)
+          set({ undoError: stoppedMessage(job.stopReason, "The undo", "Deleted metrics stay deleted; the rest were not sent.") });
       } catch (error) {
         set({ error: errorMessage(error), undoError: errorMessage(error) });
       } finally {
+        job.end();
         const context = get().receiptById[id]?.context;
         if (context) onInventoryChanged(context, owner, false);
         set({ undoBusy: false });
       }
     },
-  }));
+    };
+  });
 }
 export const useActivity = createActivityController(pulseApi, pulseApi.deletePublicationGroup, (context, owner, directoryChanged) => {
   if (directoryChanged) useRegistry.getState().invalidateTargets(owner);
