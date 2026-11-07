@@ -26,3 +26,16 @@ test("busy labels keep both labels in place and hide the inactive one", () => {
   const busy = renderToStaticMarkup(<BusyLabel busy idle="Delete group" active="Deleting..." />);
   assert.match(busy, /<span aria-hidden="true">Delete group<\/span><span>Deleting\.\.\.<\/span>/);
 });
+
+test("a running undo Tableau limits shows its progress and Cancel in the confirmation", () => {
+  const job = { kind: "undo" as const, total: 3, completed: 1, throttled: true, retryAt: 60_000, serverTime: 0, stopping: false, cancelling: false, cancelError: null, stopReason: null };
+  const render = (busy: boolean, value: typeof job) => renderToStaticMarkup(
+    <ConfirmUndo receipt={receipt()} busy={busy} disabled={busy} job={value} onCancelJob={() => {}} onCancel={() => {}} onConfirm={() => {}} />,
+  ).replace(/<[^>]+>/g, " ");
+  const running = render(true, job);
+  assert.match(running, /1 of 3 done\.\s+Waiting for Tableau to accept more changes\./);
+  assert.match(running, /Cancel remaining/);
+  assert.match(render(true, { ...job, stopping: true }), /Stopping\.\.\./);
+  assert.doesNotMatch(render(true, { ...job, throttled: false }), /Cancel remaining/, "an undo Tableau never limits shows no progress");
+  assert.doesNotMatch(render(false, job), /Cancel remaining/, "another receipt's job is not shown before this undo starts");
+});

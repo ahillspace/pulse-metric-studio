@@ -4,7 +4,7 @@ import { pulseRequest, pulseApi, PulseApiError } from "./client";
 import { pulseDimensionalForkApi } from "../dimensional-fork-api";
 import { registryApi } from "./registry";
 import { useConnection } from "../connections/controller";
-import { deferred, draft, inventory, session } from "../testing/fixtures";
+import { deferred, draft, inventory, receipt, session } from "../testing/fixtures";
 import type { SessionOwner } from "../shell/session-events";
 
 test("structured workflow errors retain status, message, code, and conflict details", async (t) => {
@@ -172,4 +172,39 @@ test("cancel resolves only on the server's confirmation", async (t) => {
     globalThis.fetch = respond as typeof fetch;
     await assert.rejects(registryApi.cancelJob("job", null), label);
   }
+});
+
+test("publish, undo, and group deletion follow their jobs to the final receipt", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const job = (kind: string) => ({ job: { id: `${kind}-job`, kind, state: "running", total: 2, completed: 1, throttled: true, retryAt: null, serverTime: 0, stopReason: null } });
+  const requests = [
+    { kind: "publish", path: "/api/pulse/drafts/draft/publish", body: { commandId: "receipt", expectedRevision: 1, previewFingerprint: "reviewed" }, send: (observe: (status: unknown) => void) => pulseApi.publish("draft", { commandId: "receipt", expectedRevision: 1, previewFingerprint: "reviewed" }, observe) },
+    { kind: "undo", path: "/api/pulse/receipts/receipt/undo", body: {}, send: (observe: (status: unknown) => void) => pulseApi.undo("receipt", observe) },
+    { kind: "group_delete", path: "/api/pulse/receipts/receipt/delete-group", body: { groupId: "group" }, send: (observe: (status: unknown) => void) => pulseApi.deletePublicationGroup("receipt", "group", observe) },
+  ] as const;
+  for (const request of requests) {
+    const sent: Array<{ path: string; method: string; body: unknown }> = [];
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(String(input), "https://app.example.test");
+      sent.push({ path: url.pathname, method: init?.method ?? "GET", body: init?.body ? JSON.parse(String(init.body)) : undefined });
+      return url.pathname.startsWith("/api/pulse/jobs/") ? Response.json(receipt()) : Response.json(job(request.kind), { status: 202 });
+    };
+    const observed: unknown[] = [];
+    const result = await request.send((status) => observed.push(status));
+    assert.equal(result.id, "receipt", request.kind);
+    assert.deepEqual(sent, [
+      { path: request.path, method: "POST", body: request.body },
+      { path: `/api/pulse/jobs/${request.kind}-job`, method: "GET", body: undefined },
+    ], request.kind);
+    assert.deepEqual(observed, [job(request.kind).job], request.kind);
+  }
+});
+
+test("publication job failures keep their status and code", async (t) => {
+  t.mock.method(globalThis, "fetch", async () => Response.json({ code: "publication_busy", message: "Wait for the current operation to finish." }, { status: 409 }));
+  for (const request of [() => pulseApi.undo("receipt"), () => pulseApi.deletePublicationGroup("receipt", "group"), () => pulseApi.publish("draft", { commandId: "receipt", expectedRevision: 1, previewFingerprint: "reviewed" })])
+    await assert.rejects(request(), (error) => {
+      assert.ok(error instanceof PulseApiError); assert.equal(error.status, 409); assert.equal(error.code, "publication_busy"); return true;
+    });
 });

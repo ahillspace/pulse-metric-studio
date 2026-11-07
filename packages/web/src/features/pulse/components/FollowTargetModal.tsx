@@ -12,7 +12,7 @@ import {
 } from "../follow-target-actions";
 import { registryActionLabel } from "../registry-actions";
 import { CooldownBanner, type RegistryCooldown } from "../registry/CooldownBanner";
-import { JobProgress } from "../registry/JobProgress";
+import { JobProgress } from "../jobs/JobProgress";
 import { BusyLabel, Modal } from "./ui";
 
 type FollowTarget = FollowTargetChoice;

@@ -197,3 +197,35 @@ test("publication and Activity retain actionable messages with optional backend 
     assert.match(html, /Sanitized provider detail &lt;example&gt;/);
   }
 });
+
+test("publication review shows throttled progress with Cancel while publishing, and a stopped publication explains what was not sent", async (t) => {
+  await setup(t, "none");
+  const entry = useAuthor.getState().entries.a;
+  const preview = {
+    draftId: "a", revision: entry.record.revision, context: entry.record.context, datasourceName: "A", previewFingerprint: "reviewed",
+    metrics: [{ ...receipt().items[0].summary, name: "Revenue", description: "" }], digestAudience: "", followMode: "none" as const, issues: [],
+  };
+  const job = { kind: "publish" as const, total: 4, completed: 1, throttled: false, retryAt: 60_000, serverTime: 0, stopping: false, cancelling: false, cancelError: null, stopReason: null };
+  Object.defineProperty(globalThis, "document", { value: { getElementById: () => null }, configurable: true });
+  t.after(() => { Reflect.deleteProperty(globalThis, "document"); });
+  const render = (patch: Partial<typeof entry>) => {
+    useAuthor.setState({ entries: { a: { ...entry, previewSequence: entry.sequence, preview, publishBusy: true, publishCommandId: "receipt", ...patch } } });
+    return renderToStaticMarkup(<PublishSection visible onActivity={() => {}} />).replace(/<[^>]+>/g, " ");
+  };
+  const unlimited = render({ publishJob: job });
+  assert.match(unlimited, /Publishing metrics\. Results will appear in Activity\./);
+  assert.doesNotMatch(unlimited, /Cancel remaining/, "a publication Tableau never limits shows no progress");
+  const limited = render({ publishJob: { ...job, throttled: true } });
+  assert.match(limited, /1 of 4 done\./);
+  assert.match(limited, /Waiting for Tableau to accept more changes\./);
+  assert.match(limited, /Cancel remaining/);
+  assert.doesNotMatch(limited, /Publishing metrics\. Results/);
+  const stopped = receipt();
+  stopped.items.push({ ...stopped.items[0], itemIndex: 1, name: "Profit", creationStatus: "not_attempted", diagnostic: { message: "Not sent: the publication stopped before this metric." } });
+  stopped.unattemptedCount = 1;
+  const result = render({ preview: null, publishBusy: false, publishCommandId: null, publishJob: null, receipt: stopped,
+    publishNotice: "The publication was cancelled. Created metrics stay published; the rest were not sent." });
+  assert.match(result, /The publication was cancelled\. Created metrics stay published; the rest were not sent\./);
+  assert.match(result, /1 not sent/);
+  assert.match(result, /Profit\s+Not sent\s+Not sent: the publication stopped before this metric\./);
+});

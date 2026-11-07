@@ -7,7 +7,7 @@ import { z } from 'zod';
  */
 export const PulseMutationJobStatusSchema = z.object({
   id: z.string().min(1).max(128),
-  kind: z.enum(['delete', 'fork', 'follow', 'unfollow']),
+  kind: z.enum(['delete', 'fork', 'follow', 'unfollow', 'publish', 'undo', 'group_delete']),
   /** `finished` appears only in a cancel answer for a job that had already ended. */
   state: z.enum(['running', 'stopping', 'finished']),
   total: z.number().int().nonnegative().nullable(),

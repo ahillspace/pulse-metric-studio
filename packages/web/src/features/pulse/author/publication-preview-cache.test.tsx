@@ -77,7 +77,7 @@ test("publication previews survive inventory refresh and canceled confirmations 
   await loadAutomaticCards(tree);
   const group = find(tree, (element) => element.type === "button" && String(element.props.children).includes('Group'))!;
   group.props.onClick();
-  render().props.onClose();
+  render().props.onCancel();
   tree = render();
   await loadAutomaticCards(tree);
   assert.equal(requests, 3, "canceling either confirmation generates no duplicate previews");

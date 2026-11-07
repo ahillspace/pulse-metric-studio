@@ -26,7 +26,7 @@ import {
   ReviewedResourceId,
   ReviewedMetricFollowers,
 } from "../registry/views";
-import { JobProgress } from "../registry/JobProgress";
+import { JobProgress } from "../jobs/JobProgress";
 import { CooldownBanner } from "../registry/CooldownBanner";
 import { VariantDialog } from "../registry/VariantDialog";
 import { InventoryFailures } from "../registry/InventoryFailures";

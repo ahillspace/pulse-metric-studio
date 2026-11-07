@@ -18,9 +18,9 @@ import {
   type ExecutePulseDeleteRequest,
   type PulseWorkspaceDocumentV1,
 } from "@pulse-metric-studio/shared";
-import { captureSessionOwner, notifySessionExpired } from "../shell/session-events";
+import { captureSessionOwner, notifySessionExpired, type SessionOwner } from "../shell/session-events";
 import { desktopFetch } from "../../../desktop-transport";
-import { mutationJobRequest, type MutationJobObserver } from "./mutation-jobs";
+import { cancelMutationJob, mutationJobRequest, type MutationJobObserver } from "./mutation-jobs";
 
 export class PulseApiError extends Error {
   constructor(
@@ -101,6 +101,20 @@ function listUrl(
   return `/api/pulse/${resource}?${params}`;
 }
 
+/**
+ * Sends a publication change that runs as a Tableau mutation job and answers
+ * with its receipt once the job finishes.
+ */
+async function receiptJobRequest(path: string, body: unknown, observe?: MutationJobObserver) {
+  const owner = captureSessionOwner();
+  const result = await mutationJobRequest(path, body, null, observe);
+  if (!result.ok) {
+    if (result.status === 401) notifySessionExpired(owner);
+    throw pulseResponseError(result.status, result.data);
+  }
+  return PulsePublishReceiptSchema.parse(result.data);
+}
+
 export const pulseApi = {
   listDrafts: async (query: Partial<PulseDraftListQuery> = {}) =>
     PulseDraftPageSchema.parse(await pulseRequest(listUrl("drafts", query))),
@@ -148,14 +162,8 @@ export const pulseApi = {
         { expectedRevision },
       ),
     ),
-  publish: async (id: string, input: PublishPulseDraftRequest) =>
-    PulsePublishReceiptSchema.parse(
-      await pulseRequest(
-        `/api/pulse/drafts/${encodeURIComponent(id)}/publish`,
-        "POST",
-        input,
-      ),
-    ),
+  publish: (id: string, input: PublishPulseDraftRequest, observe?: MutationJobObserver) =>
+    receiptJobRequest(`/api/pulse/drafts/${encodeURIComponent(id)}/publish`, input, observe),
   listReceipts: async (query: Partial<PulseListQuery> = {}) =>
     PulseReceiptPageSchema.parse(
       await pulseRequest(listUrl("receipts", query)),
@@ -164,17 +172,12 @@ export const pulseApi = {
     PulsePublishReceiptSchema.parse(
       await pulseRequest(`/api/pulse/receipts/${encodeURIComponent(id)}`),
     ),
-  undo: async (id: string) =>
-    PulsePublishReceiptSchema.parse(
-      await pulseRequest(
-        `/api/pulse/receipts/${encodeURIComponent(id)}/undo`,
-        "POST",
-        {},
-      ),
-    ),
-  deletePublicationGroup: async (id: string, groupId: string) =>
-    PulsePublishReceiptSchema.parse(await pulseRequest(
-      `/api/pulse/receipts/${encodeURIComponent(id)}/delete-group`, "POST", { groupId })),
+  undo: (id: string, observe?: MutationJobObserver) =>
+    receiptJobRequest(`/api/pulse/receipts/${encodeURIComponent(id)}/undo`, {}, observe),
+  deletePublicationGroup: (id: string, groupId: string, observe?: MutationJobObserver) =>
+    receiptJobRequest(`/api/pulse/receipts/${encodeURIComponent(id)}/delete-group`, { groupId }, observe),
+  /** Stops sending a running publication job's remaining writes. */
+  cancelJob: (id: string, owner: SessionOwner | null = captureSessionOwner()) => cancelMutationJob(id, owner),
   previewDelete: async (input: PreparePulseDeleteRequest) =>
     PulseDeletePlanSchema.parse(
       await pulseRequest("/api/pulse/registry/delete-preview", "POST", input),

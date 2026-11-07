@@ -226,7 +226,7 @@ One bounded trailing local observation after the last provider request settles c
 Status responses require the captured owner to remain active; datasource navigation does not discard owner cooldown.
 Status polling stops when no work, trailing observation, or cooldown remains.
 The interface does not start a new mutation during known cooldown; the backend has no cooldown refusal.
-Bulk deletes, variant creation, follows, and unfollows run as mutation jobs ([`mutation-pacing.ts`](../packages/core/src/tableau/mutation-pacing.ts), [`mutation-jobs.ts`](../packages/pulse/src/http/mutation-jobs.ts)).
+Bulk deletes, variant creation, follows, unfollows, publication, publication undo, and publication group deletion run as mutation jobs ([`mutation-pacing.ts`](../packages/core/src/tableau/mutation-pacing.ts), [`mutation-jobs.ts`](../packages/pulse/src/http/mutation-jobs.ts)).
 Jobs send writes in blocks of five, wait for each block, and pause 250 milliseconds before the next.
 Inside a job, the wait for permission to send has no deadline and a 429 is resent until Tableau accepts or rejects the write.
 Each dispatched attempt keeps its own response deadline, so a stalled write still becomes an unknown outcome.
@@ -238,7 +238,9 @@ Otherwise it answers HTTP 202 with job status; the client polls `GET /api/pulse/
 Cancel answers HTTP 200 with the job's `stopping` or `finished` status; the waiting request still receives the final response.
 The client stops starting later requests as soon as Cancel is pressed, but shows the batch as stopping only after the server confirms.
 A cancel the server does not confirm is shown with Cancel available again; a Cancel pressed before the next request reports its job is sent when that job reports in.
-The client shows completed and total counts, the time Tableau accepts more writes, and Cancel once a job is limited.
+Once Tableau limits a job, the client shows completed and total counts, whether it is waiting for Tableau or sending, and Cancel.
+It never shows a Tableau rate or a resume time, because Tableau sets and changes its write limits server-side.
+The web [`jobs`](../packages/web/src/features/pulse/jobs/tracker.ts) module owns this progress and Cancel tracking for every job the client starts.
 Finished job responses are retained for ten minutes; jobs end with the app.
 Per-target and summary receipts retain mutation dispatch and cooldown metadata.
 A throttle that escapes outside a job stops later envelopes; unsent targets remain distinct from rejected submitted targets.
@@ -288,6 +290,11 @@ The follow receipt records its mode, captured self recipient when applicable, an
 Digest groups use `pmStudio - Datasource Name - chosen name`, with the complete datasource and audience labels.
 The transport escapes XML while preserving the group name.
 Group actions use recorded group IDs and publication ownership.
+A publication's creates, group setup, and membership share one pacer, and its follows go out as one paced subscription batch.
+The publish job's total counts each metric creation and each follow.
+Cancel or the time limit stops a publication before its next write: later metrics are `not_attempted` with a not-sent diagnostic, and unsent follow, group, and membership steps are `not_attempted`.
+Created metrics stay published and their receipt stays eligible for undo.
+Author shows the receipt with a notice that the publication stopped and the rest were not sent.
 
 For a new rule, add pure validation in `packages/shared/src/pulse-domain.ts` and verify the relevant UI workflow.
 Use [`pulse-domain.test.ts`](../packages/shared/src/pulse-domain.test.ts) for pure rules, [`pulse-workflows.test.ts`](../packages/server/src/pulse-workflows.test.ts) for route integration, and [authoring UI tests](../packages/web/src/features/pulse/author/authoring-ui.test.tsx) for presentation.
@@ -319,6 +326,9 @@ Do not delete reused metrics or groups merely because they appear in a receipt.
 Undo compensates confirmed definition creations and rechecks connection ownership.
 It is a destructive action against those definitions, including their Tableau dependents; review the displayed scope before using it.
 Group deletion is a separate receipt-owned operation for groups confirmed created by that publication.
+Undo and group deletion run as mutation jobs; their confirmation dialogs show progress and Cancel once Tableau limits them.
+A stopped undo keeps confirmed deletions and leaves unsent metrics pending, so the receipt stays eligible for another undo.
+A stopped group deletion that was never sent restores the group's previous deletion outcome.
 Author and Activity read the same updated receipt outcomes.
 Activity places actions for the selected publication above its history and details, retaining the receipt's original connection and eligibility guards.
 Confirmation dialogs mount outside the sticky action toolbar's stacking context but remain inside the shell's disabled boundary for shutdown and backend unavailability.

@@ -1,7 +1,8 @@
 # Measure Tableau requests
 
 Use this procedure to measure Metric Manager request counts and Tableau throttling.
-It covers retained inventory, local mutation patches, lazy filter discovery, shared subscription coverage, cooldown recovery, and bulk mutation jobs.
+It covers retained inventory, local mutation patches, lazy filter discovery, shared subscription coverage, cooldown recovery, and mutation jobs.
+Bulk deletes, variant creation, follows, unfollows, publication, publication undo, and publication group deletion all run as mutation jobs.
 Use a datasource where creating test variants and deleting the reviewed test targets is acceptable.
 Desktop and live Tableau qualification remain user-led; automated checks use isolated provider fixtures.
 
@@ -59,7 +60,7 @@ Names and filter values are unnecessary in your notes.
    Leave the app idle through the reported wait and record admitted work that resumes.
    Expiry must not resubmit the whole command or an unknown write.
    Do not restart during this window, because restarting clears the in-memory shared cooldown and ends any running job.
-   For a bulk change of more than 15 items, record the progress count, the **Waiting for Tableau until** time, and that the batch completes with no time cap.
+   For a bulk change large enough that Tableau limits it, record the progress count, that the status alternates between **Waiting for Tableau to accept more changes** and **Sending changes**, and that the batch completes with no time cap.
    Repeat once and click **Cancel remaining** while waiting; completed items stay done and the rest are reported as not sent.
    The banner must show **Stopping** only after the app confirms the cancel; if it reports that Cancel was not confirmed, Cancel must be available again.
 10. Review deletion of the intended test targets and record preview and submission separately.
@@ -70,6 +71,8 @@ Names and filter values are unnecessary in your notes.
 
 If an outcome is unknown, inspect Tableau before retrying.
 Publication receipts, default-metric resolution, and undo retain their independent safety rules.
+A publication, undo, or group deletion that Tableau limits shows the same progress and **Cancel remaining** in its dialog.
+After Cancel, created metrics stay published, deleted metrics stay deleted, and the rest are reported as not sent.
 No fixed attempt count can guarantee a 429 because Tableau's limits and other traffic vary.
 
 ## Compare healthy call budgets
