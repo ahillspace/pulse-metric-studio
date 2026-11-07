@@ -437,6 +437,45 @@ test('a positive count after a zero reads followers again instead of keeping the
   assert.equal(after.availabilityByMetricId.a?.relationshipStatus, 'available');
 });
 
+test('discovery a zero count disproves never settles a later positive count', async () => {
+  const session = fixture(); let count = 1; const reads: string[] = [];
+  const dependencies: SubscriptionDependencies = { ...isolated,
+    followerCounts: async () => ({ countsByMetricId: { a: count }, errorsByMetricId: {} }),
+    listSubscriptionPage: async (_session, input) => {
+      reads.push(input.metricId ?? 'site');
+      // Discovery stays incomplete, so absence is never qualified by it; the targeted read sees the current follower.
+      return input.metricId ? { subscriptions: [{ metricId: 'a', follower: { id: 'user', type: 'USER' } }], nextPageToken: null }
+        : { subscriptions: [{ metricId: 'a', follower: { id: 'alice', type: 'USER' } }], nextPageToken: 'more' };
+    },
+  };
+  const first = await getFollowState(session, 'user', [], ['a'], { detail: true }, dependencies);
+  assert.deepEqual(first.userFollowerIdsByMetricId?.a, ['alice'], 'discovery matching the count settles the metric');
+  count = 0;
+  const emptied = await getFollowState(session, 'user', [], ['a'], { detail: true }, dependencies);
+  assert.deepEqual(emptied.userFollowerIdsByMetricId?.a, []);
+  count = 1;
+  const after = await getFollowState(session, 'user', [], ['a'], { detail: true }, dependencies);
+  assert.deepEqual(reads, ['site', 'a'], 'the disproved discovery follower cannot match the new count, so the metric is read');
+  assert.deepEqual(after.userFollowerIdsByMetricId?.a, ['user']);
+  assert.equal(after.userFollowsByMetricId.a, true);
+});
+
+test('discovery naming more followers than a fresh count is not reported', async () => {
+  const session = fixture(); const reads: string[] = [];
+  const dependencies: SubscriptionDependencies = { ...isolated,
+    followerCounts: async () => ({ countsByMetricId: { a: 1 }, errorsByMetricId: {} }),
+    listSubscriptionPage: async (_session, input) => {
+      reads.push(input.metricId ?? 'site');
+      if (input.metricId) throw new Error('Tableau could not list followers.');
+      return { subscriptions: ['alice', 'bob'].map(id => ({ metricId: 'a', follower: { id, type: 'USER' as const } })), nextPageToken: 'more' };
+    },
+  };
+  const result = await getFollowState(session, 'user', [], ['a'], { detail: true }, dependencies);
+  assert.deepEqual(reads, ['site', 'a']);
+  assert.equal(result.userFollowerIdsByMetricId?.a, undefined, 'stale discovery followers are not offered as partial evidence');
+  assert.equal(result.availabilityByMetricId.a?.relationshipStatus, 'unavailable');
+});
+
 test('qualified site absence that a fresh count contradicts is read again', async () => {
   const session = fixture(); let count: number | undefined; const reads: string[] = [];
   const dependencies: SubscriptionDependencies = { ...isolated, siteNegativeCoverageQualified: true,

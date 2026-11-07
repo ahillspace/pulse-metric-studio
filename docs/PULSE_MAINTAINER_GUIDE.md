@@ -379,6 +379,7 @@ Each follow-detail request reads fresh follower counts once, after any refresh i
 A fresh count of zero settles a metric as not followed, and a count equal to the distinct followers already found settles it as complete; neither sends a subscription read.
 Counts never settle a metric that a mutation touched after the count was read, and personal-only scope still never reports group absence.
 A fresh count is newer than retained coverage: complete coverage, or complete site discovery, that disagrees with it is read again instead of being reported.
+Discovery followers a count disproves, including any beyond the count, are retired for that metric, so they never confirm absence or match a later count.
 A metric that a mutation touches while its request is running reports that followers changed while loading, with Load more, instead of evidence chosen before the write.
 Metrics without a usable count fall back to targeted subscription reads.
 A detail response without a usable count keeps a count the interface already holds, and its tooltip still explains why the fresh count failed.

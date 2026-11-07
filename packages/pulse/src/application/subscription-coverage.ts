@@ -135,9 +135,20 @@ export async function subscriptionCoverage(session: TableauSession, metricIds: s
     settle(metricId, found);
     return true;
   };
-  // A fresh count is newer than retained coverage. Complete coverage that disagrees with it is stale and is
-  // read again; a zero settles at once. Coverage acquired in this request is never second-guessed.
+  // A fresh count is newer than discovery. Discovery that names more followers than the count, or complete site
+  // discovery that disagrees with it, is stale for that metric: its identities are retired for the view, so they
+  // never confirm absence or join a later count match. Personal discovery lists only the user's own follows, so
+  // finding fewer than the count says nothing about it.
+  const retireContradictedDiscovery = (metricId: string) => {
+    const count = freshCount(metricId);
+    if (count === undefined || view!.invalidated.has(metricId)) return;
+    const found = identityCount(positives(metricId));
+    if (found > count || (view!.scope === 'site' && view!.site.complete && found !== count)) view!.invalidated.add(metricId);
+  };
+  // Complete targeted coverage that disagrees with a fresh count is stale and is read again; a zero settles at
+  // once. Coverage acquired in this request is never second-guessed.
   for (const metricId of metricIds) {
+    retireContradictedDiscovery(metricId);
     const count = freshCount(metricId);
     if (count === 0) { settle(metricId, []); continue; }
     const retained = view.targeted.get(metricId);
@@ -153,11 +164,10 @@ export async function subscriptionCoverage(session: TableauSession, metricIds: s
   if (options.continueCoverage && dependencies.listSubscriptionPage) while (view.site.token && !view.site.complete && calls < SUBSCRIPTION_CALLS_PER_REQUEST && view.site.pages < 20) {
     const previous = view.site.pages; await page(view.site); if (view.site.error || previous === view.site.pages) break;
   }
+  // Discovery read in this request is checked against the count as well.
+  for (const metricId of metricIds) if (!settled.has(metricId)) retireContradictedDiscovery(metricId);
   const qualified = (view.scope === 'site' && dependencies.siteNegativeCoverageQualified === true) || (view.scope === 'user' && options.personalOnly === true);
-  // Site discovery lists every follower, so a fresh count that disagrees with it means it is stale. Personal
-  // discovery lists only the user's own follows, so the count says nothing about it.
-  const siteAgrees = (metricId: string) => { const count = freshCount(metricId); return view!.scope !== 'site' || count === undefined || identityCount(positives(metricId)) === count; };
-  const siteCovered = (metricId: string) => !settled.has(metricId) && qualified && view!.site.complete && view!.siteEligible.has(metricId) && !view!.invalidated.has(metricId) && siteAgrees(metricId);
+  const siteCovered = (metricId: string) => !settled.has(metricId) && qualified && view!.site.complete && view!.siteEligible.has(metricId) && !view!.invalidated.has(metricId);
   let round: Array<{ metricId: string; target: TargetCoverage }> = [];
   for (const metricId of metricIds) {
     if (settled.has(metricId) || siteCovered(metricId)) continue;
