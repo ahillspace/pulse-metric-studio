@@ -164,8 +164,9 @@ export async function subscriptionCoverage(session: TableauSession, metricIds: s
   if (options.continueCoverage && dependencies.listSubscriptionPage) while (view.site.token && !view.site.complete && calls < SUBSCRIPTION_CALLS_PER_REQUEST && view.site.pages < 20) {
     const previous = view.site.pages; await page(view.site); if (view.site.error || previous === view.site.pages) break;
   }
-  // Discovery read in this request is checked against the count as well.
-  for (const metricId of metricIds) if (!settled.has(metricId)) retireContradictedDiscovery(metricId);
+  // Discovery read in this request is checked against the count as well, including for metrics a zero already
+  // settled: their answer stands, but discovery the zero disproves must not survive into a later request.
+  for (const metricId of metricIds) retireContradictedDiscovery(metricId);
   const qualified = (view.scope === 'site' && dependencies.siteNegativeCoverageQualified === true) || (view.scope === 'user' && options.personalOnly === true);
   const siteCovered = (metricId: string) => !settled.has(metricId) && qualified && view!.site.complete && view!.siteEligible.has(metricId) && !view!.invalidated.has(metricId);
   let round: Array<{ metricId: string; target: TargetCoverage }> = [];

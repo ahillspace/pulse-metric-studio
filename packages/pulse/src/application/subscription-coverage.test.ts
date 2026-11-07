@@ -460,6 +460,26 @@ test('discovery a zero count disproves never settles a later positive count', as
   assert.equal(after.userFollowsByMetricId.a, true);
 });
 
+test('discovery read for another metric after a zero settles cannot settle a later positive count', async () => {
+  const session = fixture(); const counts: Record<string, number> = { a: 0, b: 1 }; const reads: string[] = [];
+  const dependencies: SubscriptionDependencies = { ...isolated,
+    followerCounts: async () => ({ countsByMetricId: { ...counts }, errorsByMetricId: {} }),
+    listSubscriptionPage: async (_session, input) => {
+      reads.push(input.metricId ?? 'site');
+      if (input.metricId) return { subscriptions: [{ metricId: input.metricId, follower: { id: 'user', type: 'USER' } }], nextPageToken: null };
+      // Discovery, read because b is unresolved, still lists a former follower of a.
+      return { subscriptions: [{ metricId: 'a', follower: { id: 'alice', type: 'USER' } }, { metricId: 'b', follower: { id: 'user', type: 'USER' } }], nextPageToken: 'more' };
+    },
+  };
+  const first = await getFollowState(session, 'user', [], ['a', 'b'], { detail: true }, dependencies);
+  assert.deepEqual(first.userFollowerIdsByMetricId?.a, [], 'the zero settles a');
+  assert.deepEqual(reads, ['site'], 'b settles from discovery that matches its count');
+  counts.a = 1;
+  const after = await getFollowState(session, 'user', [], ['a'], { detail: true }, dependencies);
+  assert.deepEqual(reads, ['site', 'a'], 'the follower the zero disproved cannot match the new count, so a is read');
+  assert.equal(after.userFollowsByMetricId.a, true);
+});
+
 test('discovery naming more followers than a fresh count is not reported', async () => {
   const session = fixture(); const reads: string[] = [];
   const dependencies: SubscriptionDependencies = { ...isolated,
