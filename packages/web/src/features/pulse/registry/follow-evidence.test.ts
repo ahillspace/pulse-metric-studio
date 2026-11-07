@@ -57,15 +57,15 @@ test("205 demanded metrics retain the first batch's resumable coverage after the
   const ids = Array.from({ length: 205 }, (_, index) => `m${index}`);
   t.mock.method(globalThis, "fetch", async (_url: RequestInfo | URL, init?: RequestInit) => {
     const { metricIds: batch, detail } = JSON.parse(init!.body as string);
-    return Response.json(detail ? covered(batch, batch.length === 200 ? 19 : batch.length) : state(batch, false));
+    return Response.json(detail ? covered(batch, batch[0] === "m0" ? 19 : batch.length) : state(batch, false));
   });
   const store = fixture({ followState: registryApi.followState }, ids);
   await store.getState().activateContext(draft().context, "A", session);
   await store.getState().ensureFollowState(ids);
   assert.equal(store.getState().followState?.coverage?.canLoadMore, true);
   assert.equal(store.getState().followState?.coverage?.status, "partial");
-  assert.equal(Object.values(store.getState().followState!.availabilityByMetricId!).filter(value => value.canLoadMore).length, 181);
-  await store.getState().loadMoreFollowState(ids.slice(19, 200));
+  assert.equal(Object.values(store.getState().followState!.availabilityByMetricId!).filter(value => value.canLoadMore).length, 81);
+  await store.getState().loadMoreFollowState(ids.slice(19, 100));
   assert.equal(store.getState().followState?.coverage?.canLoadMore, false, "completing the unresolved targets clears continuation");
 });
 
@@ -167,10 +167,8 @@ test("partial follow during pending inventory fences pre-write counts until a po
     if (String(url).includes("/api/pulse/follow-state")) {
       const { metricIds: ids, detail } = JSON.parse(init!.body as string);
       if (!detail) { countReads++; if (countReads === 1) { countStarted.resolve(); return Response.json(await oldCounts.promise); } return Response.json(state(ids, false, 1)); }
-      const result = state(ids, true);
-      result.followerCountsByMetricId = {};
-      for (const availability of Object.values(result.availabilityByMetricId)) availability.followerCountStatus = "not_requested";
-      return Response.json(result);
+      // Detail responses carry counts read in the same request, after the write.
+      return Response.json(state(ids, true, 1));
     }
     assert.ok(String(url).includes("/api/pulse/follow"));
     return Response.json({ stopped: true, throttle, results: [
@@ -190,7 +188,7 @@ test("partial follow during pending inventory fences pre-write counts until a po
   assert.equal(store.getState().followState?.followerCountsByMetricId.metric, undefined);
   await store.getState().pollCooldown();
   await store.getState().ensureFollowState(["metric"]);
-  assert.equal(countReads, 2, "inspection requests a post-invalidation count without refreshing inventory");
+  assert.equal(countReads, 1, "inspection takes its post-invalidation count from the detail response without refreshing inventory");
   assert.equal(followStateLabel(store.getState().followState, "metric"), "You follow (1)");
   assert.equal(inventories, 1);
 });

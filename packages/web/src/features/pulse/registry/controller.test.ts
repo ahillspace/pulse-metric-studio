@@ -232,7 +232,7 @@ test("selection-scoped follower refresh batches exact IDs and preserves inventor
   const ids = Array.from({length: 405}, (_, index) => `m${index}`);
   const result = await store.getState().refreshFollowState([...ids, "m0"]);
   assert.deepEqual(requests.flat(), ids);
-  assert.deepEqual(requests.map(batch => batch.length), [200, 200, 5]);
+  assert.deepEqual(requests.map(batch => batch.length), [100, 100, 100, 100, 5]);
   assert.deepEqual(result?.userFollowerIdsByMetricId?.m404, ["subscriber"]);
   assert.equal(result?.availabilityByMetricId?.m200.status, "unavailable");
   assert.equal(result?.userFollowerIdsByMetricId?.m200, undefined);
@@ -1078,7 +1078,7 @@ test("initial counts defer identities and following one of 405 metrics refreshes
   requests.length = 0;
   await store.getState().follow("follow", [{ metricId: "m200", target: { kind: "USER", id: "person" } }], [], []);
   assert.equal(inventories, 1);
-  assert.deepEqual(requests, [{ ids: ["m200"], detail: true }, { ids: ["m200"], detail: false }]);
+  assert.deepEqual(requests, [{ ids: ["m200"], detail: true }], "the detail response carries the post-write count");
   assert.equal(store.getState().followState?.followerCountsByMetricId.m199, 1);
   assert.equal(store.getState().followState?.followerCountsByMetricId.m200, 2);
   requests.length = 0;
@@ -1192,7 +1192,7 @@ test("confirmed and duplicate variants patch once by ID with no inventory or fol
   await store.getState().ensureFollowState(["metric"]);
   assert.equal(followReads.length, 2, "existing relationship evidence survives both patches");
   await store.getState().ensureFollowState(["new"]);
-  assert.deepEqual(followReads.slice(2), [{ ids: ["new"], detail: true }, { ids: ["new"], detail: false }]);
+  assert.deepEqual(followReads.slice(2), [{ ids: ["new"], detail: true }]);
 });
 
 test("a pending older refresh cannot lose a confirmed create or replace its snapshot", async () => {

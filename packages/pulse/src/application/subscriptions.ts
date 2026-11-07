@@ -91,21 +91,26 @@ export async function getFollowState(
   if (uniqueMetricIds.length === 0) return result;
 
   let countResult: FollowerCountBatchResult = { countsByMetricId: {}, errorsByMetricId: {} };
-  if (options.detail !== true) try {
-    countResult = await withTableauOperation('follow_state', () => dependencies.followerCounts(session, uniqueMetricIds));
-  } catch (error) {
-    if (error instanceof TableauError && error.kind === "auth") throw error;
-    const message = diagnosticMessage(boundedProviderDiagnostic(error));
-    countResult = {
-      countsByMetricId: {},
-      errorsByMetricId: Object.fromEntries(
-        uniqueMetricIds.map((metricId) => [metricId, { message }]),
-      ),
-    };
-  }
-  Object.assign(result.followerCountsByMetricId, countResult.countsByMetricId);
-
+  // Every request reads counts once. Detail requests read them inside coverage, after any refresh invalidation,
+  // so a fresh zero or a count matched by found followers can settle a metric without subscription reads.
+  const readCounts = async () => {
+    try {
+      countResult = await withTableauOperation('follow_state', () => dependencies.followerCounts(session, uniqueMetricIds));
+    } catch (error) {
+      if (error instanceof TableauError && error.kind === "auth") throw error;
+      const message = diagnosticMessage(boundedProviderDiagnostic(error));
+      countResult = {
+        countsByMetricId: {},
+        errorsByMetricId: Object.fromEntries(
+          uniqueMetricIds.map((metricId) => [metricId, { message }]),
+        ),
+      };
+    }
+    return countResult.countsByMetricId;
+  };
+  if (options.detail === false) await readCounts();
   if (options.detail === false) {
+    Object.assign(result.followerCountsByMetricId, countResult.countsByMetricId);
     for (const metricId of uniqueMetricIds) {
       const error = countResult.errorsByMetricId[metricId];
       const countAvailable = !error && typeof countResult.countsByMetricId[metricId] === 'number';
@@ -120,7 +125,8 @@ export async function getFollowState(
     return result;
   }
 
-  const loaded = await subscriptionCoverage(session, uniqueMetricIds, options, dependencies);
+  const loaded = await subscriptionCoverage(session, uniqueMetricIds, { ...options, readFollowerCounts: readCounts }, dependencies);
+  Object.assign(result.followerCountsByMetricId, countResult.countsByMetricId);
   const subscriptionResults = loaded.entries;
   result.coverage = loaded.coverage;
 
@@ -196,7 +202,7 @@ export async function getFollowState(
           ? "partial"
           : "available";
     const followerCountStatus: MetricAvailability["followerCountStatus"] =
-      countAvailable ? "available" : options.detail === true ? "not_requested" : "unavailable";
+      countAvailable ? "available" : "unavailable";
     const status: MetricAvailability["status"] =
       relationshipStatus === "available" && countAvailable
         ? "available"

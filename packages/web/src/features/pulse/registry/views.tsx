@@ -7,7 +7,7 @@ import type {
 } from "@pulse-metric-studio/shared";
 import type { FollowState, FollowersDetail } from "./view-types";
 import { useRegistry } from "./controller";
-import { followStateLabel } from "../follow-state";
+import { followStateLabel, followStateTitle } from "../follow-state";
 import {
   selectionState,
   type PulseRegistryMetric,
@@ -69,7 +69,7 @@ export function MetricRow({
         className={`follow-dot ${userFollow ? "me" : groupFollow ? "group" : ""}`}
         aria-hidden="true"
       />
-      <span className="pulse-follow-label">
+      <span className="pulse-follow-label" title={followStateTitle(followState, variant.metricId)}>
         {followStateLabel(followState, variant.metricId)}
       </span>
       <button
@@ -159,7 +159,7 @@ export function FollowerBadges({
         (metric) => followState?.availabilityByMetricId?.[metric.metricId],
       )
         ? "Loading followers..."
-        : notRequested ? "Follower details not loaded" : `${summary.user} people / ${summary.groups} groups`}
+        : notRequested ? "View followers" : `${summary.user} people / ${summary.groups} groups`}
     </button>
   );
 }
@@ -569,13 +569,13 @@ export function followerDetailLines(
     diagnostics.length > 0;
 
   if (incomplete) {
-    const availability =
+    const lead =
       detail.status === "partial" || detail.followers.length > 0
-        ? "partial"
-        : "unavailable";
+        ? "Some follower details could not be loaded"
+        : "Followers could not be loaded";
     items.push({
       key: `${detail.metricId}-diagnostic`,
-      text: `Follower details are ${availability}${diagnostics.length > 0 ? ` - ${diagnostics.join("; ")}` : ""}`,
+      text: diagnostics.length > 0 ? `${lead}: ${diagnostics.join("; ")}` : `${lead}.`,
       error: true,
     });
   } else if (detail.followers.length === 0) {

@@ -4,6 +4,7 @@ import Fastify from 'fastify';
 import { clearSession, setSession, type TableauSession } from '@pulse-metric-studio/core';
 import { registerPulseRoutes } from './routes.js';
 import { clearSubscriptionCaches, listUserGroupIds } from '../application/subscriptions.js';
+import { FOLLOWER_COUNT_BATCH_LIMIT } from './pulse-client.js';
 
 const originalFetch = globalThis.fetch;
 const session: TableauSession = { serverUrl: 'https://example.test', siteContentUrl: 'site', siteId: 'site', userId: 'user', token: 'token', apiVersion: '3.27' };
@@ -30,7 +31,7 @@ for (const size of [2, 200, 405]) {
       assert.equal(state.availabilityByMetricId['metric-1'].relationshipStatus, 'not_requested');
       assert.equal(state.availabilityByMetricId['metric-0'].followerCountStatus, 'unavailable');
       assert.equal(state.followerCountsByMetricId['metric-0'], undefined);
-      assert.equal(urls.length, Math.ceil(size / 200));
+      assert.equal(urls.length, Math.ceil(size / FOLLOWER_COUNT_BATCH_LIMIT));
     } finally { await app.close(); }
   });
 }

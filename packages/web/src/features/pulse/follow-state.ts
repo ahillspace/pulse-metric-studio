@@ -86,33 +86,34 @@ export function metricIsFollowed(followState: FollowState | null, metricId: stri
   return (availability.relationshipStatus ?? availability.status) !== 'available';
 }
 
+/** Short row label. Diagnostics belong in {@link followStateTitle}, never in the label. */
 export function followStateLabel(followState: FollowState | null, metricId: string): string {
   const userFollows = followState?.userFollowsByMetricId[metricId] === true;
   const groupFollows = followState?.groupFollowsByMetricId[metricId] === true;
   const availability = followState?.availabilityByMetricId?.[metricId];
   const relationshipStatus = availability?.relationshipStatus ?? availability?.status;
-  const followerCountStatus = availability?.followerCountStatus
-    ?? (availability?.status === 'available' ? 'available' : undefined);
-  const relationshipLabel = userFollows && groupFollows
-    ? 'You + group'
-    : userFollows
-      ? 'You follow'
-      : groupFollows
-        ? 'Group follows'
-        : (relationshipStatus === 'not_requested' || !relationshipStatus)
-          ? 'Follow details not loaded'
-        : relationshipStatus === 'unavailable'
-          ? 'Follow state unavailable'
-          : relationshipStatus === 'partial'
-            ? 'Follow state partial'
-            : 'Not followed';
   const followerCount = followState?.followerCountsByMetricId[metricId];
-  const countLabel = typeof followerCount === 'number' ? ` (${followerCount})` : '';
-  const diagnostics = [
-    relationshipStatus === 'partial' && (userFollows || groupFollows) ? 'follow state partial' : null,
-    followerCountStatus === 'unavailable' ? 'follower count unavailable' : null,
-  ].filter((message): message is string => message !== null);
-  return `${relationshipLabel}${countLabel}${diagnostics.length > 0 ? ` - ${diagnostics.join(' - ')}` : ''}`;
+  const count = typeof followerCount === 'number' ? ` (${followerCount})` : '';
+  if (userFollows && groupFollows) return `You + group${count}`;
+  if (userFollows) return `You follow${count}`;
+  if (groupFollows) return `Group follows${count}`;
+  if (relationshipStatus === 'not_requested' || !relationshipStatus) return 'Loading followers...';
+  if (relationshipStatus === 'available') return `Not followed${count}`;
+  if (availability?.canLoadMore === true) return `More followers to load${count}`;
+  return 'Followers unavailable';
+}
+
+/** Row tooltip with every reason the label could not be confirmed, or undefined when nothing needs explaining. */
+export function followStateTitle(followState: FollowState | null, metricId: string): string | undefined {
+  const availability = followState?.availabilityByMetricId?.[metricId];
+  if (!availability) return undefined;
+  const sentence = (message: string) => /[.!?]$/.test(message.trim()) ? message.trim() : `${message.trim()}.`;
+  const messages = availability.diagnostics.map(diagnostic => diagnostic.message).filter(Boolean).map(sentence);
+  if (availability.followerCountStatus === 'unavailable') messages.push('Follower count unavailable.');
+  if (availability.canLoadMore === true && !messages.some(message => /Load more/.test(message)))
+    messages.push('More followers to load. Select Load more followers to continue.');
+  const distinct = [...new Set(messages)];
+  return distinct.length ? distinct.join(' ') : undefined;
 }
 
 export function unavailableFollowState(metricIds: string[], message: string): FollowState {
