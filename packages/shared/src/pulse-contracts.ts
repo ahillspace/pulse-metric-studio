@@ -3,6 +3,12 @@ import { TableauThrottleMetadataSchema } from './tableau-throttle.js';
 
 // App resource guards, not undocumented Tableau field limits.
 export const PULSE_TEXT_LIMITS = { name: 32768, description: 262144, audience: 32768, conversation: 1048576 } as const;
+/**
+ * Metrics per follower-detail request. This is an app batching bound, not a Tableau limit.
+ * The client batches by it and the server sizes its per-request subscription budget from it,
+ * so one full batch completes without asking the user to load more.
+ */
+export const PULSE_FOLLOW_DETAIL_BATCH_LIMIT = 100;
 
 const id = z.string().trim().min(1).max(1024);
 const fieldId = z.string().min(1).max(1024).refine((value) => value.trim().length > 0, 'Field identifier must not be blank.');

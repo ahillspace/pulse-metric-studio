@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { PULSE_FOLLOW_DETAIL_BATCH_LIMIT } from "@pulse-metric-studio/shared";
 import type {
   PulseDeletePlan,
   PulseDraftContext,
@@ -378,30 +379,27 @@ export function createRegistryController(
       const ids = [...new Set(metricIds)];
       const reads = detailScopeFor(scope.key);
       const missing = ids.filter(id => !reads.pending.has(id) && !reads.evidence.has(id));
-      for (let offset = 0; offset < missing.length; offset += 200) {
-        const batch = missing.slice(offset, offset + 200);
+      // Detail batches match the server's per-request budget, so a full batch completes without Load more.
+      for (let offset = 0; offset < missing.length; offset += PULSE_FOLLOW_DETAIL_BATCH_LIMIT) {
+        const batch = missing.slice(offset, offset + PULSE_FOLLOW_DETAIL_BATCH_LIMIT);
         const versions = new Map(batch.map(id => [id, reads.versions.get(id) ?? 0]));
         const request = detailRequest(async () => {
           const valid = batch.filter(id => evidenceCurrent(scope, reads, id, versions.get(id)!));
           if (!valid.length) return null;
           try {
             const previous = current(scope) ? get().followState : cache.get(scope.key)?.followState;
-            const missingCounts = valid.filter(id => refresh || previous?.availabilityByMetricId?.[id]?.followerCountStatus === "not_requested");
-            const [details, counts] = await Promise.all([
-              get().trackProviderOperation(() => transport.followState(valid, true, scope.owner, { snapshotId: (current(scope) ? get().inventory : cache.get(scope.key)?.inventory)?.snapshotId, continueCoverage, refresh }), scope.owner).catch(error => {
-                const unavailable = unavailableFollowState(valid, errorMessage(error));
-                for (const [id, availability] of Object.entries(unavailable.availabilityByMetricId ?? {})) {
-                  availability.followerCountStatus = "not_requested";
-                  // A failed continuation supplies no replacement cursor evidence.
-                  // Keep its explicit retry hint, while identities remain unavailable.
-                  if (continueCoverage && previous?.availabilityByMetricId?.[id]?.canLoadMore === true)
-                    availability.canLoadMore = true;
-                }
-                return unavailable;
-              }),
-              missingCounts.length ? get().trackProviderOperation(() => transport.followState(missingCounts, false, scope.owner), scope.owner).catch(error => unavailableFollowState(missingCounts, errorMessage(error))) : Promise.resolve(null),
-            ]);
-            return counts ? replaceFollowDetails(counts, details, valid) : details;
+            // Detail responses carry follower counts read in the same request, so no separate count read is needed.
+            return await get().trackProviderOperation(() => transport.followState(valid, true, scope.owner, { snapshotId: (current(scope) ? get().inventory : cache.get(scope.key)?.inventory)?.snapshotId, continueCoverage, refresh }), scope.owner).catch(error => {
+              const unavailable = unavailableFollowState(valid, errorMessage(error));
+              for (const [id, availability] of Object.entries(unavailable.availabilityByMetricId ?? {})) {
+                availability.followerCountStatus = "not_requested";
+                // A failed continuation supplies no replacement cursor evidence.
+                // Keep its explicit retry hint, while identities remain unavailable.
+                if (continueCoverage && previous?.availabilityByMetricId?.[id]?.canLoadMore === true)
+                  availability.canLoadMore = true;
+              }
+              return unavailable;
+            });
           }
           catch (error) { return unavailableFollowState(valid, errorMessage(error)); }
         });

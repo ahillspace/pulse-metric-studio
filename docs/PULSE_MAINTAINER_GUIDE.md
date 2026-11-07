@@ -364,8 +364,14 @@ Relationship reads share pending work per owned metric, including overlapping ex
 The retained inventory view shares one lazily acquired subscription discovery page across expansions and selections.
 The app requests 100 records per page; this preference is not a documented Tableau maximum.
 Incomplete or unqualified site coverage falls back to requested metrics without automatically scanning the entire site.
-Each follow-state API request uses at most 20 subscription calls, including discovery and targeted pages.
+Each follow-detail request reads fresh follower counts once, after any refresh invalidation, and returns them with the relationships.
+A fresh count of zero settles a metric as not followed, and a count equal to the distinct followers already found settles it as complete; neither sends a subscription read.
+Counts never settle a metric that a mutation touched after the count was read, and personal-only scope still never reports group absence.
+Metrics without a usable count fall back to targeted subscription reads.
+The shared `PULSE_FOLLOW_DETAIL_BATCH_LIMIT` sets the client detail batch, and the server derives its per-request subscription budget from it: one discovery page plus two pages per metric in a full batch.
+Targeted reads run with a small fixed concurrency, breadth first, so a full batch of single-page metrics completes in one request and a budget stop is spread evenly.
 Larger interface demands use bounded batches and aggregate continuation from the currently demanded metrics rather than the last batch.
+A metric stopped by the request budget keeps **Load more followers** and says so in its row tooltip.
 Per-metric continuation ends when its scan completes, reaches a terminal limit, leaves the demand, or is superseded.
 A failed continuation request retains explicit retry for previously resumable metrics without treating their relationship details as confirmed.
 Explicit continuation retains progress and limits site scanning to 20 pages and 2,000 records per view.
@@ -377,7 +383,13 @@ Absent site records remain unknown until site-negative coverage is qualified aga
 The default backend keeps site-negative qualification disabled.
 Personal-only queries cannot establish group or all-follower absence.
 Unchanged metric IDs and group reuse existing evidence; cached group identities support local reprojection.
-Detail acquisition does not repeat batched summary counts or replace valid counts with missing fields.
+Detail acquisition does not send a separate summary-count request or replace valid counts with missing fields.
+Follower-count requests send at most 100 metric IDs each; this is a local request-size bound, not a Tableau limit.
+A 400 or 414 response splits the batch in half and retries both halves, with a fixed number of extra sends per batch, so one rejected ID does not cost its neighbours their counts.
+Authentication failures from count reads stop the request instead of becoming unavailable counts.
+Row labels read **Not followed**, **You follow**, **Group follows**, or **You + group**, followed by the follower count when known.
+Rows that are still loading read **Loading followers...**, rows that cannot be confirmed read **Followers unavailable**, and rows a budget stopped read **More followers to load**.
+Diagnostics appear in the row tooltip rather than in the label.
 Unrecoverable authentication errors stop subscription acquisition and retain the API's authentication response instead of becoming partial coverage.
 Manual inventory refresh supersedes earlier relationship evidence; subscription reconciliation requests evidence dispatched after the relevant mutation.
 Late results cannot replace newer relationship evidence in the display, retained inventory, or pending inventory enrichment.

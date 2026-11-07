@@ -1,4 +1,4 @@
-import type { TableauSession } from '@pulse-metric-studio/core';
+import { TableauError, type TableauSession } from '@pulse-metric-studio/core';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { afterEach,test } from 'node:test';
@@ -6,6 +6,8 @@ import {
 batchCreateGroupSubscriptions,
 batchCreateUserSubscriptions,
 batchGetFollowerCounts,
+FOLLOWER_COUNT_BATCH_LIMIT,
+FOLLOWER_COUNT_SPLIT_SENDS_PER_BATCH,
 forkMetricToTimeframe,
 getOrCreateDimensionalMetric,
 getPulseDefinition,
@@ -218,7 +220,7 @@ test('follower-count normalization supports both provider record aliases', () =>
   assert.throws(() => normalizeFollowerCountEnvelope({}), /Unsupported Pulse follower-count response shape/);
 });
 
-test('follower counts batch every metric ID beyond the provider limit', async () => {
+test('follower counts batch every metric ID beyond the local URL bound', async () => {
   const requestBatches: string[][] = [];
   globalThis.fetch = async (input, init) => {
     assert.equal(init?.method ?? 'GET', 'GET');
@@ -231,9 +233,69 @@ test('follower counts batch every metric ID beyond the provider limit', async ()
   };
   const metricIds = Array.from({ length: 405 }, (_, index) => `metric-${index}`);
   const result = await batchGetFollowerCounts(session, metricIds);
-  assert.deepEqual(requestBatches.map((batch) => batch.length), [200, 200, 5]);
+  assert.equal(FOLLOWER_COUNT_BATCH_LIMIT, 100);
+  assert.deepEqual(requestBatches.map((batch) => batch.length), [100, 100, 100, 100, 5]);
   assert.equal(Object.keys(result.countsByMetricId).length, 405);
   assert.deepEqual(result.errorsByMetricId, {});
+});
+
+function rejectingFollowerCounts(rejected: Set<string>, sends: string[][]) {
+  globalThis.fetch = async (input) => {
+    const metricIds = new URL(String(input)).searchParams.get('metric_ids')!.split(',');
+    sends.push(metricIds);
+    if (metricIds.some((metricId) => rejected.has(metricId))) {
+      return Response.json({ error: { code: 'invalid_metric_id', message: 'Invalid metric' } }, { status: 400 });
+    }
+    return Response.json({ follower_counts: metricIds.map((metricId) => ({ metric_id: metricId, follower_count: 2 })) });
+  };
+}
+
+test('a rejected follower-count batch is split so only the rejected metric lacks a count', async () => {
+  const sends: string[][] = [];
+  rejectingFollowerCounts(new Set(['metric-37']), sends);
+  const metricIds = Array.from({ length: 100 }, (_, index) => `metric-${index}`);
+  const result = await batchGetFollowerCounts(session, metricIds);
+  assert.deepEqual(Object.keys(result.errorsByMetricId), ['metric-37']);
+  assert.equal(result.errorsByMetricId['metric-37']?.status, 400);
+  assert.equal(Object.keys(result.countsByMetricId).length, 99);
+  assert.equal(result.countsByMetricId['metric-36'], 2);
+  assert.ok(sends.length <= 1 + FOLLOWER_COUNT_SPLIT_SENDS_PER_BATCH, `split sends stay bounded, got ${sends.length}`);
+  assert.ok(sends.every((batch) => batch.length <= FOLLOWER_COUNT_BATCH_LIMIT));
+});
+
+test('follower-count splitting stops at its send budget and marks only unresolved metrics', async () => {
+  const sends: string[][] = [];
+  const metricIds = Array.from({ length: 100 }, (_, index) => `metric-${index}`);
+  const rejected = ['metric-0', 'metric-30', 'metric-60', 'metric-90'];
+  rejectingFollowerCounts(new Set(rejected), sends);
+  const result = await batchGetFollowerCounts(session, metricIds);
+  assert.equal(sends.length, 1 + FOLLOWER_COUNT_SPLIT_SENDS_PER_BATCH);
+  for (const metricId of metricIds) {
+    assert.ok(Object.hasOwn(result.countsByMetricId, metricId) !== Object.hasOwn(result.errorsByMetricId, metricId), metricId);
+  }
+  for (const metricId of rejected) assert.ok(result.errorsByMetricId[metricId], `${metricId} stays without a count`);
+  assert.ok(Object.keys(result.countsByMetricId).length >= 45, 'accepted halves keep their counts when the budget runs out');
+  assert.ok(Object.keys(result.errorsByMetricId).length < 60, 'only the still-rejected groups lack counts');
+});
+
+test('follower-count failures other than a rejected multi-metric batch are not split', async () => {
+  for (const status of [403, 404, 500]) {
+    let sends = 0;
+    globalThis.fetch = async () => { sends++; return Response.json({ error: 'no' }, { status }); };
+    const result = await batchGetFollowerCounts(session, ['metric-a', 'metric-b']);
+    assert.equal(sends, 1, `status ${status} is reported for the batch without extra sends`);
+    assert.deepEqual(Object.keys(result.errorsByMetricId).sort(), ['metric-a', 'metric-b']);
+  }
+  let sends = 0;
+  globalThis.fetch = async () => { sends++; return Response.json({ error: 'no' }, { status: 400 }); };
+  const single = await batchGetFollowerCounts(session, ['metric-only']);
+  assert.equal(sends, 1, 'a single rejected metric is final');
+  assert.equal(single.errorsByMetricId['metric-only']?.status, 400);
+});
+
+test('follower-count authentication failures still stop the read', async () => {
+  globalThis.fetch = async () => Response.json({ error: 'expired' }, { status: 401 });
+  await assert.rejects(batchGetFollowerCounts(session, ['metric-a', 'metric-b']), (error: unknown) => error instanceof TableauError && error.kind === 'auth');
 });
 
 test('VDS distinct query uses a bounded grouped one-dimension query by raw field name', async () => {

@@ -7,6 +7,7 @@ import { clearSession, setSession, type TableauSession } from '@pulse-metric-stu
 import { cachedDefinitionInventory, clearInventoryCache, getExistingMetrics } from './inventory.js';
 import type { InventoryDependencies } from './registry-dependencies.js';
 import { getFollowState } from './subscriptions.js';
+import { FOLLOWER_COUNT_BATCH_LIMIT } from '../pulse/pulse-client.js';
 import { loadPulseInventory } from './inventory-snapshots.js';
 import { PulseDeletionService } from './deletion.js';
 
@@ -73,7 +74,7 @@ for (const flag of [undefined, 'false']) {
   });
 }
 
-test('20 definitions and 200 complete metrics need 22 initial count-summary requests', async () => {
+test('20 definitions and 200 complete metrics need one definition read, 20 list reads, and batched count-summary reads', async () => {
   const counts = { definitions: 0, lists: 0, exact: 0, identities: 0, membership: 0, counts: 0 };
   globalThis.fetch = async (input) => {
     const url = new URL(String(input));
@@ -99,7 +100,7 @@ test('20 definitions and 200 complete metrics need 22 initial count-summary requ
   const ids = inventory.definitions.flatMap((definition) => definition.metrics.map((metric) => metric.metricId));
   assert.equal(ids.length, 200);
   await getFollowState(session, session.userId, [], ids, { detail: false });
-  assert.deepEqual(counts, { definitions: 1, lists: 20, exact: 0, identities: 0, membership: 0, counts: 1 });
+  assert.deepEqual(counts, { definitions: 1, lists: 20, exact: 0, identities: 0, membership: 0, counts: Math.ceil(200 / FOLLOWER_COUNT_BATCH_LIMIT) });
 });
 
 

@@ -105,13 +105,13 @@ test('real deletion uses displayed inventory, patches confirmed targets, and ref
     const detailPayload = { metricIds, snapshotId: displayed.snapshotId, selectedGroupId: 'group', detail: true };
     const followState = await server.inject({ method: 'POST', url: '/api/pulse/follow-state', payload: detailPayload });
     assert.equal(followState.statusCode, 200, followState.body);
-    assert.equal(fake.requests.length - beforeDetails, 5, 'one site discovery page plus four targeted reads while negative site coverage is unqualified');
-    assert.deepEqual(followState.json().followerCountsByMetricId, {}, 'details do not repeat the initial counts');
-    assert.ok(Object.values(followState.json().availabilityByMetricId).every(value => (value as { followerCountStatus: string }).followerCountStatus === 'not_requested'));
+    assert.equal(fake.requests.length - beforeDetails, 6, 'one fresh count batch, one site discovery page, and four targeted reads while negative site coverage is unqualified');
+    assert.deepEqual(followState.json().followerCountsByMetricId, Object.fromEntries(metricIds.map(id => [id, 3])), 'details carry the counts read in the same request');
+    assert.ok(Object.values(followState.json().availabilityByMetricId).every(value => (value as { followerCountStatus: string }).followerCountStatus === 'available'));
     const beforeRepeatedDetails = fake.requests.length;
     const repeated = await server.inject({ method: 'POST', url: '/api/pulse/follow-state', payload: detailPayload });
     assert.equal(repeated.statusCode, 200, repeated.body);
-    assert.equal(fake.requests.length, beforeRepeatedDetails, 'the owned view retains subscription coverage');
+    assert.deepEqual(fake.requests.slice(beforeRepeatedDetails).map(({ pathname }) => pathname), ['/api/-/pulse/subscriptions:batchGetMetricFollowerCounts'], 'the owned view retains subscription coverage; only the count is refreshed');
     const selection = { context, snapshotId: displayed.snapshotId, definitionIds: ['a'], metricIds: ['a-default', 'a-variant', 'b-variant'] };
     const beforePreview = fake.requests.length;
     const preview = await server.inject({ method: 'POST', url: '/api/pulse/registry/delete-preview', payload: selection });

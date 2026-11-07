@@ -88,9 +88,14 @@ Compare warm-context calls separately from source or catalog misses, transport r
 | Delete reviewed targets with healthy responses | One DELETE per reviewed destination |
 | Expand metrics with retained relationship coverage | 0 repeated detail or summary-count calls |
 
-The first detail demand uses one shared discovery page and bounded targeted fallback when site coverage is incomplete or unqualified.
-A demand cannot exceed 20 subscription calls; explicit continuation retains progress and respects site bounds of 20 pages and 2,000 records.
+Each detail request reads follower counts once, in batches of up to 100 metrics.
+A count of zero, or a count equal to the followers already found, settles that metric without a subscription read.
+Metrics without a usable count use one shared discovery page and bounded targeted fallback when site coverage is incomplete or unqualified.
+The client sends detail requests of up to 100 metrics, and each request may send one discovery page plus two subscription pages per metric in a full batch.
+Targeted reads run five at a time per request, breadth first, so a request that reaches its budget stops evenly across its metrics.
+Explicit continuation retains progress and respects per-target bounds of 20 pages and 2,000 records.
 These bounds are app preferences, not Tableau service limits.
+A follower-count request that Tableau rejects with 400 or 414 is split in half and retried, with a fixed number of extra sends per batch.
 Cold or expired source facts and catalog metadata add required acquisition calls without changing the warm budgets.
 Explicit retries reacquire failed source facts without retaining transient failures for the successful-fact cache lifetime.
 Fresh successful sources keep their original acquisition times and avoid repeated reads during that recovery.
@@ -167,6 +172,8 @@ The diagnostics also record these measurement facts:
   Manager get-or-create confirmation does not poll metric visibility.
 - Dimension context events identify cache hits and misses; operation labels distinguish source, catalog, and filter-validation calls.
 - Subscription events identify pagination without recording follower identities or response bodies.
+- `tableau.follower_counts` events record the batch size, HTTP status, provider error code, and split depth of each follower-count request.
+  They never record metric IDs, names, sites, or URLs.
 - Throttle events record Retry-After, shared cooldown, actual waits, and rejections before a request is sent.
 
 Record actual counts and diagnostics alongside these expected budgets.

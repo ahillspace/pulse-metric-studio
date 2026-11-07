@@ -16,7 +16,7 @@ import {
   targetLabelKey,
   type FollowTargetChoice,
 } from './follow-target-actions.js';
-import { followStateLabel, mergeFollowStates, metricIsFollowed, unavailableFollowState } from './follow-state.js';
+import { followStateLabel, followStateTitle, mergeFollowStates, metricIsFollowed, unavailableFollowState } from './follow-state.js';
 import {
   canonicalPlanPreview,
   dimensionClauseSummary,
@@ -333,7 +333,34 @@ test('follow-state labels preserve relationships when counts are unavailable', (
         followerCountStatus: 'unavailable', diagnostics: [],
       },
     },
-  }, 'm-1'), 'You follow - follower count unavailable');
+  }, 'm-1'), 'You follow');
+});
+
+test('follow labels use plain row wording and move diagnostics to the title', () => {
+  type State = Parameters<typeof followStateLabel>[0] & object;
+  const state = (availability: NonNullable<State['availabilityByMetricId']>[string], extra: Partial<State> = {}): State => ({
+    userFollowsByMetricId: {}, groupFollowsByMetricId: {}, followerCountsByMetricId: { m: 3 }, errors: [],
+    availabilityByMetricId: { m: availability }, ...extra,
+  });
+  const complete = { status: 'available' as const, relationshipStatus: 'available' as const, followerCountStatus: 'available' as const, diagnostics: [] };
+  assert.equal(followStateLabel(state(complete, { followerCountsByMetricId: { m: 0 } }), 'm'), 'Not followed (0)');
+  assert.equal(followStateLabel(state(complete, { userFollowsByMetricId: { m: true } }), 'm'), 'You follow (3)');
+  assert.equal(followStateLabel(state(complete, { groupFollowsByMetricId: { m: true } }), 'm'), 'Group follows (3)');
+  assert.equal(followStateLabel(state(complete, { userFollowsByMetricId: { m: true }, groupFollowsByMetricId: { m: true } }), 'm'), 'You + group (3)');
+  assert.equal(followStateLabel(state({ ...complete, status: 'partial', relationshipStatus: 'not_requested' }), 'm'), 'Loading followers...');
+  assert.equal(followStateLabel(null, 'm'), 'Loading followers...');
+  const failed = state({ status: 'unavailable', relationshipStatus: 'unavailable', followerCountStatus: 'unavailable', diagnostics: [{ message: 'Service unavailable.' }] }, { followerCountsByMetricId: {} });
+  assert.equal(followStateLabel(failed, 'm'), 'Followers unavailable');
+  assert.equal(followStateTitle(failed, 'm'), 'Service unavailable. Follower count unavailable.');
+  const more = state({ status: 'partial', relationshipStatus: 'partial', followerCountStatus: 'available', canLoadMore: true, diagnostics: [{ message: 'More followers to load. Select Load more followers to continue.' }] });
+  assert.equal(followStateLabel(more, 'm'), 'More followers to load (3)');
+  const positiveMore = { ...more, userFollowsByMetricId: { m: true } };
+  assert.equal(followStateLabel(positiveMore, 'm'), 'You follow (3)');
+  assert.match(followStateTitle(positiveMore, 'm') ?? '', /Load more followers/);
+  assert.equal(followStateTitle(state(complete), 'm'), undefined);
+  for (const label of [failed, more, positiveMore].map(value => followStateLabel(value, 'm'))) {
+    assert.doesNotMatch(label, /state|partial| - /i);
+  }
 });
 
 test('follow target contracts preserve exact pairs and isolate failed operations for retry', () => {
@@ -475,7 +502,7 @@ test('partial follower details retain confirmed rows and add a diagnostic withou
 
   assert.deepEqual(items.map((item) => ({ text: item.text, error: item.error })), [
     { text: 'User - Confirmed user', error: false },
-    { text: 'Follower details are partial - Group name lookup failed', error: true },
+    { text: 'Some follower details could not be loaded: Group name lookup failed', error: true },
   ]);
   const joined = items.map((item) => item.text).join(' ');
   assert.doesNotMatch(joined, /No followers yet/);

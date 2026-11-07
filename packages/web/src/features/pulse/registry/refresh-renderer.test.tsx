@@ -43,7 +43,7 @@ test("Manager shows continuation only while the unresolved metric is expanded", 
   followState.coverage = { status: "partial", canLoadMore: true };
   useRegistry.setState({ inventory: inventory(), followState, loading: false, followLoading: false });
   const renderer = await fixture.mount();
-  const loadMore = () => renderer.root.findAll(node => node.type === "button" && node.children.includes("Load more follow details"));
+  const loadMore = () => renderer.root.findAll(node => node.type === "button" && node.children.includes("Load more followers"));
   assert.equal(loadMore().length, 0);
   act(() => renderer.root.findAll(node => node.type === "button" && node.children.includes("Expand all"))[0].props.onClick());
   assert.equal(loadMore().length, 1);
@@ -69,7 +69,7 @@ test("same-view removal clears active follow continuation without inspecting add
   await useRegistry.getState().load();
   const renderer = await fixture.mount(true);
   await act(async () => { renderer.root.findAll(node => node.type === "button" && node.children.includes("Expand all"))[0].props.onClick(); });
-  const loadMore = () => renderer.root.findAll(node => node.type === "button" && node.children.includes("Load more follow details"));
+  const loadMore = () => renderer.root.findAll(node => node.type === "button" && node.children.includes("Load more followers"));
   assert.equal(loadMore().length, 1);
   const replacement = { ...source.definitions[0].metrics[0], metricId: "new", name: "New variant" };
   const changed = applyInventoryPatch(source, {
@@ -107,7 +107,7 @@ test("Manager retains explicit continuation retry after an IPC failure until a c
   await useRegistry.getState().load();
   const renderer = await fixture.mount(true);
   await act(async () => { renderer.root.findAll(node => node.type === "button" && node.children.includes("Expand all"))[0].props.onClick(); });
-  const loadMore = () => renderer.root.findAll(node => node.type === "button" && node.children.includes("Load more follow details"));
+  const loadMore = () => renderer.root.findAll(node => node.type === "button" && node.children.includes("Load more followers"));
   assert.equal(loadMore().length, 1);
   await act(async () => { await loadMore()[0].props.onClick(); });
   assert.equal(details, 2, "a failed continuation does not automatically retry");

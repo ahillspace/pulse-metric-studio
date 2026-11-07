@@ -57,11 +57,13 @@ export type TableauTelemetryEvent =
   | { event: 'tableau.get_or_create'; metricId: string | null; isMetricCreated: boolean; }
   | { event: 'tableau.inventory' | 'tableau.inventory_listing'; metricCount: number; specificationCount: number; metricSpecificationCount?: number; usableSpecificationCount?: number; isDefaultCount: number; getMetricCount?: number; definitionId?: string; }
   | { event: 'tableau.subscriptions_page'; metricId: string; page: number; recordCount: number; hasNextPage: boolean; }
+  // One line per follower-count send. splitDepth is 0 for an original batch and grows as a rejected batch is halved.
+  | { event: 'tableau.follower_counts'; batchSize: number; status: number | null; providerCode?: string; splitDepth: number; }
   | { event: 'tableau.dimension_context'; cacheHit: boolean; };
 
 /** The single serialization boundary never spreads arbitrary caller data into logs. */
 export function logTableauEvent(event: TableauTelemetryEvent): void {
-  if (!new Set(['tableau.attempt', 'tableau.gate_wait', 'tableau.gate_rejected', 'tableau.get_or_create', 'tableau.inventory', 'tableau.inventory_listing', 'tableau.subscriptions_page', 'tableau.dimension_context']).has(event.event)) return;
+  if (!new Set(['tableau.attempt', 'tableau.gate_wait', 'tableau.gate_rejected', 'tableau.get_or_create', 'tableau.inventory', 'tableau.inventory_listing', 'tableau.subscriptions_page', 'tableau.follower_counts', 'tableau.dimension_context']).has(event.event)) return;
   const current = context.getStore();
   const record: Record<string, unknown> = { event: event.event };
   if (current?.reqId && /^[a-zA-Z0-9_-]{1,128}$/.test(current.reqId)) record.reqId = current.reqId;
@@ -69,7 +71,7 @@ export function logTableauEvent(event: TableauTelemetryEvent): void {
   if (current?.appMethod) record.appMethod = safeMethod(current.appMethod);
   if (current?.appPath) record.appPath = safeTableauAppPath(current.appPath);
   if (current?.operation && operations.has(current.operation)) record.operation = current.operation;
-  const numbers = ['attempt', 'startedAt', 'headersMs', 'durationMs', 'retryAfterMs', 'throttleHoldMs', 'holdMs', 'waitedMs', 'remainingMs', 'metricCount', 'specificationCount', 'metricSpecificationCount', 'usableSpecificationCount', 'isDefaultCount', 'getMetricCount', 'page', 'recordCount'] as const;
+  const numbers = ['attempt', 'startedAt', 'headersMs', 'durationMs', 'retryAfterMs', 'throttleHoldMs', 'holdMs', 'waitedMs', 'remainingMs', 'metricCount', 'specificationCount', 'metricSpecificationCount', 'usableSpecificationCount', 'isDefaultCount', 'getMetricCount', 'page', 'recordCount', 'batchSize', 'splitDepth'] as const;
   const input = event as unknown as Record<string, unknown>;
   for (const key of numbers) if (typeof input[key] === 'number' && Number.isFinite(input[key]) && input[key] >= 0) record[key] = Math.round(input[key]);
   for (const key of ['isMetricCreated', 'hasNextPage', 'cacheHit', 'sent']) if (typeof input[key] === 'boolean') record[key] = input[key];
@@ -78,6 +80,8 @@ export function logTableauEvent(event: TableauTelemetryEvent): void {
   if ('method' in input) record.method = safeMethod(input.method);
   if ('path' in input) record.path = safeTableauPath(String(input.path));
   if ('status' in input) record.status = typeof input.status === 'number' && Number.isInteger(input.status) && input.status >= 100 && input.status <= 599 ? input.status : null;
+  // Provider codes are short machine tokens; anything else could reflect provider text, so it is dropped.
+  if (event.event === 'tableau.follower_counts' && typeof event.providerCode === 'string' && /^[a-z0-9_.:-]{1,100}$/i.test(event.providerCode)) record.providerCode = event.providerCode;
   if (input.reason === 'capacity_timeout' || input.reason === 'throttle_deadline') record.reason = input.reason;
   if (event.event === 'tableau.attempt') {
     record.sent = true;
