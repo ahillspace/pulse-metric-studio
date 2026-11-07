@@ -45,26 +45,40 @@ export interface TableauMutationJob {
   completed(count: number): void;
 }
 
-const jobs = new AsyncLocalStorage<TableauMutationJob>();
+/** Writes sent since the last pause, in one pacing sequence. */
+interface PacingSequence { sinceLastPause: number }
 
-/** Runs `work` as a mutation job; every Tableau request it makes belongs to the job. */
+interface RunningJob { readonly job: TableauMutationJob; readonly pacing: PacingSequence }
+
+const jobs = new AsyncLocalStorage<RunningJob>();
+
+/**
+ * Runs `work` as a mutation job; every Tableau request it makes belongs to the job.
+ * All of the job's writes share one pacing sequence, so a job that moves from one
+ * kind of write to another (creates, then follows) still pauses after every block.
+ */
 export function runTableauMutationJob<T>(job: TableauMutationJob, work: () => Promise<T>): Promise<T> {
-  return jobs.run(job, work);
+  return jobs.run({ job, pacing: { sinceLastPause: 0 } }, work);
 }
 
 export function currentTableauMutationJob(): TableauMutationJob | undefined {
-  return jobs.getStore();
+  return jobs.getStore()?.job;
 }
 
 /** Progress reports for the current job; outside a job they do nothing. */
 export const tableauMutationProgress = {
-  total(count: number): void { jobs.getStore()?.total(count); },
-  completed(count = 1): void { if (count > 0) jobs.getStore()?.completed(count); },
+  total(count: number): void { jobs.getStore()?.job.total(count); },
+  completed(count = 1): void { if (count > 0) jobs.getStore()?.job.completed(count); },
 };
+
+/** The current job's pacing sequence, or `own` for writes sent outside a job. */
+function pacingSequence(own: () => PacingSequence): PacingSequence {
+  return jobs.getStore()?.pacing ?? own();
+}
 
 /** Waits `ms`, or less when the current job stops first. */
 function pause(ms: number): Promise<void> {
-  const signal = jobs.getStore()?.signal;
+  const signal = jobs.getStore()?.job.signal;
   if (signal?.aborted) return Promise.resolve();
   return new Promise<void>((resolve) => {
     const finish = () => {
@@ -80,33 +94,41 @@ function pause(ms: number): Promise<void> {
 /**
  * Runs `worker` over `items` in blocks of {@link TABLEAU_MUTATION_BLOCK_SIZE},
  * waiting for every write in a block and then pausing before the next block.
- * Results keep input order. A stopped job skips the pause, so its workers can
- * report their remaining items as unsent at once.
+ * Inside a job, a block that follows earlier writes of the job also waits for
+ * the pause first. Results keep input order. A stopped job skips the pause, so
+ * its workers can report their remaining items as unsent at once.
  */
 export async function runPacedMutationBlocks<T, R>(
   items: readonly T[],
   worker: (item: T, index: number) => Promise<R>,
 ): Promise<R[]> {
+  const sequence = pacingSequence(() => ({ sinceLastPause: 0 }));
   const results: R[] = [];
   for (let offset = 0; offset < items.length; offset += TABLEAU_MUTATION_BLOCK_SIZE) {
-    if (offset > 0) await pause(TABLEAU_MUTATION_BLOCK_PAUSE_MS);
-    results.push(...await Promise.all(
-      items.slice(offset, offset + TABLEAU_MUTATION_BLOCK_SIZE).map((item, index) => worker(item, offset + index)),
-    ));
+    const block = items.slice(offset, offset + TABLEAU_MUTATION_BLOCK_SIZE);
+    if (sequence.sinceLastPause > 0) await pause(TABLEAU_MUTATION_BLOCK_PAUSE_MS);
+    sequence.sinceLastPause = block.length;
+    results.push(...await Promise.all(block.map((item, index) => worker(item, offset + index))));
   }
   return results;
 }
 
 /**
  * Paces writes that must be sent one at a time: after every
- * {@link TABLEAU_MUTATION_BLOCK_SIZE} sends, the next send waits for the pause.
+ * {@link TABLEAU_MUTATION_BLOCK_SIZE} writes, the next one waits for the pause.
+ * Inside a job every pacer continues the job's one sequence; outside a job each
+ * pacer keeps its own.
  */
 export class TableauMutationPacer {
-  private sent = 0;
+  private own: PacingSequence | undefined;
 
   async send<T>(write: () => Promise<T>): Promise<T> {
-    if (this.sent > 0 && this.sent % TABLEAU_MUTATION_BLOCK_SIZE === 0) await pause(TABLEAU_MUTATION_BLOCK_PAUSE_MS);
-    this.sent++;
+    const sequence = pacingSequence(() => this.own ??= { sinceLastPause: 0 });
+    if (sequence.sinceLastPause >= TABLEAU_MUTATION_BLOCK_SIZE) {
+      await pause(TABLEAU_MUTATION_BLOCK_PAUSE_MS);
+      sequence.sinceLastPause = 0;
+    }
+    sequence.sinceLastPause++;
     return write();
   }
 }

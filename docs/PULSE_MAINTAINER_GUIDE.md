@@ -228,6 +228,7 @@ Status polling stops when no work, trailing observation, or cooldown remains.
 The interface does not start a new mutation during known cooldown; the backend has no cooldown refusal.
 Bulk deletes, variant creation, follows, unfollows, publication, publication undo, and publication group deletion run as mutation jobs ([`mutation-pacing.ts`](../packages/core/src/tableau/mutation-pacing.ts), [`mutation-jobs.ts`](../packages/pulse/src/http/mutation-jobs.ts)).
 Jobs send writes in blocks of five, wait for each block, and pause 250 milliseconds before the next.
+Every write in one job continues the same pacing sequence, so a publication that moves from creates to follows still pauses after each block of five.
 Inside a job, the wait for permission to send has no deadline and a 429 is resent until Tableau accepts or rejects the write.
 Each dispatched attempt keeps its own response deadline, so a stalled write still becomes an unknown outcome.
 The only overall limit is a two-hour anomaly guard, which stops the job exactly as Cancel would.
@@ -377,7 +378,10 @@ Incomplete or unqualified site coverage falls back to requested metrics without 
 Each follow-detail request reads fresh follower counts once, after any refresh invalidation, and returns them with the relationships.
 A fresh count of zero settles a metric as not followed, and a count equal to the distinct followers already found settles it as complete; neither sends a subscription read.
 Counts never settle a metric that a mutation touched after the count was read, and personal-only scope still never reports group absence.
+A fresh count is newer than retained coverage: complete coverage, or complete site discovery, that disagrees with it is read again instead of being reported.
+A metric that a mutation touches while its request is running reports that followers changed while loading, with Load more, instead of evidence chosen before the write.
 Metrics without a usable count fall back to targeted subscription reads.
+A detail response without a usable count keeps a count the interface already holds, and its tooltip still explains why the fresh count failed.
 The shared `PULSE_FOLLOW_DETAIL_BATCH_LIMIT` sets the client detail batch, and the server derives its per-request subscription budget from it: one discovery page plus two pages per metric in a full batch.
 Targeted reads run with a small fixed concurrency, breadth first, so a full batch of single-page metrics completes in one request and a budget stop is spread evenly.
 Larger interface demands use bounded batches and aggregate continuation from the currently demanded metrics rather than the last batch.

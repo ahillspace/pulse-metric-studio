@@ -76,7 +76,8 @@ function provider(options: { partial?: boolean; deleteResponse?: (pathname: stri
       const metricId = url.searchParams.get('metric_id');
       if (metricId) assert.ok(/^[ab]-/.test(metricId), 'targeted subscriptions only enrich the selected datasource');
       assert.equal(url.searchParams.get('page_size'), '100');
-      return Response.json({ subscriptions: [] });
+      // Each metric's followers agree with the count of 3 that the count batch reports.
+      return Response.json({ subscriptions: metricId ? ['one', 'two', 'three'].map(user => ({ metric_id: metricId, follower: { user_id: `${metricId}-${user}` } })) : [] });
     }
     assert.fail(`Unexpected provider request ${url}`);
   };

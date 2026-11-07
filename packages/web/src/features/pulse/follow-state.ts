@@ -41,15 +41,25 @@ export function replaceFollowMetrics(previous: FollowState | null, replacement: 
   return mergeFollowStates([retained, replacement]);
 }
 
-/** Detail-only reads never erase independently acquired summary counts. */
+/**
+ * Detail reads replace identities, but a detail without a fresh count never erases a count already held.
+ * Counts a mutation made stale are removed before details are applied, so a count still in `previous` is
+ * current. The replacement's diagnostics are kept, so a failed count read is still explained.
+ */
 export function replaceFollowDetails(previous: FollowState | null, replacement: FollowState, metricIds: string[]): FollowState {
   const result = replaceFollowMetrics(previous, replacement, metricIds);
   if (!previous) return result;
   for (const id of metricIds) {
-    if (replacement.availabilityByMetricId?.[id]?.followerCountStatus !== 'not_requested') continue;
-    if (Object.hasOwn(previous.followerCountsByMetricId, id)) result.followerCountsByMetricId[id] = previous.followerCountsByMetricId[id]!;
     const availability = result.availabilityByMetricId?.[id];
-    if (availability) result.availabilityByMetricId![id] = { ...availability, followerCountStatus: previous.availabilityByMetricId?.[id]?.followerCountStatus ?? 'not_requested' };
+    if (!availability || availability.followerCountStatus === 'available') continue;
+    const before = previous.availabilityByMetricId?.[id]?.followerCountStatus;
+    const held = Object.hasOwn(previous.followerCountsByMetricId, id) && before !== 'unavailable';
+    if (held) result.followerCountsByMetricId[id] = previous.followerCountsByMetricId[id]!;
+    const followerCountStatus = held ? 'available' : availability.followerCountStatus === 'not_requested' ? before ?? 'not_requested' : availability.followerCountStatus;
+    const relationship = availability.relationshipStatus ?? availability.status;
+    const status = relationship === 'available' && followerCountStatus === 'available' ? 'available'
+      : relationship !== 'unavailable' || followerCountStatus === 'available' ? 'partial' : 'unavailable';
+    result.availabilityByMetricId![id] = { ...availability, followerCountStatus, status };
   }
   return result;
 }

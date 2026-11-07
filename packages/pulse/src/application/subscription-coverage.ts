@@ -41,6 +41,7 @@ export function invalidateSubscriptionCoverage(session: TableauSession, metricId
   }
 }
 const MORE_FOLLOWERS = 'More followers to load. Select Load more followers to continue.';
+const CHANGED_WHILE_LOADING = 'Followers changed while loading. Select Load more followers to read them again.';
 const identityCount = (records: SubscriptionRecord[]) => new Set(records.map(record => `${record.follower.type}\u0000${record.follower.id}`)).size;
 
 /**
@@ -116,11 +117,14 @@ export async function subscriptionCoverage(session: TableauSession, metricIds: s
   const settled = new Set<string>();
   // The target each metric uses in this request; a concurrent mutation may drop it from the view meanwhile.
   const chosen = new Map<string, TargetCoverage>();
+  // The invalidation epoch each metric's evidence was chosen under; a later mutation makes that evidence stale.
+  const chosenAt = new Map<string, number>();
+  const choose = (metricId: string, target: TargetCoverage) => { chosen.set(metricId, target); chosenAt.set(metricId, epochOf(metricId)); };
   const settle = (metricId: string, records: SubscriptionRecord[]) => {
     const previous = view!.targeted.get(metricId);
     if (previous) previous.version++; // reads still in flight cannot overwrite the newer evidence
     const target = { ...fresh(), records, complete: true, demanded: true };
-    view!.targeted.set(metricId, target); chosen.set(metricId, target);
+    view!.targeted.set(metricId, target); choose(metricId, target);
     settled.add(metricId);
   };
   const settleByCount = (metricId: string, target: TargetCoverage) => {
@@ -131,7 +135,17 @@ export async function subscriptionCoverage(session: TableauSession, metricIds: s
     settle(metricId, found);
     return true;
   };
-  for (const metricId of metricIds) if (freshCount(metricId) === 0) settle(metricId, []);
+  // A fresh count is newer than retained coverage. Complete coverage that disagrees with it is stale and is
+  // read again; a zero settles at once. Coverage acquired in this request is never second-guessed.
+  for (const metricId of metricIds) {
+    const count = freshCount(metricId);
+    if (count === 0) { settle(metricId, []); continue; }
+    const retained = view.targeted.get(metricId);
+    if (count !== undefined && retained?.complete && identityCount(retained.records) !== count) {
+      retained.version++;
+      view.targeted.delete(metricId);
+    }
+  }
   if (!view.discovered && metricIds.some(id => !settled.has(id))) {
     if (!view.discovery) view.discovery = page(view.site).finally(() => { view!.discovered = true; view!.discovery = undefined; });
     await view.discovery;
@@ -140,13 +154,16 @@ export async function subscriptionCoverage(session: TableauSession, metricIds: s
     const previous = view.site.pages; await page(view.site); if (view.site.error || previous === view.site.pages) break;
   }
   const qualified = (view.scope === 'site' && dependencies.siteNegativeCoverageQualified === true) || (view.scope === 'user' && options.personalOnly === true);
-  const siteCovered = (metricId: string) => !settled.has(metricId) && qualified && view!.site.complete && view!.siteEligible.has(metricId) && !view!.invalidated.has(metricId);
+  // Site discovery lists every follower, so a fresh count that disagrees with it means it is stale. Personal
+  // discovery lists only the user's own follows, so the count says nothing about it.
+  const siteAgrees = (metricId: string) => { const count = freshCount(metricId); return view!.scope !== 'site' || count === undefined || identityCount(positives(metricId)) === count; };
+  const siteCovered = (metricId: string) => !settled.has(metricId) && qualified && view!.site.complete && view!.siteEligible.has(metricId) && !view!.invalidated.has(metricId) && siteAgrees(metricId);
   let round: Array<{ metricId: string; target: TargetCoverage }> = [];
   for (const metricId of metricIds) {
     if (settled.has(metricId) || siteCovered(metricId)) continue;
     let target = view.targeted.get(metricId);
     if (!target) { target = fresh(); view.targeted.set(metricId, target); }
-    chosen.set(metricId, target);
+    choose(metricId, target);
     if (settleByCount(metricId, target)) continue;
     if (!target.complete && ((!target.demanded && !target.error) || target.pending || options.continueCoverage)) {
       target.demanded = true; round.push({ metricId, target });
@@ -166,7 +183,11 @@ export async function subscriptionCoverage(session: TableauSession, metricIds: s
     if (siteCovered(metricId)) {
       entries.push({ metricId, subscriptions: view.site.records.filter(record => record.metricId === metricId), complete: true, canLoadMore: false }); continue;
     }
-    const target = chosen.get(metricId)!;
+    // A mutation touched this metric after its evidence was chosen, so that evidence cannot be reported.
+    const target = chosen.get(metricId);
+    if (!target || chosenAt.get(metricId) !== epochOf(metricId)) {
+      entries.push({ metricId, subscriptions: null, complete: false, canLoadMore: true, diagnostic: { message: CHANGED_WHILE_LOADING } }); continue;
+    }
     const records = target.complete ? target.records : [...positives(metricId), ...target.records].slice(0, 2000);
     const hasEvidence = target.complete || records.length > 0;
     const canLoadMore = !target.complete && !target.terminal && target.pages < 20 && target.scanned < 2000;

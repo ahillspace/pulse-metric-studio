@@ -4,7 +4,7 @@ import type { PulseFollowState } from "@pulse-metric-studio/shared";
 import { createRegistryController } from "./controller";
 import { registryApi, type RegistryApi } from "../api/registry";
 import { deferred, draft, inventory, session } from "../testing/fixtures";
-import { followStateLabel, selectFollowMetrics } from "../follow-state";
+import { followStateLabel, followStateTitle, selectFollowMetrics } from "../follow-state";
 
 function state(ids: string[], detail: boolean, count = 5, followed = true): PulseFollowState {
   return {
@@ -354,4 +354,45 @@ test("only an explicit follower refresh asks the backend to reacquire retained c
   await store.getState().loadMoreFollowState(["metric"]);
   await store.getState().refreshFollowState(["metric"]);
   assert.deepEqual(detailRequests.map(request => [request.refresh, request.continueCoverage]), [[false, false], [false, true], [true, false]]);
+});
+
+test("a detail read whose count failed keeps the count already held and explains the failure", async () => {
+  const store = fixture({
+    followState: async (ids, detail = true) => {
+      if (!detail) return state(ids, false, 7);
+      const result = state(ids, true);
+      for (const id of ids) {
+        delete result.followerCountsByMetricId[id];
+        result.availabilityByMetricId[id] = { ...result.availabilityByMetricId[id]!, status: "partial", followerCountStatus: "unavailable", diagnostics: [{ message: "Tableau rejected the follower count request." }] };
+      }
+      return result;
+    },
+  });
+  await store.getState().activateContext(draft().context, "A", session);
+  assert.equal(store.getState().followState?.followerCountsByMetricId.metric, 7);
+  await store.getState().ensureFollowState(["metric"]);
+  const followState = store.getState().followState;
+  assert.equal(followStateLabel(followState, "metric"), "You follow (7)");
+  assert.equal(followState?.availabilityByMetricId?.metric.followerCountStatus, "available");
+  assert.equal(followState?.availabilityByMetricId?.metric.status, "available");
+  assert.equal(followStateTitle(followState, "metric"), "Tableau rejected the follower count request.");
+});
+
+test("a detail read whose count failed reports the count unavailable when none was held", async () => {
+  const store = fixture({
+    followState: async (ids, detail = true) => {
+      const result = state(ids, detail);
+      for (const id of ids) {
+        delete result.followerCountsByMetricId[id];
+        result.availabilityByMetricId[id] = { ...result.availabilityByMetricId[id]!, status: "partial", followerCountStatus: "unavailable", diagnostics: [] };
+      }
+      return result;
+    },
+  });
+  await store.getState().activateContext(draft().context, "A", session);
+  await store.getState().ensureFollowState(["metric"]);
+  const followState = store.getState().followState;
+  assert.equal(followStateLabel(followState, "metric"), "You follow");
+  assert.equal(followState?.availabilityByMetricId?.metric.followerCountStatus, "unavailable");
+  assert.equal(followStateTitle(followState, "metric"), "Follower count unavailable.");
 });

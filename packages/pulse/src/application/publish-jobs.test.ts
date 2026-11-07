@@ -98,6 +98,25 @@ test('publication creates are paced in blocks, and the digest group joins the sa
   } finally { await run.app.close(); }
 });
 
+test('the first self-follow after five creates waits for the block pause', async () => {
+  const creates: number[] = [];
+  let followAt = 0;
+  globalThis.fetch = async (input, init) => {
+    if (isCreate(input, init)) { creates.push(Date.now()); return created(`definition-${creates.length}`); }
+    assert.ok(isSubscribe(input), `Unexpected request ${String(input)}`);
+    followAt ||= Date.now();
+    return confirmed(init);
+  };
+  const run = await fixture('self', 5);
+  try {
+    const response = await finish(run.app, await run.publish());
+    assert.equal(response.statusCode, 200, response.body);
+    assert.deepEqual(response.json().follow.subscriptions.map((row: { status: string }) => row.status), Array(5).fill('created'));
+    assert.ok(creates[4]! - creates[0]! < TABLEAU_MUTATION_BLOCK_PAUSE_MS, 'The first block goes out without a pause.');
+    assert.ok(followAt - creates[4]! >= TABLEAU_MUTATION_BLOCK_PAUSE_MS - 10, 'The first follow is the sixth write of the job, so it waits for the block pause.');
+  } finally { await run.app.close(); }
+});
+
 test('a publication Tableau limits answers as a publish job whose total counts creates and follows', async () => {
   let creates = 0;
   let follows = 0;

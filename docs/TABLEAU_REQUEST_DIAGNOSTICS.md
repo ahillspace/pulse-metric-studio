@@ -93,6 +93,7 @@ Compare warm-context calls separately from source or catalog misses, transport r
 
 Each detail request reads follower counts once, in batches of up to 100 metrics.
 A count of zero, or a count equal to the followers already found, settles that metric without a subscription read.
+Retained coverage that disagrees with a fresh count is read again.
 Metrics without a usable count use one shared discovery page and bounded targeted fallback when site coverage is incomplete or unqualified.
 The client sends detail requests of up to 100 metrics, and each request may send one discovery page plus two subscription pages per metric in a full batch.
 Targeted reads run five at a time per request, breadth first, so a request that reaches its budget stops evenly across its metrics.

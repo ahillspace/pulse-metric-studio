@@ -421,6 +421,60 @@ test('a count read while a mutation touches the metric cannot settle it afterwar
   assert.equal(result.userFollowsByMetricId.a, true);
 });
 
+test('a positive count after a zero reads followers again instead of keeping the zero as absence', async () => {
+  const session = fixture(); let count = 0; const reads: string[] = [];
+  const dependencies: SubscriptionDependencies = { ...isolated,
+    followerCounts: async () => ({ countsByMetricId: { a: count }, errorsByMetricId: {} }),
+    listSubscriptionPage: async (_session, input) => { reads.push(input.metricId ?? 'site'); return { subscriptions: input.metricId ? [{ metricId: 'a', follower: { id: 'user', type: 'USER' } }] : [], nextPageToken: null }; },
+  };
+  const first = await getFollowState(session, 'user', [], ['a'], { detail: true }, dependencies);
+  assert.equal(first.userFollowsByMetricId.a, false);
+  assert.deepEqual(reads, []);
+  count = 1;
+  const after = await getFollowState(session, 'user', [], ['a'], { detail: true }, dependencies);
+  assert.deepEqual(reads, ['site', 'a'], 'the retained zero is stale, so the metric is read');
+  assert.equal(after.userFollowsByMetricId.a, true);
+  assert.equal(after.availabilityByMetricId.a?.relationshipStatus, 'available');
+});
+
+test('qualified site absence that a fresh count contradicts is read again', async () => {
+  const session = fixture(); let count: number | undefined; const reads: string[] = [];
+  const dependencies: SubscriptionDependencies = { ...isolated, siteNegativeCoverageQualified: true,
+    followerCounts: async (_session, metricIds) => count === undefined ? isolated.followerCounts(_session, metricIds) : { countsByMetricId: { a: count }, errorsByMetricId: {} },
+    listSubscriptionPage: async (_session, input) => { reads.push(input.metricId ?? 'site'); return { subscriptions: input.metricId ? [{ metricId: 'a', follower: { id: 'user', type: 'USER' } }] : [], nextPageToken: null }; },
+  };
+  const first = await getFollowState(session, 'user', [], ['a'], { detail: true }, dependencies);
+  assert.equal(first.userFollowsByMetricId.a, false, 'complete qualified discovery establishes absence');
+  count = 1;
+  const after = await getFollowState(session, 'user', [], ['a'], { detail: true }, dependencies);
+  assert.deepEqual(reads, ['site', 'a']);
+  assert.equal(after.userFollowsByMetricId.a, true);
+});
+
+test('a mutation after a zero settles one metric, while another is still loading, never reports confirmed absence', async () => {
+  const session = fixture(); let release!: () => void, reading!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { reading = resolve; });
+  const dependencies: SubscriptionDependencies = { ...isolated,
+    followerCounts: async () => ({ countsByMetricId: { a: 0 }, errorsByMetricId: {} }),
+    listSubscriptionPage: async (_session, input) => {
+      if (!input.metricId) { reading(); await held; }
+      return { subscriptions: [], nextPageToken: null };
+    },
+  };
+  const pending = getFollowState(session, 'user', [], ['a', 'b'], { detail: true }, dependencies);
+  await started;
+  invalidateSubscriptionCoverage(session, ['a']);
+  release();
+  const result = await pending;
+  assert.equal(result.userFollowsByMetricId.a, undefined, 'the zero read before the mutation is not reported');
+  assert.equal(result.groupFollowsByMetricId.a, undefined);
+  assert.equal(result.availabilityByMetricId.a?.relationshipStatus, 'unavailable');
+  assert.equal(result.availabilityByMetricId.a?.canLoadMore, true);
+  assert.match(result.availabilityByMetricId.a?.diagnostics.map(d => d.message).join(' ') ?? '', /changed while loading/);
+  assert.equal(result.availabilityByMetricId.b?.relationshipStatus, 'available', 'the untouched metric still completes');
+});
+
 test('a request for an unavailable inventory snapshot sends no count read', async () => {
   let counts = 0;
   const dependencies: SubscriptionDependencies = { ...isolated, followerCounts: async (session, ids) => { counts++; return isolated.followerCounts(session, ids); } };
